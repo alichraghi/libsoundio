@@ -9,6 +9,8 @@ pub fn build(b: *std.build.Builder) void {
 
     const main_tests = b.addTestExe("test", "src/main.zig");
     link(main_tests);
+    main_tests.main_pkg_path = "src";
+    main_tests.linkLibC();
     main_tests.setBuildMode(mode);
     main_tests.install();
 
@@ -17,5 +19,8 @@ pub fn build(b: *std.build.Builder) void {
 }
 
 fn link(step: *std.build.LibExeObjStep) void {
-    step.linkSystemLibrary("asound");
+    step.addLibraryPath("pulseaudio/build/src/pulse");
+    step.linkSystemLibraryName("pulse");
 }
+
+fn buildPulseAudio() void {}

@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug",
+            "program": "${workspaceFolder}/zig-out/bin/test",
+            // "arguments": [],
+            "preLaunchTask": "Build"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug C",
+            "program": "${workspaceFolder}/build/sio_list_devices",
+            "args": [
+                "--backend",
+                "pulseaudio",
+                "--watch"
+            ],
+            "preLaunchTask": "Build C"
+        }
+    ]
+}

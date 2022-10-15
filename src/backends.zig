@@ -1,5 +1,5 @@
-pub const alsa = @import("backends/alsa.zig");
+pub const pulseaudio = @import("backends/pulseaudio.zig");
 
 pub const Backend = enum {
-    alsa,
+    pulseaudio,
 };
