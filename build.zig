@@ -1,16 +1,18 @@
 const std = @import("std");
 
-pub fn build(b: *std.build.Builder) void {
-    const mode = b.standardReleaseOptions();
-    // const lib = b.addStaticLibrary("libsoundio", "src/main.zig");
-    // lib.setBuildMode(mode);
-    // link(lib);
-    // lib.install();
+pub const pkg = std.build.Pkg{
+    .name = "soundio",
+    .source = .{ .path = "src/main.zig" },
+};
 
-    const main_tests = b.addTestExe("test", "src/main.zig");
+pub fn build(b: *std.build.Builder) void {
+    const target = b.standardTargetOptions(.{});
+    const mode = b.standardReleaseOptions();
+
+    const main_tests = b.addTestExe("test", "test/main.zig");
     link(main_tests);
-    main_tests.main_pkg_path = "src";
-    main_tests.linkLibC();
+    main_tests.addPackage(pkg);
+    main_tests.setTarget(target);
     main_tests.setBuildMode(mode);
     main_tests.install();
 
@@ -19,7 +21,7 @@ pub fn build(b: *std.build.Builder) void {
 }
 
 fn link(step: *std.build.LibExeObjStep) void {
-    step.addLibraryPath("pulseaudio/build/src/pulse");
+    step.linkLibC();
     step.linkSystemLibraryName("pulse");
 }
 

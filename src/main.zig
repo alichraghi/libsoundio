@@ -1,80 +1,195 @@
+const builtin = @import("builtin");
 const std = @import("std");
-const backends = @import("backends.zig");
+const PulseAudio = @import("PulseAudio.zig");
+const channel_layout = @import("channel_layout.zig");
 
-const max_channels = 24;
+pub const max_channels = 24;
+pub const min_sample_rate = 8000;
+pub const max_sample_rate = 5644800;
+
+var connected = false;
+var current_backend: ?Backend = null;
+
+const SoundIO = @This();
+
+pub const Backend = enum {
+    pulseaudio,
+};
+const BackendData = union(Backend) {
+    pulseaudio: *PulseAudio,
+};
+
+data: BackendData,
+
+pub const AutoConnectError = PulseAudio.ConnectError; // || ...
+pub fn connect(allocator: std.mem.Allocator) AutoConnectError!SoundIO {
+    std.debug.assert(!connected);
+    errdefer connected = false;
+    connected = true;
+    if (current_backend) |b| {
+        return switch (b) {
+            .pulseaudio => .{ .data = .{
+                .pulseaudio = try PulseAudio.connect(allocator),
+            } },
+        };
+    }
+    switch (builtin.os.tag) {
+        .linux, .freebsd => {
+            current_backend = .pulseaudio;
+            return .{
+                .data = .{
+                    .pulseaudio = PulseAudio.connect(allocator) catch @panic("TODO: Alsa & Jack"),
+                },
+            };
+        },
+        .macos, .ios, .watchos, .tvos => @panic("TODO: CoreAudio"),
+        .windows => @panic("TODO: WASAPI"),
+        else => @compileError("Unsupported OS"),
+    }
+}
+
+pub fn ConnectError(comptime backend: Backend) type {
+    return switch (backend) {
+        .pulseaudio => PulseAudio.ConnectError,
+    };
+}
+fn connectBackend(comptime backend: Backend, allocator: std.mem.Allocator) ConnectError(Backend)!SoundIO {
+    return .{ .data = @unionInit(
+        Backend,
+        @tagName(backend),
+        switch (backend) {
+            .pulseaudio => try PulseAudio.connect(allocator),
+        },
+    ) };
+}
+
+pub fn deinit(self: SoundIO) void {
+    connected = false;
+    return switch (self.data) {
+        inline else => |tag| tag.deinit(),
+    };
+}
+
+pub fn flushEvents(self: SoundIO) !void {
+    return switch (self.data) {
+        inline else => |tag| try tag.flushEvents(),
+    };
+}
+
+pub fn waitEvents(self: SoundIO) !void {
+    return switch (self.data) {
+        inline else => |tag| try tag.waitEvents(),
+    };
+}
+
+pub fn devicesList(self: SoundIO, aim: Device.Aim) []const Device {
+    return switch (self.data) {
+        inline else => |tag| tag.devicesList(aim),
+    };
+}
+
+pub fn getDevice(self: SoundIO, aim: Device.Aim, index: ?usize) Device {
+    return switch (self.data) {
+        inline else => |tag| tag.getDevice(aim, index),
+    };
+}
+
+pub const OutstreamOptions = struct {
+    name: []const u8 = "SoundIoStream",
+    software_latency: f64 = 0.0,
+    sample_rate: u32 = 48000,
+    format: Format = if (builtin.cpu.arch.endian() == .Little) .float32le else .float32be,
+};
+pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions) !Outstream {
+    var outstream = Outstream{
+        .backend_data = undefined,
+        .name = options.name,
+        .layout = device.layout,
+        .software_latency = options.software_latency,
+        .sample_rate = device.nearestSampleRate(options.sample_rate),
+        .format = options.format,
+        .bytes_per_frame = options.format.bytesPerFrame(@intCast(u5, device.layout.channels.len)),
+        .bytes_per_sample = options.format.bytesPerSample(),
+    };
+    switch (self.data) {
+        inline else => |tag| try tag.openOutstream(&outstream, device),
+    }
+    return outstream;
+}
 
 pub const ChannelLayout = struct {
-    name: []const u8,
-    channel_count: usize,
-    channels: [max_channels]ChannelId,
+    pub const Array = std.BoundedArray(ChannelId, max_channels);
+
+    name: ?[]const u8,
+    channels: Array,
+
+    pub fn eql(a: ChannelLayout, b: ChannelLayout) bool {
+        if (a.channels.len != b.channels.len)
+            return false;
+        for (a.channels.constSlice()) |_, i|
+            if (a.channels.get(i) != b.channels.get(i))
+                return false;
+        return true;
+    }
 };
 
 pub const ChannelId = enum {
-    invalid,
-
-    /// more commonly supported ids.
-    front_left,
-    front_right,
     front_center,
-    lfe,
-    back_left,
-    back_right,
-    front_left_center,
+    front_right,
+    front_left,
     front_right_center,
-    back_center,
-    side_left,
-    side_right,
-    top_center,
-    top_front_left,
-    top_front_center,
-    top_front_right,
-    top_back_left,
-    top_backc_enter,
-    top_back_right,
-
-    /// less commonly supported ids.
-    back_left_center,
-    back_right_center,
-    front_left_wide,
+    front_left_center,
     front_right_wide,
-    front_left_high,
+    front_left_wide,
     front_center_high,
     front_right_high,
-    top_front_left_center,
+    front_left_high,
+    back_center,
+    back_right,
+    back_left,
+    side_right,
+    side_left,
+    top_center,
+    top_front_center,
+    top_front_right,
+    top_front_left,
+    top_back_center,
+    top_back_right,
+    top_back_left,
+    back_right_center,
+    back_left_center,
     top_front_right_center,
-    top_side_left,
+    top_front_left_center,
     top_side_right,
-    left_lfe,
+    top_side_left,
     right_lfe,
+    left_lfe,
+    lfe,
     lfe2,
     bottom_center,
     bottom_left_center,
     bottom_right_center,
-
-    /// Mid/side recording
+    // Mid/side recording
     msmid,
     msside,
-
-    /// first order ambisonic channels
+    // first order ambisonic channels
     ambisonic_w,
     ambisonic_x,
     ambisonic_y,
     ambisonic_z,
-
-    /// X-Y Recording
+    // X-Y Recording
     xyx,
     xyy,
-
-    /// other channel ids
-    headphones_left,
+    // other channel ids
     headphones_right,
+    headphones_left,
     click_track,
     foreign_language,
     hearing_impaired,
     narration,
     haptic,
     dialog_centric_mix,
-
+    // AUX
     aux,
     aux0,
     aux1,
@@ -95,94 +210,114 @@ pub const ChannelId = enum {
 };
 
 pub const Format = enum {
-    invalid,
-    /// Signed 8 bit
     s8,
-    /// Unsigned 8 bit
     u8,
-    /// Signed 16 bit Little Endian
     s16le,
-    /// Signed 16 bit Big Endian
     s16be,
-    /// Unsigned 16 bit Little Endian
     u16le,
-    /// Unsigned 16 bit Big Endian
     u16be,
-    /// Signed 24 bit Little Endian using low three bytes in 32-bit word
     s24le,
-    /// Signed 24 bit Big Endian using low three bytes in 32-bit word
     s24be,
-    /// Unsigned 24 bit Little Endian using low three bytes in 32-bit word
     u24le,
-    /// Unsigned 24 bit Big Endian using low three bytes in 32-bit word
     u24be,
-    /// Signed 32 bit Little Endian
     s32le,
-    /// Signed 32 bit Big Endian
     s32be,
-    /// Unsigned 32 bit Little Endian
     u32le,
-    /// Unsigned 32 bit Big Endian
     u32be,
-    /// Float 32 bit Little Endian, Range -1.0 to 1.0
+    // Range -1.0 to 1.0
     float32le,
-    /// Float 32 bit Big Endian, Range -1.0 to 1.0
     float32be,
-    /// Float 64 bit Little Endian, Range -1.0 to 1.0
     float64le,
-    /// Float 64 bit Big Endian, Range -1.0 to 1.0
     float64be,
+
+    pub fn bytesPerSample(self: Format) u5 {
+        return switch (self) {
+            .s8, .u8 => 1,
+            .s16le, .s16be, .u16le, .u16be => 2,
+            .s24le, .s24be, .u24le, .u24be, .s32le, .s32be, .u32le, .u32be, .float32le, .float32be => 4,
+            .float64le, .float64be => 8,
+        };
+    }
+
+    pub fn bytesPerFrame(self: Format, channel_count: u5) u8 {
+        return self.bytesPerSample() * channel_count;
+    }
 };
 
 pub const SampleRateRange = struct {
-    min: usize,
-    max: usize,
+    min: u32,
+    max: u32,
 };
 
 pub const Device = struct {
     pub const Aim = enum {
-        Output,
-        Input,
+        output,
+        input,
     };
 
-    id: []const u8,
-    name: []const u8,
+    id: [:0]const u8,
+    name: [:0]const u8,
     aim: Aim,
-    layouts: []const ChannelLayout,
-    current_layout: *const ChannelLayout,
-    formats: []const Format,
-    current_format: *const Format,
-    sample_rates: []const SampleRateRange,
-    current_sample_rate: *const SampleRateRange,
-    software_latency_min: f64,
-    software_latency_max: f64,
-    current_software_latency: f64,
     is_raw: bool,
+    layout: ChannelLayout,
+    formats: []const Format,
+    current_format: Format,
+    sample_rates: []const SampleRateRange,
+    current_sample_rate: u32,
+    software_latency_min: ?f64,
+    software_latency_max: ?f64,
+    current_software_latency: ?f64,
+
+    pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
+        switch (current_backend.?) {
+            .pulseaudio => PulseAudio.clearDevice(self, allocator),
+        }
+    }
+
+    pub fn nearestSampleRate(self: Device, sample_rate: u32) u32 {
+        var best_rate: u32 = 0;
+        var best_delta: u32 = 0;
+        for (self.sample_rates) |range| {
+            var candidate_rate = std.math.clamp(sample_rate, range.min, range.max);
+            if (candidate_rate == sample_rate)
+                return candidate_rate;
+
+            var delta = std.math.absCast(candidate_rate - sample_rate);
+            const best_rate_too_small = best_rate < sample_rate;
+            const candidate_rate_too_small = candidate_rate < sample_rate;
+            if (best_rate == 0 or
+                (best_rate_too_small and !candidate_rate_too_small) or
+                ((best_rate_too_small or !candidate_rate_too_small) and delta < best_delta))
+            {
+                best_rate = candidate_rate;
+                best_delta = delta;
+            }
+        }
+        return best_rate;
+    }
 };
 
 pub const DevicesInfo = struct {
-    input_devices: std.ArrayList(Device),
-    output_devices: std.ArrayList(Device),
+    outputs: std.ArrayListUnmanaged(Device),
+    inputs: std.ArrayListUnmanaged(Device),
     default_output_index: usize,
     default_input_index: usize,
 };
 
-test {
-    std.testing.refAllDeclsRecursive(@This());
-    var a = try backends.pulseaudio.connect(std.testing.allocator, .{});
-    while (true) {
-        switch ((a.flushWaitEvents(true) catch |err| {
-            std.debug.print("err: {s}!\n", .{@errorName(err)});
-            continue;
-        }) orelse continue) {
-            .devices_changed => std.debug.print("changed!\n", .{}),
-            // .shutdown => |err| std.debug.print("err: {s}!\n", .{@errorName(err)}),
-            // .shutdown => |err| {
-            //     std.debug.print("an error acurred ({s})!\n", .{@errorName(err)});
-            //     a.deinit();
-            //     break;
-            // },
-            // else => {},
-        }
-    }
-}
+pub const Outstream = struct {
+    const OutstreamBackendData = union {
+        pulseaudio: PulseAudio.OutstreamData,
+    };
+    backend_data: OutstreamBackendData,
+
+    name: []const u8,
+    layout: ChannelLayout,
+    software_latency: f64,
+    sample_rate: u32,
+    format: Format,
+    bytes_per_frame: u32,
+    bytes_per_sample: u32,
+
+    // TODO : detect backend is WASAPI or CoreAudio
+    pub fn volume() void {}
+};
