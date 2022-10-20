@@ -36,7 +36,7 @@ pub fn connect(allocator: std.mem.Allocator) AutoConnectError!SoundIO {
     switch (builtin.os.tag) {
         .linux, .freebsd => {
             current_backend = .pulseaudio;
-            return .{
+            return SoundIO{
                 .data = .{
                     .pulseaudio = PulseAudio.connect(allocator) catch @panic("TODO: Alsa & Jack"),
                 },
@@ -66,43 +66,49 @@ fn connectBackend(comptime backend: Backend, allocator: std.mem.Allocator) Conne
 pub fn deinit(self: SoundIO) void {
     connected = false;
     return switch (self.data) {
-        inline else => |tag| tag.deinit(),
+        .pulseaudio => |tag| tag.deinit(), // inline else
     };
 }
 
 pub fn flushEvents(self: SoundIO) !void {
     return switch (self.data) {
-        inline else => |tag| try tag.flushEvents(),
+        .pulseaudio => |tag| try tag.flushEvents(), // inline else
     };
 }
 
 pub fn waitEvents(self: SoundIO) !void {
     return switch (self.data) {
-        inline else => |tag| try tag.waitEvents(),
+        .pulseaudio => |tag| try tag.waitEvents(), // inline else
     };
 }
 
 pub fn devicesList(self: SoundIO, aim: Device.Aim) []const Device {
     return switch (self.data) {
-        inline else => |tag| tag.devicesList(aim),
+        .pulseaudio => |tag| tag.devicesList(aim), // inline else
     };
 }
 
 pub fn getDevice(self: SoundIO, aim: Device.Aim, index: ?usize) Device {
     return switch (self.data) {
-        inline else => |tag| tag.getDevice(aim, index),
+        .pulseaudio => |tag| tag.getDevice(aim, index), // inline else
     };
 }
 
 pub const OutstreamOptions = struct {
+    writeFn: WriteFn,
+    underflowFn: ?UnderflowFn = null,
     name: []const u8 = "SoundIoStream",
     software_latency: f64 = 0.0,
     sample_rate: u32 = 48000,
     format: Format = if (builtin.cpu.arch.endian() == .Little) .float32le else .float32be,
+    userdata: ?*anyopaque = null,
 };
 pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions) !Outstream {
     var outstream = Outstream{
         .backend_data = undefined,
+        .writeFn = options.writeFn,
+        .underflowFn = options.underflowFn,
+        .userdata = options.userdata,
         .name = options.name,
         .layout = device.layout,
         .software_latency = options.software_latency,
@@ -112,7 +118,7 @@ pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions)
         .bytes_per_sample = options.format.bytesPerSample(),
     };
     switch (self.data) {
-        inline else => |tag| try tag.openOutstream(&outstream, device),
+        .pulseaudio => |tag| try tag.openOutstream(&outstream, device), // inline else
     }
     return outstream;
 }
@@ -131,6 +137,11 @@ pub const ChannelLayout = struct {
                 return false;
         return true;
     }
+};
+
+pub const ChannelArea = struct {
+    ptr: [*]u8,
+    step: u32,
 };
 
 pub const ChannelId = enum {
@@ -262,7 +273,7 @@ pub const Device = struct {
     layout: ChannelLayout,
     formats: []const Format,
     current_format: Format,
-    sample_rates: []const SampleRateRange,
+    sample_rates: std.BoundedArray(SampleRateRange, 16),
     current_sample_rate: u32,
     software_latency_min: ?f64,
     software_latency_max: ?f64,
@@ -277,12 +288,12 @@ pub const Device = struct {
     pub fn nearestSampleRate(self: Device, sample_rate: u32) u32 {
         var best_rate: u32 = 0;
         var best_delta: u32 = 0;
-        for (self.sample_rates) |range| {
+        for (self.sample_rates.constSlice()) |range| {
             var candidate_rate = std.math.clamp(sample_rate, range.min, range.max);
             if (candidate_rate == sample_rate)
                 return candidate_rate;
 
-            var delta = std.math.absCast(candidate_rate - sample_rate);
+            var delta = std.math.absCast(@intCast(i32, candidate_rate) - @intCast(i32, sample_rate));
             const best_rate_too_small = best_rate < sample_rate;
             const candidate_rate_too_small = candidate_rate < sample_rate;
             if (best_rate == 0 or
@@ -304,12 +315,13 @@ pub const DevicesInfo = struct {
     default_input_index: usize,
 };
 
-pub const Outstream = struct {
-    const OutstreamBackendData = union {
-        pulseaudio: PulseAudio.OutstreamData,
-    };
-    backend_data: OutstreamBackendData,
+pub const WriteFn = fn (self: *Outstream, frame_count_min: usize, frame_count_max: usize) anyerror!void;
+pub const UnderflowFn = fn (self: *Outstream) anyerror!void;
 
+pub const Outstream = struct {
+    writeFn: WriteFn,
+    underflowFn: ?UnderflowFn,
+    userdata: ?*anyopaque,
     name: []const u8,
     layout: ChannelLayout,
     software_latency: f64,
@@ -317,6 +329,29 @@ pub const Outstream = struct {
     format: Format,
     bytes_per_frame: u32,
     bytes_per_sample: u32,
+
+    backend_data: OutstreamBackendData,
+    const OutstreamBackendData = union {
+        pulseaudio: PulseAudio.OutstreamData,
+    };
+
+    pub fn start(self: *Outstream) !void {
+        switch (current_backend.?) {
+            .pulseaudio => try PulseAudio.outstreamStart(self),
+        }
+    }
+
+    pub fn beginWrite(self: *Outstream, frame_count: *usize) error{StreamDisconnected}![]const ChannelArea {
+        switch (current_backend.?) {
+            .pulseaudio => return PulseAudio.outstreamBeginWrite(self, frame_count),
+        }
+    }
+
+    pub fn endWrite(self: *Outstream) error{StreamDisconnected}!void {
+        switch (current_backend.?) {
+            .pulseaudio => return PulseAudio.outstreamEndWrite(self),
+        }
+    }
 
     // TODO : detect backend is WASAPI or CoreAudio
     pub fn volume() void {}

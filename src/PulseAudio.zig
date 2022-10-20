@@ -7,7 +7,9 @@ const SampleRateRange = @import("main.zig").SampleRateRange;
 const Format = @import("main.zig").Format;
 const ChannelLayout = @import("main.zig").ChannelLayout;
 const ChannelId = @import("main.zig").ChannelId;
+const ChannelArea = @import("main.zig").ChannelArea;
 const Outstream = @import("main.zig").Outstream;
+const max_channels = @import("main.zig").max_channels;
 const min_sample_rate = @import("main.zig").min_sample_rate;
 const max_sample_rate = @import("main.zig").max_sample_rate;
 const builtin_channel_layouts = @import("channel_layout.zig").builtin_channel_layouts;
@@ -31,7 +33,6 @@ const DeviceQueryError = error{
     InvalidFormat,
     InvalidChannelPos,
 };
-
 const StreamReadyError = error{
     StreamDisconnected,
 };
@@ -157,11 +158,16 @@ pub const OutstreamData = struct {
     stream_ready: std.atomic.Atomic(bool),
     clear_buffer: std.atomic.Atomic(bool),
     stream_ready_err: ?StreamReadyError,
+    write_byte_count: usize,
+    write_ptr: ?[*]u8,
 };
-pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) !void {
-    if (outstream.layout.channels.len > c.PA_CHANNELS_MAX)
-        return error.IncompatibleBackend;
-
+pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) error{
+    OutOfMemory,
+    IncompatibleBackend,
+    StreamDisconnected,
+    OpeningDevice,
+    Interrupted,
+}!void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
@@ -172,6 +178,8 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) !
         .stream_ready = std.atomic.Atomic(bool).init(false),
         .clear_buffer = std.atomic.Atomic(bool).init(true),
         .stream_ready_err = null,
+        .write_byte_count = undefined,
+        .write_ptr = null,
     } };
     var ospa = &outstream.backend_data.pulseaudio;
 
@@ -216,9 +224,67 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) !
     try performOperation(self.main_loop, c.pa_stream_update_timing_info(ospa.stream, timingUpdateCallback, self));
 }
 
+pub fn outstreamStart(self: *Outstream) !void {
+    var ospa = &self.backend_data.pulseaudio;
+    c.pa_threaded_mainloop_lock(ospa.sipa.main_loop);
+    defer c.pa_threaded_mainloop_unlock(ospa.sipa.main_loop);
+    ospa.write_byte_count = c.pa_stream_writable_size(ospa.stream);
+    const frame_count = ospa.write_byte_count / self.bytes_per_frame;
+    try self.writeFn(self, 0, frame_count);
+    const op = c.pa_stream_cork(ospa.stream, 0, null, null) orelse return error.StreamDisconnected;
+    c.pa_operation_unref(op);
+    c.pa_stream_set_write_callback(ospa.stream, playbackStreamWriteCallback, self);
+    if (self.underflowFn) |_| {
+        c.pa_stream_set_underflow_callback(ospa.stream, playbackStreamUnderflowCallback, self);
+        c.pa_stream_set_overflow_callback(ospa.stream, playbackStreamUnderflowCallback, self);
+    }
+}
+
+pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) error{StreamDisconnected}![]const ChannelArea {
+    var ospa = &self.backend_data.pulseaudio;
+    var areas: [max_channels]ChannelArea = undefined;
+
+    ospa.write_byte_count = frame_count.* * self.bytes_per_frame;
+    if (c.pa_stream_begin_write(
+        ospa.stream,
+        @ptrCast(
+            [*c]?*anyopaque,
+            @alignCast(@alignOf([*c]?*anyopaque), &ospa.write_ptr),
+        ),
+        &ospa.write_byte_count,
+    ) != 0)
+        return error.StreamDisconnected;
+
+    for (self.layout.channels.constSlice()) |_, i| {
+        areas[i].ptr = ospa.write_ptr.? + self.bytes_per_sample * i;
+        areas[i].step = self.bytes_per_frame;
+    }
+
+    frame_count.* = ospa.write_byte_count / self.bytes_per_frame;
+    return areas[0..];
+}
+
+pub fn outstreamEndWrite(self: *Outstream) error{StreamDisconnected}!void {
+    var ospa = &self.backend_data.pulseaudio;
+    const seek_mode = c.PA_SEEK_RELATIVE; // : PA_SEEK_RELATIVE_ON_READ;
+    if (c.pa_stream_write(ospa.stream, &ospa.write_ptr.?[0], ospa.write_byte_count, null, 0, seek_mode) != 0)
+        return error.StreamDisconnected;
+}
+
 pub fn clearDevice(self: Device, allocator: std.mem.Allocator) void {
     allocator.free(self.id);
     allocator.free(self.name);
+}
+
+fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
+    var outstream = @ptrCast(*Outstream, @alignCast(@alignOf(*Outstream), userdata.?));
+    const frame_count = nbytes / outstream.bytes_per_frame;
+    outstream.writeFn(outstream, 0, frame_count) catch unreachable; // TODO
+}
+
+fn playbackStreamUnderflowCallback(_: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
+    var outstream = @ptrCast(*Outstream, @alignCast(@alignOf(*Outstream), userdata.?));
+    outstream.underflowFn.?(outstream) catch unreachable; // TODO
 }
 
 fn playbackStreamStateCallback(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
@@ -332,6 +398,10 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
     }
     if (self.device_query_err != null) return;
     if (info.*.name == null or info.*.description == null) self.device_query_err = error.OutOfMemory;
+    const g = &[_]SampleRateRange{.{
+        .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
+        .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
+    }};
     var device = Device{
         .id = self.allocator.dupeZ(u8, std.mem.span(info.*.name)) catch |err| {
             self.device_query_err = err;
@@ -352,10 +422,7 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
             self.device_query_err = err;
             return;
         },
-        .sample_rates = &[_]SampleRateRange{.{
-            .min = std.math.min(min_sample_rate, info.*.sample_spec.rate),
-            .max = std.math.max(max_sample_rate, info.*.sample_spec.rate),
-        }},
+        .sample_rates = std.BoundedArray(SampleRateRange, 16).fromSlice(g) catch unreachable,
         .current_sample_rate = info.*.sample_spec.rate,
         .current_software_latency = null,
         .software_latency_min = null,
@@ -376,6 +443,10 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
     }
     if (self.device_query_err != null) return;
     if (info.*.name == null or info.*.description == null) self.device_query_err = error.OutOfMemory;
+    const g = &[_]SampleRateRange{.{
+        .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
+        .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
+    }};
     var device = Device{
         .id = self.allocator.dupeZ(u8, std.mem.span(info.*.name)) catch |err| {
             self.device_query_err = err;
@@ -396,10 +467,7 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
             self.device_query_err = err;
             return;
         },
-        .sample_rates = &[_]SampleRateRange{.{
-            .min = std.math.min(min_sample_rate, info.*.sample_spec.rate),
-            .max = std.math.max(max_sample_rate, info.*.sample_spec.rate),
-        }},
+        .sample_rates = std.BoundedArray(SampleRateRange, 16).fromSlice(g) catch unreachable,
         .current_sample_rate = info.*.sample_spec.rate,
         .current_software_latency = null,
         .software_latency_min = null,

@@ -298,65 +298,65 @@ if(BUILD_EXAMPLE_PROGRAMS)
     install(TARGETS sio_record DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
-if(BUILD_TESTS)
-    add_executable(unit_tests "${libsoundio_SOURCE_DIR}/test/unit_tests.c" ${LIBSOUNDIO_SOURCES})
-    target_link_libraries(unit_tests LINK_PUBLIC ${LIBSOUNDIO_LIBS})
-    set_target_properties(unit_tests PROPERTIES
-        LINKER_LANGUAGE C
-        COMPILE_FLAGS ${TEST_CFLAGS}
-        LINK_FLAGS ${TEST_LDFLAGS}
-    )
-
-    add_executable(latency "${libsoundio_SOURCE_DIR}/test/latency.c" ${LIBSOUNDIO_SOURCES})
-    target_link_libraries(latency LINK_PUBLIC ${LIBSOUNDIO_LIBS} ${LIBM})
-    set_target_properties(latency PROPERTIES
-        LINKER_LANGUAGE C
-        COMPILE_FLAGS ${LIB_CFLAGS}
-    )
-
-    add_executable(underflow test/underflow.c)
-    set_target_properties(underflow PROPERTIES
-        LINKER_LANGUAGE C
-        COMPILE_FLAGS ${EXAMPLE_CFLAGS})
-    if(BUILD_DYNAMIC_LIBS)
-        target_link_libraries(underflow libsoundio_shared ${LIBM})
-    else()
-        target_link_libraries(underflow libsoundio_static ${LIBSOUNDIO_LIBS} ${LIBM})
-    endif()
-
-    add_executable(backend_disconnect_recover test/backend_disconnect_recover.c)
-    set_target_properties(backend_disconnect_recover PROPERTIES
-        LINKER_LANGUAGE C
-        COMPILE_FLAGS ${EXAMPLE_CFLAGS})
-    if(BUILD_DYNAMIC_LIBS)
-        target_link_libraries(backend_disconnect_recover libsoundio_shared)
-    else()
-        target_link_libraries(backend_disconnect_recover libsoundio_static ${LIBSOUNDIO_LIBS})
-    endif()
-
-    add_executable(overflow test/overflow.c)
-    set_target_properties(overflow PROPERTIES
-        LINKER_LANGUAGE C
-        COMPILE_FLAGS ${EXAMPLE_CFLAGS})
-    if(BUILD_DYNAMIC_LIBS)
-        target_link_libraries(overflow libsoundio_shared)
-    else()
-        target_link_libraries(overflow libsoundio_static ${LIBSOUNDIO_LIBS})
-    endif()
-
-
-
-    add_custom_target(coverage
-        DEPENDS unit_tests
-        WORKING_DIRECTORY ${libsoundio_BINARY_DIR}
-        COMMAND lcov --directory . --zerocounters --rc lcov_branch_coverage=1
-        COMMAND ./unit_tests
-        COMMAND lcov --directory . --capture --output-file coverage.info --rc lcov_branch_coverage=1
-        COMMAND lcov --remove coverage.info '/usr/*' --output-file coverage.info.cleaned --rc lcov_branch_coverage=1
-        COMMAND genhtml -o coverage coverage.info.cleaned --rc lcov_branch_coverage=1
-        COMMAND rm coverage.info coverage.info.cleaned
-    )
-endif()
+# if(BUILD_TESTS)
+#     add_executable(unit_tests "${libsoundio_SOURCE_DIR}/test/unit_tests.c" ${LIBSOUNDIO_SOURCES})
+#     target_link_libraries(unit_tests LINK_PUBLIC ${LIBSOUNDIO_LIBS})
+#     set_target_properties(unit_tests PROPERTIES
+#         LINKER_LANGUAGE C
+#         COMPILE_FLAGS ${TEST_CFLAGS}
+#         LINK_FLAGS ${TEST_LDFLAGS}
+#     )
+# 
+#     add_executable(latency "${libsoundio_SOURCE_DIR}/test/latency.c" ${LIBSOUNDIO_SOURCES})
+#     target_link_libraries(latency LINK_PUBLIC ${LIBSOUNDIO_LIBS} ${LIBM})
+#     set_target_properties(latency PROPERTIES
+#         LINKER_LANGUAGE C
+#         COMPILE_FLAGS ${LIB_CFLAGS}
+#     )
+# 
+#     add_executable(underflow test/underflow.c)
+#     set_target_properties(underflow PROPERTIES
+#         LINKER_LANGUAGE C
+#         COMPILE_FLAGS ${EXAMPLE_CFLAGS})
+#     if(BUILD_DYNAMIC_LIBS)
+#         target_link_libraries(underflow libsoundio_shared ${LIBM})
+#     else()
+#         target_link_libraries(underflow libsoundio_static ${LIBSOUNDIO_LIBS} ${LIBM})
+#     endif()
+# 
+#     add_executable(backend_disconnect_recover test/backend_disconnect_recover.c)
+#     set_target_properties(backend_disconnect_recover PROPERTIES
+#         LINKER_LANGUAGE C
+#         COMPILE_FLAGS ${EXAMPLE_CFLAGS})
+#     if(BUILD_DYNAMIC_LIBS)
+#         target_link_libraries(backend_disconnect_recover libsoundio_shared)
+#     else()
+#         target_link_libraries(backend_disconnect_recover libsoundio_static ${LIBSOUNDIO_LIBS})
+#     endif()
+# 
+#     add_executable(overflow test/overflow.c)
+#     set_target_properties(overflow PROPERTIES
+#         LINKER_LANGUAGE C
+#         COMPILE_FLAGS ${EXAMPLE_CFLAGS})
+#     if(BUILD_DYNAMIC_LIBS)
+#         target_link_libraries(overflow libsoundio_shared)
+#     else()
+#         target_link_libraries(overflow libsoundio_static ${LIBSOUNDIO_LIBS})
+#     endif()
+# 
+# 
+# 
+#     add_custom_target(coverage
+#         DEPENDS unit_tests
+#         WORKING_DIRECTORY ${libsoundio_BINARY_DIR}
+#         COMMAND lcov --directory . --zerocounters --rc lcov_branch_coverage=1
+#         COMMAND ./unit_tests
+#         COMMAND lcov --directory . --capture --output-file coverage.info --rc lcov_branch_coverage=1
+#         COMMAND lcov --remove coverage.info '/usr/*' --output-file coverage.info.cleaned --rc lcov_branch_coverage=1
+#         COMMAND genhtml -o coverage coverage.info.cleaned --rc lcov_branch_coverage=1
+#         COMMAND rm coverage.info coverage.info.cleaned
+#     )
+# endif()
 
 
 add_custom_target(doc

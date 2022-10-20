@@ -13,11 +13,10 @@
             "type": "lldb",
             "request": "launch",
             "name": "Debug C",
-            "program": "${workspaceFolder}/build/sio_list_devices",
+            "program": "${workspaceFolder}/build/sio_sine",
             "args": [
                 "--backend",
                 "pulseaudio",
-                "--watch"
             ],
             "preLaunchTask": "Build C"
         }
