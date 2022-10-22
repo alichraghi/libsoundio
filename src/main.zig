@@ -82,6 +82,12 @@ pub fn waitEvents(self: SoundIO) !void {
     };
 }
 
+pub fn wakeUp(self: SoundIO) void {
+    return switch (self.data) {
+        .pulseaudio => |tag| tag.wakeUp(self),
+    };
+}
+
 pub fn devicesList(self: SoundIO, aim: Device.Aim) []const Device {
     return switch (self.data) {
         .pulseaudio => |tag| tag.devicesList(aim), // inline else
@@ -117,6 +123,7 @@ pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions)
         .bytes_per_frame = options.format.bytesPerFrame(@intCast(u5, device.layout.channels.len)),
         .bytes_per_sample = options.format.bytesPerSample(),
         .paused = false,
+        .volume = 1.0,
     };
     switch (self.data) {
         .pulseaudio => |tag| try tag.openOutstream(&outstream, device), // inline else
@@ -292,9 +299,9 @@ pub const Device = struct {
     current_software_latency: ?f64,
 
     pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
-        switch (current_backend.?) {
+        return switch (current_backend.?) {
             .pulseaudio => PulseAudio.deviceDeinit(self, allocator),
-        }
+        };
     }
 
     pub fn nearestSampleRate(self: Device, sample_rate: u32) u32 {
@@ -344,6 +351,7 @@ pub const Outstream = struct {
     bytes_per_frame: u32,
     bytes_per_sample: u32,
     paused: bool,
+    volume: f64,
 
     backend_data: OutstreamBackendData,
     const OutstreamBackendData = union {
@@ -351,57 +359,61 @@ pub const Outstream = struct {
     };
 
     pub fn deinit(self: *Outstream) void {
-        switch (current_backend.?) {
-            .pulseaudio => return PulseAudio.outstreamDeinit(self),
-        }
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamDeinit(self),
+        };
     }
 
     pub fn start(self: *Outstream) !void {
-        switch (current_backend.?) {
-            .pulseaudio => return PulseAudio.outstreamStart(self),
-        }
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamStart(self),
+        };
     }
 
     pub fn beginWrite(self: *Outstream, frame_count: *usize) error{StreamDisconnected}![]const ChannelArea {
-        switch (current_backend.?) {
-            .pulseaudio => return PulseAudio.outstreamBeginWrite(self, frame_count),
-        }
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamBeginWrite(self, frame_count),
+        };
     }
 
     pub fn endWrite(self: *Outstream) error{StreamDisconnected}!void {
-        switch (current_backend.?) {
-            .pulseaudio => return PulseAudio.outstreamEndWrite(self),
-        }
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamEndWrite(self),
+        };
     }
 
     pub fn clearBuffer(self: *Outstream) error{StreamDisconnected}!void {
-        switch (current_backend.?) {
-            .pulseaudio => return PulseAudio.outstreamClearBuffer(self),
-        }
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamClearBuffer(self),
+        };
     }
 
     pub fn getLatency(self: *Outstream) error{StreamDisconnected}!f64 {
-        switch (current_backend.?) {
-            .pulseaudio => return PulseAudio.outstreamGetLatency(self),
-        }
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamGetLatency(self),
+        };
     }
 
     pub fn pause(self: *Outstream) error{StreamDisconnected}!void {
-        switch (current_backend.?) {
+        return switch (current_backend.?) {
             .pulseaudio => {
                 try PulseAudio.outstreamPausePlay(self, true);
                 self.paused = true;
             },
-        }
+        };
     }
 
     pub fn play(self: *Outstream) error{StreamDisconnected}!void {
         if (!self.paused) return;
-        switch (current_backend.?) {
-            .pulseaudio => return PulseAudio.outstreamPausePlay(self, false),
-        }
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamPausePlay(self, false),
+        };
     }
 
-    // TODO : detect backend is WASAPI or CoreAudio
-    pub fn volume() void {}
+    pub fn setVolume(self: *Outstream, volume: f64) error{StreamDisconnected}!void {
+        std.debug.assert(volume <= 1.0);
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamSetVolume(self, volume),
+        };
+    }
 };

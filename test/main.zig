@@ -17,10 +17,11 @@ test "sine wave" {
     defer o.deinit();
     try o.start();
 
-    std.time.sleep(std.time.ns_per_ms * 200);
-    try o.pause();
-    std.time.sleep(std.time.ns_per_ms * 200);
-    try o.play();
+    var v: f64 = 1.0;
+    while (v > 0.3) : (v -= 0.001) {
+        try o.setVolume(v);
+        std.time.sleep(std.time.ns_per_ms * 5);
+    }
 }
 
 var seconds_offset: f32 = 0;

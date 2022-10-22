@@ -137,6 +137,12 @@ pub fn waitEvents(self: *PulseAudio) RefreshDevicesError!void {
     self.device_scan_queued = false;
 }
 
+pub fn wakeUp(self: *PulseAudio) void {
+    c.pa_threaded_mainloop_lock(self.main_loop);
+    defer c.pa_threaded_mainloop_unlock(self.main_loop);
+    c.pa_threaded_mainloop_signal(self.main_loop, 0);
+}
+
 pub fn getDevice(self: PulseAudio, aim: Device.Aim, index: ?usize) Device {
     return switch (aim) {
         .output => self.devices_info.outputs.items[index orelse self.devices_info.default_output_index],
@@ -226,16 +232,13 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) e
 
 pub fn outstreamDeinit(self: *Outstream) void {
     var ospa = &self.backend_data.pulseaudio;
-    defer self.* = undefined;
     c.pa_threaded_mainloop_lock(ospa.sipa.main_loop);
     defer c.pa_threaded_mainloop_unlock(ospa.sipa.main_loop);
-
     c.pa_stream_set_write_callback(ospa.stream, null, null);
     c.pa_stream_set_state_callback(ospa.stream, null, null);
     c.pa_stream_set_underflow_callback(ospa.stream, null, null);
     c.pa_stream_set_overflow_callback(ospa.stream, null, null);
     _ = c.pa_stream_disconnect(ospa.stream);
-
     c.pa_stream_unref(ospa.stream);
 }
 
@@ -309,6 +312,19 @@ pub fn outstreamGetLatency(self: *Outstream) error{StreamDisconnected}!f64 {
     if (c.pa_stream_get_latency(self.backend_data.pulseaudio.stream, &r_usec, &negative) != 0)
         return error.StreamDisconnected;
     return @intToFloat(f64, r_usec) / 1000000.0;
+}
+
+pub fn outstreamSetVolume(self: *Outstream, volume: f64) error{StreamDisconnected}!void {
+    var ospa = &self.backend_data.pulseaudio;
+    var v: c.pa_cvolume = undefined;
+    _ = c.pa_cvolume_init(&v);
+    v.channels = @intCast(u5, self.layout.channels.len);
+    const vol = @floatToInt(u32, @intToFloat(f64, c.PA_VOLUME_NORM) * volume);
+    for (self.layout.channels.constSlice()) |_, i|
+        v.values[i] = vol;
+    const op = c.pa_context_set_sink_input_volume(ospa.sipa.pulse_context, c.pa_stream_get_index(ospa.stream), &v, null, null) orelse
+        return error.StreamDisconnected;
+    c.pa_operation_unref(op);
 }
 
 pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
