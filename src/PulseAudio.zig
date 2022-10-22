@@ -116,9 +116,9 @@ pub fn deinit(self: *PulseAudio) void {
     c.pa_threaded_mainloop_free(self.main_loop);
     c.pa_proplist_free(self.props);
     for (self.devices_info.outputs.items) |device|
-        clearDevice(device, self.allocator);
+        deviceDeinit(device, self.allocator);
     for (self.devices_info.inputs.items) |device|
-        clearDevice(device, self.allocator);
+        deviceDeinit(device, self.allocator);
     self.devices_info.outputs.deinit(self.allocator);
     self.devices_info.inputs.deinit(self.allocator);
     self.allocator.destroy(self);
@@ -176,7 +176,7 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) e
         .stream = undefined,
         .buf_attr = undefined,
         .stream_ready = std.atomic.Atomic(bool).init(false),
-        .clear_buffer = std.atomic.Atomic(bool).init(true),
+        .clear_buffer = std.atomic.Atomic(bool).init(false),
         .stream_ready_err = null,
         .write_byte_count = undefined,
         .write_ptr = null,
@@ -224,13 +224,26 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) e
     try performOperation(self.main_loop, c.pa_stream_update_timing_info(ospa.stream, timingUpdateCallback, self));
 }
 
+pub fn outstreamDeinit(self: *Outstream) void {
+    var ospa = &self.backend_data.pulseaudio;
+    defer self.* = undefined;
+    c.pa_threaded_mainloop_lock(ospa.sipa.main_loop);
+    defer c.pa_threaded_mainloop_unlock(ospa.sipa.main_loop);
+
+    c.pa_stream_set_write_callback(ospa.stream, null, null);
+    c.pa_stream_set_state_callback(ospa.stream, null, null);
+    c.pa_stream_set_underflow_callback(ospa.stream, null, null);
+    c.pa_stream_set_overflow_callback(ospa.stream, null, null);
+    _ = c.pa_stream_disconnect(ospa.stream);
+
+    c.pa_stream_unref(ospa.stream);
+}
+
 pub fn outstreamStart(self: *Outstream) !void {
     var ospa = &self.backend_data.pulseaudio;
     c.pa_threaded_mainloop_lock(ospa.sipa.main_loop);
     defer c.pa_threaded_mainloop_unlock(ospa.sipa.main_loop);
     ospa.write_byte_count = c.pa_stream_writable_size(ospa.stream);
-    const frame_count = ospa.write_byte_count / self.bytes_per_frame;
-    try self.writeFn(self, 0, frame_count);
     const op = c.pa_stream_cork(ospa.stream, 0, null, null) orelse return error.StreamDisconnected;
     c.pa_operation_unref(op);
     c.pa_stream_set_write_callback(ospa.stream, playbackStreamWriteCallback, self);
@@ -261,17 +274,44 @@ pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) error{StreamDi
     }
 
     frame_count.* = ospa.write_byte_count / self.bytes_per_frame;
-    return areas[0..];
+    return areas[0..self.layout.channels.len];
 }
 
 pub fn outstreamEndWrite(self: *Outstream) error{StreamDisconnected}!void {
     var ospa = &self.backend_data.pulseaudio;
-    const seek_mode = c.PA_SEEK_RELATIVE; // : PA_SEEK_RELATIVE_ON_READ;
+    const seek_mode: c_uint = if (ospa.clear_buffer.loadUnchecked()) c.PA_SEEK_RELATIVE_ON_READ else c.PA_SEEK_RELATIVE;
     if (c.pa_stream_write(ospa.stream, &ospa.write_ptr.?[0], ospa.write_byte_count, null, 0, seek_mode) != 0)
         return error.StreamDisconnected;
 }
 
-pub fn clearDevice(self: Device, allocator: std.mem.Allocator) void {
+pub fn outstreamClearBuffer(self: *Outstream) void {
+    self.backend_data.pulseaudio.clear_buffer.storeUnchecked(true);
+}
+
+pub fn outstreamPausePlay(self: *Outstream, pause: bool) error{StreamDisconnected}!void {
+    var ospa = &self.backend_data.pulseaudio;
+
+    if (c.pa_threaded_mainloop_in_thread(ospa.sipa.main_loop) == 0)
+        c.pa_threaded_mainloop_lock(ospa.sipa.main_loop);
+    defer if (c.pa_threaded_mainloop_in_thread(ospa.sipa.main_loop) == 0)
+        c.pa_threaded_mainloop_unlock(ospa.sipa.main_loop);
+
+    if (pause != (c.pa_stream_is_corked(ospa.stream) != 0)) {
+        const op = c.pa_stream_cork(ospa.stream, if (pause) 1 else 0, null, null) orelse
+            return error.StreamDisconnected;
+        c.pa_operation_unref(op);
+    }
+}
+
+pub fn outstreamGetLatency(self: *Outstream) error{StreamDisconnected}!f64 {
+    var r_usec: c.pa_usec_t = 0;
+    var negative: c_int = 0;
+    if (c.pa_stream_get_latency(self.backend_data.pulseaudio.stream, &r_usec, &negative) != 0)
+        return error.StreamDisconnected;
+    return @intToFloat(f64, r_usec) / 1000000.0;
+}
+
+pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
     allocator.free(self.id);
     allocator.free(self.name);
 }

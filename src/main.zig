@@ -116,6 +116,7 @@ pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions)
         .format = options.format,
         .bytes_per_frame = options.format.bytesPerFrame(@intCast(u5, device.layout.channels.len)),
         .bytes_per_sample = options.format.bytesPerSample(),
+        .paused = false,
     };
     switch (self.data) {
         .pulseaudio => |tag| try tag.openOutstream(&outstream, device), // inline else
@@ -142,6 +143,17 @@ pub const ChannelLayout = struct {
 pub const ChannelArea = struct {
     ptr: [*]u8,
     step: u32,
+
+    pub fn write(self: ChannelArea, value: anytype, frame_index: usize) void {
+        @ptrCast(
+            *@TypeOf(value),
+            @alignCast(@alignOf(@TypeOf(value)), &self.ptr[self.step * frame_index]),
+        ).* = value;
+    }
+
+    pub fn read(self: ChannelArea, comptime T: type, frame_index: usize) T {
+        return @ptrCast(*T, @alignCast(@alignOf(T), &self.ptr[self.step * frame_index]));
+    }
 };
 
 pub const ChannelId = enum {
@@ -281,7 +293,7 @@ pub const Device = struct {
 
     pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
         switch (current_backend.?) {
-            .pulseaudio => PulseAudio.clearDevice(self, allocator),
+            .pulseaudio => PulseAudio.deviceDeinit(self, allocator),
         }
     }
 
@@ -315,8 +327,10 @@ pub const DevicesInfo = struct {
     default_input_index: usize,
 };
 
-pub const WriteFn = fn (self: *Outstream, frame_count_min: usize, frame_count_max: usize) anyerror!void;
-pub const UnderflowFn = fn (self: *Outstream) anyerror!void;
+// TODO: `*Outstream` instead `*anyopaque`
+// https://github.com/ziglang/zig/issues/12325
+pub const WriteFn = *const fn (self: *anyopaque, frame_count_min: usize, frame_count_max: usize) anyerror!void;
+pub const UnderflowFn = *const fn (self: *anyopaque) anyerror!void;
 
 pub const Outstream = struct {
     writeFn: WriteFn,
@@ -329,15 +343,22 @@ pub const Outstream = struct {
     format: Format,
     bytes_per_frame: u32,
     bytes_per_sample: u32,
+    paused: bool,
 
     backend_data: OutstreamBackendData,
     const OutstreamBackendData = union {
         pulseaudio: PulseAudio.OutstreamData,
     };
 
+    pub fn deinit(self: *Outstream) void {
+        switch (current_backend.?) {
+            .pulseaudio => return PulseAudio.outstreamDeinit(self),
+        }
+    }
+
     pub fn start(self: *Outstream) !void {
         switch (current_backend.?) {
-            .pulseaudio => try PulseAudio.outstreamStart(self),
+            .pulseaudio => return PulseAudio.outstreamStart(self),
         }
     }
 
@@ -350,6 +371,34 @@ pub const Outstream = struct {
     pub fn endWrite(self: *Outstream) error{StreamDisconnected}!void {
         switch (current_backend.?) {
             .pulseaudio => return PulseAudio.outstreamEndWrite(self),
+        }
+    }
+
+    pub fn clearBuffer(self: *Outstream) error{StreamDisconnected}!void {
+        switch (current_backend.?) {
+            .pulseaudio => return PulseAudio.outstreamClearBuffer(self),
+        }
+    }
+
+    pub fn getLatency(self: *Outstream) error{StreamDisconnected}!f64 {
+        switch (current_backend.?) {
+            .pulseaudio => return PulseAudio.outstreamGetLatency(self),
+        }
+    }
+
+    pub fn pause(self: *Outstream) error{StreamDisconnected}!void {
+        switch (current_backend.?) {
+            .pulseaudio => {
+                try PulseAudio.outstreamPausePlay(self, true);
+                self.paused = true;
+            },
+        }
+    }
+
+    pub fn play(self: *Outstream) error{StreamDisconnected}!void {
+        if (!self.paused) return;
+        switch (current_backend.?) {
+            .pulseaudio => return PulseAudio.outstreamPausePlay(self, false),
         }
     }
 
