@@ -1,7 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const PulseAudio = @import("PulseAudio.zig");
 const channel_layout = @import("channel_layout.zig");
+const PulseAudio = @import("PulseAudio.zig");
 
 pub const max_channels = 24;
 pub const min_sample_rate = 8000;
@@ -10,8 +10,6 @@ pub const max_sample_rate = 5644800;
 var connected = false;
 var current_backend: ?Backend = null;
 
-const SoundIO = @This();
-
 pub const Backend = enum {
     pulseaudio,
 };
@@ -19,10 +17,18 @@ const BackendData = union(Backend) {
     pulseaudio: *PulseAudio,
 };
 
+const SoundIO = @This();
+
 data: BackendData,
 
-pub const AutoConnectError = PulseAudio.ConnectError; // || ...
-pub fn connect(allocator: std.mem.Allocator) AutoConnectError!SoundIO {
+pub const ConnectError = error{
+    OutOfMemory,
+    Disconnected,
+    InitAudioBackend,
+};
+
+/// must be called in the main thread
+pub fn connect(allocator: std.mem.Allocator) ConnectError!SoundIO {
     std.debug.assert(!connected);
     errdefer connected = false;
     connected = true;
@@ -48,12 +54,7 @@ pub fn connect(allocator: std.mem.Allocator) AutoConnectError!SoundIO {
     }
 }
 
-pub fn ConnectError(comptime backend: Backend) type {
-    return switch (backend) {
-        .pulseaudio => PulseAudio.ConnectError,
-    };
-}
-fn connectBackend(comptime backend: Backend, allocator: std.mem.Allocator) ConnectError(Backend)!SoundIO {
+fn connectBackend(comptime backend: Backend, allocator: std.mem.Allocator) ConnectError!SoundIO {
     return .{ .data = @unionInit(
         Backend,
         @tagName(backend),
@@ -66,50 +67,67 @@ fn connectBackend(comptime backend: Backend, allocator: std.mem.Allocator) Conne
 pub fn deinit(self: SoundIO) void {
     connected = false;
     return switch (self.data) {
-        .pulseaudio => |tag| tag.deinit(), // inline else
+        inline else => |b| b.deinit(),
     };
 }
 
-pub fn flushEvents(self: SoundIO) !void {
+pub const FlushEventsError = error{
+    OutOfMemory,
+    Interrupted,
+    IncompatibleBackend,
+    InvalidFormat,
+    InvalidChannelPos,
+};
+
+pub fn flushEvents(self: SoundIO) FlushEventsError!void {
     return switch (self.data) {
-        .pulseaudio => |tag| try tag.flushEvents(), // inline else
+        inline else => |b| b.flushEvents(),
     };
 }
 
-pub fn waitEvents(self: SoundIO) !void {
+pub fn waitEvents(self: SoundIO) FlushEventsError!void {
     return switch (self.data) {
-        .pulseaudio => |tag| try tag.waitEvents(), // inline else
+        inline else => |b| b.waitEvents(),
     };
 }
 
 pub fn wakeUp(self: SoundIO) void {
     return switch (self.data) {
-        .pulseaudio => |tag| tag.wakeUp(self),
+        inline else => |b| b.wakeUp(self),
     };
 }
 
 pub fn devicesList(self: SoundIO, aim: Device.Aim) []const Device {
     return switch (self.data) {
-        .pulseaudio => |tag| tag.devicesList(aim), // inline else
+        inline else => |b| b.devicesList(aim),
     };
 }
 
 pub fn getDevice(self: SoundIO, aim: Device.Aim, index: ?usize) Device {
     return switch (self.data) {
-        .pulseaudio => |tag| tag.getDevice(aim, index), // inline else
+        inline else => |b| b.getDevice(aim, index),
     };
 }
 
 pub const OutstreamOptions = struct {
-    writeFn: WriteFn,
-    underflowFn: ?UnderflowFn = null,
+    writeFn: Outstream.WriteFn,
+    underflowFn: ?Outstream.UnderflowFn = null,
     name: []const u8 = "SoundIoStream",
     software_latency: f64 = 0.0,
     sample_rate: u32 = 48000,
     format: Format = if (builtin.cpu.arch.endian() == .Little) .float32le else .float32be,
     userdata: ?*anyopaque = null,
 };
-pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions) !Outstream {
+
+pub const CreateOutstreamError = error{
+    OutOfMemory,
+    Interrupted,
+    IncompatibleBackend,
+    StreamDisconnected,
+    OpeningDevice,
+};
+
+pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions) CreateOutstreamError!Outstream {
     var outstream = Outstream{
         .backend_data = undefined,
         .writeFn = options.writeFn,
@@ -123,10 +141,9 @@ pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions)
         .bytes_per_frame = options.format.bytesPerFrame(@intCast(u5, device.layout.channels.len)),
         .bytes_per_sample = options.format.bytesPerSample(),
         .paused = false,
-        .volume = 1.0,
     };
     switch (self.data) {
-        .pulseaudio => |tag| try tag.openOutstream(&outstream, device), // inline else
+        .pulseaudio => |tag| try tag.openOutstream(&outstream, device),
     }
     return outstream;
 }
@@ -334,12 +351,12 @@ pub const DevicesInfo = struct {
     default_input_index: usize,
 };
 
-// TODO: `*Outstream` instead `*anyopaque`
-// https://github.com/ziglang/zig/issues/12325
-pub const WriteFn = *const fn (self: *anyopaque, frame_count_min: usize, frame_count_max: usize) anyerror!void;
-pub const UnderflowFn = *const fn (self: *anyopaque) anyerror!void;
-
 pub const Outstream = struct {
+    // TODO: `*Outstream` instead `*anyopaque`
+    // https://github.com/ziglang/zig/issues/12325
+    pub const WriteFn = *const fn (self: *anyopaque, frame_count_min: usize, frame_count_max: usize) anyerror!void;
+    pub const UnderflowFn = *const fn (self: *anyopaque) anyerror!void;
+
     writeFn: WriteFn,
     underflowFn: ?UnderflowFn,
     userdata: ?*anyopaque,
@@ -351,12 +368,13 @@ pub const Outstream = struct {
     bytes_per_frame: u32,
     bytes_per_sample: u32,
     paused: bool,
-    volume: f64,
 
     backend_data: OutstreamBackendData,
     const OutstreamBackendData = union {
         pulseaudio: PulseAudio.OutstreamData,
     };
+
+    pub const StreamError = error{StreamDisconnected};
 
     pub fn deinit(self: *Outstream) void {
         return switch (current_backend.?) {
@@ -364,37 +382,37 @@ pub const Outstream = struct {
         };
     }
 
-    pub fn start(self: *Outstream) !void {
+    pub fn start(self: *Outstream) StreamError!void {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamStart(self),
         };
     }
 
-    pub fn beginWrite(self: *Outstream, frame_count: *usize) error{StreamDisconnected}![]const ChannelArea {
+    pub fn beginWrite(self: *Outstream, frame_count: *usize) StreamError![]const ChannelArea {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamBeginWrite(self, frame_count),
         };
     }
 
-    pub fn endWrite(self: *Outstream) error{StreamDisconnected}!void {
+    pub fn endWrite(self: *Outstream) StreamError!void {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamEndWrite(self),
         };
     }
 
-    pub fn clearBuffer(self: *Outstream) error{StreamDisconnected}!void {
+    pub fn clearBuffer(self: *Outstream) StreamError!void {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamClearBuffer(self),
         };
     }
 
-    pub fn getLatency(self: *Outstream) error{StreamDisconnected}!f64 {
+    pub fn getLatency(self: *Outstream) StreamError!f64 {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamGetLatency(self),
         };
     }
 
-    pub fn pause(self: *Outstream) error{StreamDisconnected}!void {
+    pub fn pause(self: *Outstream) StreamError!void {
         return switch (current_backend.?) {
             .pulseaudio => {
                 try PulseAudio.outstreamPausePlay(self, true);
@@ -403,17 +421,28 @@ pub const Outstream = struct {
         };
     }
 
-    pub fn play(self: *Outstream) error{StreamDisconnected}!void {
+    pub fn play(self: *Outstream) StreamError!void {
         if (!self.paused) return;
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamPausePlay(self, false),
         };
     }
 
-    pub fn setVolume(self: *Outstream, volume: f64) error{StreamDisconnected}!void {
-        std.debug.assert(volume <= 1.0);
+    pub fn setVolume(self: *Outstream, vol: f64) StreamError!void {
+        std.debug.assert(vol <= 1.0);
         return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.outstreamSetVolume(self, volume),
+            .pulseaudio => PulseAudio.outstreamSetVolume(self, vol),
+        };
+    }
+
+    pub const GetVolumeError = error{
+        Interrupted,
+        OutOfMemory,
+    };
+
+    pub fn volume(self: *Outstream) GetVolumeError!f64 {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamVolume(self),
         };
     }
 };

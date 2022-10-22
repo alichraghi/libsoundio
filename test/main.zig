@@ -22,6 +22,8 @@ test "sine wave" {
         try o.setVolume(v);
         std.time.sleep(std.time.ns_per_ms * 5);
     }
+    const volume = try o.volume();
+    try std.testing.expect(volume >= 0.3 and volume < 0.31);
 }
 
 var seconds_offset: f32 = 0;

@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const c = @cImport(@cInclude("pulse/pulseaudio.h"));
 const DevicesInfo = @import("main.zig").DevicesInfo;
@@ -33,15 +32,17 @@ const DeviceQueryError = error{
     InvalidFormat,
     InvalidChannelPos,
 };
-const StreamReadyError = error{
+
+const StreamError = error{
     StreamDisconnected,
 };
 
-pub const ConnectError = error{
+const ConnectError = error{
     OutOfMemory,
     Disconnected,
     InitAudioBackend,
 };
+
 pub fn connect(allocator: std.mem.Allocator) ConnectError!*PulseAudio {
     var self = try allocator.create(PulseAudio);
     self.allocator = allocator;
@@ -163,30 +164,37 @@ pub const OutstreamData = struct {
     buf_attr: c.pa_buffer_attr,
     stream_ready: std.atomic.Atomic(bool),
     clear_buffer: std.atomic.Atomic(bool),
-    stream_ready_err: ?StreamReadyError,
+    stream_ready_err: ?StreamError,
     write_byte_count: usize,
     write_ptr: ?[*]u8,
+    volume: f64,
 };
-pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) error{
+
+const OpenOutstreamError = error{
     OutOfMemory,
+    Interrupted,
     IncompatibleBackend,
     StreamDisconnected,
     OpeningDevice,
-    Interrupted,
-}!void {
+};
+
+pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) OpenOutstreamError!void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
-    outstream.backend_data = .{ .pulseaudio = .{
-        .sipa = self,
-        .stream = undefined,
-        .buf_attr = undefined,
-        .stream_ready = std.atomic.Atomic(bool).init(false),
-        .clear_buffer = std.atomic.Atomic(bool).init(false),
-        .stream_ready_err = null,
-        .write_byte_count = undefined,
-        .write_ptr = null,
-    } };
+    outstream.backend_data = .{
+        .pulseaudio = .{
+            .sipa = self,
+            .stream = undefined,
+            .buf_attr = undefined,
+            .stream_ready = std.atomic.Atomic(bool).init(false),
+            .clear_buffer = std.atomic.Atomic(bool).init(false),
+            .stream_ready_err = null,
+            .write_byte_count = undefined,
+            .write_ptr = null,
+            .volume = undefined,
+        },
+    };
     var ospa = &outstream.backend_data.pulseaudio;
 
     const sample_spec = c.pa_sample_spec{
@@ -210,7 +218,10 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) e
     const bytes_per_second = outstream.bytes_per_frame * outstream.sample_rate;
     if (outstream.software_latency > 0.0) {
         const buf_len = outstream.bytes_per_frame *
-            @floatToInt(u32, std.math.ceil(outstream.software_latency * @intToFloat(f64, bytes_per_second) / @intToFloat(f64, outstream.bytes_per_frame)));
+            @floatToInt(
+            u32,
+            std.math.ceil(outstream.software_latency * @intToFloat(f64, bytes_per_second) / @intToFloat(f64, outstream.bytes_per_frame)),
+        );
         ospa.buf_attr.maxlength = buf_len;
         ospa.buf_attr.tlength = buf_len;
     }
@@ -242,12 +253,13 @@ pub fn outstreamDeinit(self: *Outstream) void {
     c.pa_stream_unref(ospa.stream);
 }
 
-pub fn outstreamStart(self: *Outstream) !void {
+pub fn outstreamStart(self: *Outstream) StreamError!void {
     var ospa = &self.backend_data.pulseaudio;
     c.pa_threaded_mainloop_lock(ospa.sipa.main_loop);
     defer c.pa_threaded_mainloop_unlock(ospa.sipa.main_loop);
     ospa.write_byte_count = c.pa_stream_writable_size(ospa.stream);
-    const op = c.pa_stream_cork(ospa.stream, 0, null, null) orelse return error.StreamDisconnected;
+    const op = c.pa_stream_cork(ospa.stream, 0, null, null) orelse
+        return error.StreamDisconnected;
     c.pa_operation_unref(op);
     c.pa_stream_set_write_callback(ospa.stream, playbackStreamWriteCallback, self);
     if (self.underflowFn) |_| {
@@ -256,7 +268,7 @@ pub fn outstreamStart(self: *Outstream) !void {
     }
 }
 
-pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) error{StreamDisconnected}![]const ChannelArea {
+pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) StreamError![]const ChannelArea {
     var ospa = &self.backend_data.pulseaudio;
     var areas: [max_channels]ChannelArea = undefined;
 
@@ -280,7 +292,7 @@ pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) error{StreamDi
     return areas[0..self.layout.channels.len];
 }
 
-pub fn outstreamEndWrite(self: *Outstream) error{StreamDisconnected}!void {
+pub fn outstreamEndWrite(self: *Outstream) StreamError!void {
     var ospa = &self.backend_data.pulseaudio;
     const seek_mode: c_uint = if (ospa.clear_buffer.loadUnchecked()) c.PA_SEEK_RELATIVE_ON_READ else c.PA_SEEK_RELATIVE;
     if (c.pa_stream_write(ospa.stream, &ospa.write_ptr.?[0], ospa.write_byte_count, null, 0, seek_mode) != 0)
@@ -291,7 +303,7 @@ pub fn outstreamClearBuffer(self: *Outstream) void {
     self.backend_data.pulseaudio.clear_buffer.storeUnchecked(true);
 }
 
-pub fn outstreamPausePlay(self: *Outstream, pause: bool) error{StreamDisconnected}!void {
+pub fn outstreamPausePlay(self: *Outstream, pause: bool) StreamError!void {
     var ospa = &self.backend_data.pulseaudio;
 
     if (c.pa_threaded_mainloop_in_thread(ospa.sipa.main_loop) == 0)
@@ -306,7 +318,7 @@ pub fn outstreamPausePlay(self: *Outstream, pause: bool) error{StreamDisconnecte
     }
 }
 
-pub fn outstreamGetLatency(self: *Outstream) error{StreamDisconnected}!f64 {
+pub fn outstreamGetLatency(self: *Outstream) StreamError!f64 {
     var r_usec: c.pa_usec_t = 0;
     var negative: c_int = 0;
     if (c.pa_stream_get_latency(self.backend_data.pulseaudio.stream, &r_usec, &negative) != 0)
@@ -314,7 +326,7 @@ pub fn outstreamGetLatency(self: *Outstream) error{StreamDisconnected}!f64 {
     return @intToFloat(f64, r_usec) / 1000000.0;
 }
 
-pub fn outstreamSetVolume(self: *Outstream, volume: f64) error{StreamDisconnected}!void {
+pub fn outstreamSetVolume(self: *Outstream, volume: f64) StreamError!void {
     var ospa = &self.backend_data.pulseaudio;
     var v: c.pa_cvolume = undefined;
     _ = c.pa_cvolume_init(&v);
@@ -322,14 +334,43 @@ pub fn outstreamSetVolume(self: *Outstream, volume: f64) error{StreamDisconnecte
     const vol = @floatToInt(u32, @intToFloat(f64, c.PA_VOLUME_NORM) * volume);
     for (self.layout.channels.constSlice()) |_, i|
         v.values[i] = vol;
-    const op = c.pa_context_set_sink_input_volume(ospa.sipa.pulse_context, c.pa_stream_get_index(ospa.stream), &v, null, null) orelse
+    const op = c.pa_context_set_sink_input_volume(
+        ospa.sipa.pulse_context,
+        c.pa_stream_get_index(ospa.stream),
+        &v,
+        null,
+        null,
+    ) orelse
         return error.StreamDisconnected;
     c.pa_operation_unref(op);
+}
+
+pub fn outstreamVolume(self: *Outstream) OperationError!f64 {
+    var ospa = &self.backend_data.pulseaudio;
+    try performOperation(
+        ospa.sipa.main_loop,
+        c.pa_context_get_sink_input_info(
+            ospa.sipa.pulse_context,
+            c.pa_stream_get_index(ospa.stream),
+            sinkInputInfoCallback,
+            ospa,
+        ),
+    );
+    return ospa.volume;
 }
 
 pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
     allocator.free(self.id);
     allocator.free(self.name);
+}
+
+fn sinkInputInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
+    var ospa = @ptrCast(*OutstreamData, @alignCast(@alignOf(*OutstreamData), userdata.?));
+    if (eol != 0) {
+        c.pa_threaded_mainloop_signal(ospa.sipa.main_loop, 0);
+        return;
+    }
+    ospa.volume = @intToFloat(f64, info.*.volume.values[0]) / @intToFloat(f64, c.PA_VOLUME_NORM);
 }
 
 fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
