@@ -148,6 +148,253 @@ pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions)
     return outstream;
 }
 
+pub const Outstream = struct {
+    // TODO: `*Outstream` instead `*anyopaque`
+    // https://github.com/ziglang/zig/issues/12325
+    pub const WriteFn = *const fn (self: *anyopaque, frame_count_min: usize, frame_count_max: usize) anyerror!void;
+    pub const UnderflowFn = *const fn (self: *anyopaque) anyerror!void;
+
+    writeFn: WriteFn,
+    underflowFn: ?UnderflowFn,
+    userdata: ?*anyopaque,
+    name: []const u8,
+    layout: ChannelLayout,
+    software_latency: f64,
+    sample_rate: u32,
+    format: Format,
+    bytes_per_frame: u32,
+    bytes_per_sample: u32,
+    paused: bool,
+
+    backend_data: OutstreamBackendData,
+    const OutstreamBackendData = union {
+        pulseaudio: PulseAudio.OutstreamData,
+    };
+
+    pub const StreamError = error{StreamDisconnected};
+
+    pub fn deinit(self: *Outstream) void {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamDeinit(self),
+        };
+    }
+
+    pub fn start(self: *Outstream) StreamError!void {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamStart(self),
+        };
+    }
+
+    pub fn beginWrite(self: *Outstream, frame_count: *usize) StreamError![]const ChannelArea {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamBeginWrite(self, frame_count),
+        };
+    }
+
+    pub fn endWrite(self: *Outstream) StreamError!void {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamEndWrite(self),
+        };
+    }
+
+    pub fn clearBuffer(self: *Outstream) StreamError!void {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamClearBuffer(self),
+        };
+    }
+
+    pub fn getLatency(self: *Outstream) StreamError!f64 {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamGetLatency(self),
+        };
+    }
+
+    pub fn pause(self: *Outstream) StreamError!void {
+        return switch (current_backend.?) {
+            .pulseaudio => {
+                try PulseAudio.outstreamPausePlay(self, true);
+                self.paused = true;
+            },
+        };
+    }
+
+    pub fn play(self: *Outstream) StreamError!void {
+        if (!self.paused) return;
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamPausePlay(self, false),
+        };
+    }
+
+    pub fn setVolume(self: *Outstream, vol: f64) StreamError!void {
+        std.debug.assert(vol <= 1.0);
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamSetVolume(self, vol),
+        };
+    }
+
+    pub const GetVolumeError = error{
+        Interrupted,
+        OutOfMemory,
+    };
+
+    pub fn volume(self: *Outstream) GetVolumeError!f64 {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.outstreamVolume(self),
+        };
+    }
+};
+
+pub const Instream = struct {
+    // TODO: `*Instream` instead `*anyopaque`
+    // https://github.com/ziglang/zig/issues/12325
+    pub const WriteFn = *const fn (self: *anyopaque, frame_count_min: usize, frame_count_max: usize) anyerror!void;
+    pub const UnderflowFn = *const fn (self: *anyopaque) anyerror!void;
+
+    writeFn: WriteFn,
+    underflowFn: ?UnderflowFn,
+    userdata: ?*anyopaque,
+    name: []const u8,
+    layout: ChannelLayout,
+    software_latency: f64,
+    sample_rate: u32,
+    format: Format,
+    bytes_per_frame: u32,
+    bytes_per_sample: u32,
+    paused: bool,
+
+    backend_data: InstreamBackendData,
+    const InstreamBackendData = union {
+        pulseaudio: PulseAudio.InstreamData,
+    };
+
+    pub const StreamError = error{StreamDisconnected};
+
+    pub fn deinit(self: *Instream) void {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.instreamDeinit(self),
+        };
+    }
+
+    pub fn start(self: *Instream) StreamError!void {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.instreamStart(self),
+        };
+    }
+
+    pub fn beginWrite(self: *Instream, frame_count: *usize) StreamError![]const ChannelArea {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.instreamBeginWrite(self, frame_count),
+        };
+    }
+
+    pub fn endWrite(self: *Instream) StreamError!void {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.instreamEndWrite(self),
+        };
+    }
+
+    pub fn clearBuffer(self: *Instream) StreamError!void {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.instreamClearBuffer(self),
+        };
+    }
+
+    pub fn getLatency(self: *Instream) StreamError!f64 {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.instreamGetLatency(self),
+        };
+    }
+
+    pub fn pause(self: *Instream) StreamError!void {
+        return switch (current_backend.?) {
+            .pulseaudio => {
+                try PulseAudio.instreamPausePlay(self, true);
+                self.paused = true;
+            },
+        };
+    }
+
+    pub fn play(self: *Instream) StreamError!void {
+        if (!self.paused) return;
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.instreamPausePlay(self, false),
+        };
+    }
+
+    pub fn setVolume(self: *Instream, vol: f64) StreamError!void {
+        std.debug.assert(vol <= 1.0);
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.instreamSetVolume(self, vol),
+        };
+    }
+
+    pub const GetVolumeError = error{
+        Interrupted,
+        OutOfMemory,
+    };
+
+    pub fn volume(self: *Instream) GetVolumeError!f64 {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.instreamVolume(self),
+        };
+    }
+};
+
+pub const Device = struct {
+    pub const Aim = enum {
+        output,
+        input,
+    };
+
+    id: [:0]const u8,
+    name: [:0]const u8,
+    aim: Aim,
+    is_raw: bool,
+    layout: ChannelLayout,
+    formats: []const Format,
+    current_format: Format,
+    sample_rates: std.BoundedArray(SampleRateRange, 16),
+    current_sample_rate: u32,
+    software_latency_min: ?f64,
+    software_latency_max: ?f64,
+    current_software_latency: ?f64,
+
+    pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
+        return switch (current_backend.?) {
+            .pulseaudio => PulseAudio.deviceDeinit(self, allocator),
+        };
+    }
+
+    pub fn nearestSampleRate(self: Device, sample_rate: u32) u32 {
+        var best_rate: u32 = 0;
+        var best_delta: u32 = 0;
+        for (self.sample_rates.constSlice()) |range| {
+            var candidate_rate = std.math.clamp(sample_rate, range.min, range.max);
+            if (candidate_rate == sample_rate)
+                return candidate_rate;
+
+            var delta = std.math.absCast(@intCast(i32, candidate_rate) - @intCast(i32, sample_rate));
+            const best_rate_too_small = best_rate < sample_rate;
+            const candidate_rate_too_small = candidate_rate < sample_rate;
+            if (best_rate == 0 or
+                (best_rate_too_small and !candidate_rate_too_small) or
+                ((best_rate_too_small or !candidate_rate_too_small) and delta < best_delta))
+            {
+                best_rate = candidate_rate;
+                best_delta = delta;
+            }
+        }
+        return best_rate;
+    }
+};
+
+pub const DevicesInfo = struct {
+    outputs: std.ArrayListUnmanaged(Device),
+    inputs: std.ArrayListUnmanaged(Device),
+    default_output_index: usize,
+    default_input_index: usize,
+};
+
 pub const ChannelLayout = struct {
     pub const Array = std.BoundedArray(ChannelId, max_channels);
 
@@ -294,155 +541,4 @@ pub const Format = enum {
 pub const SampleRateRange = struct {
     min: u32,
     max: u32,
-};
-
-pub const Device = struct {
-    pub const Aim = enum {
-        output,
-        input,
-    };
-
-    id: [:0]const u8,
-    name: [:0]const u8,
-    aim: Aim,
-    is_raw: bool,
-    layout: ChannelLayout,
-    formats: []const Format,
-    current_format: Format,
-    sample_rates: std.BoundedArray(SampleRateRange, 16),
-    current_sample_rate: u32,
-    software_latency_min: ?f64,
-    software_latency_max: ?f64,
-    current_software_latency: ?f64,
-
-    pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
-        return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.deviceDeinit(self, allocator),
-        };
-    }
-
-    pub fn nearestSampleRate(self: Device, sample_rate: u32) u32 {
-        var best_rate: u32 = 0;
-        var best_delta: u32 = 0;
-        for (self.sample_rates.constSlice()) |range| {
-            var candidate_rate = std.math.clamp(sample_rate, range.min, range.max);
-            if (candidate_rate == sample_rate)
-                return candidate_rate;
-
-            var delta = std.math.absCast(@intCast(i32, candidate_rate) - @intCast(i32, sample_rate));
-            const best_rate_too_small = best_rate < sample_rate;
-            const candidate_rate_too_small = candidate_rate < sample_rate;
-            if (best_rate == 0 or
-                (best_rate_too_small and !candidate_rate_too_small) or
-                ((best_rate_too_small or !candidate_rate_too_small) and delta < best_delta))
-            {
-                best_rate = candidate_rate;
-                best_delta = delta;
-            }
-        }
-        return best_rate;
-    }
-};
-
-pub const DevicesInfo = struct {
-    outputs: std.ArrayListUnmanaged(Device),
-    inputs: std.ArrayListUnmanaged(Device),
-    default_output_index: usize,
-    default_input_index: usize,
-};
-
-pub const Outstream = struct {
-    // TODO: `*Outstream` instead `*anyopaque`
-    // https://github.com/ziglang/zig/issues/12325
-    pub const WriteFn = *const fn (self: *anyopaque, frame_count_min: usize, frame_count_max: usize) anyerror!void;
-    pub const UnderflowFn = *const fn (self: *anyopaque) anyerror!void;
-
-    writeFn: WriteFn,
-    underflowFn: ?UnderflowFn,
-    userdata: ?*anyopaque,
-    name: []const u8,
-    layout: ChannelLayout,
-    software_latency: f64,
-    sample_rate: u32,
-    format: Format,
-    bytes_per_frame: u32,
-    bytes_per_sample: u32,
-    paused: bool,
-
-    backend_data: OutstreamBackendData,
-    const OutstreamBackendData = union {
-        pulseaudio: PulseAudio.OutstreamData,
-    };
-
-    pub const StreamError = error{StreamDisconnected};
-
-    pub fn deinit(self: *Outstream) void {
-        return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.outstreamDeinit(self),
-        };
-    }
-
-    pub fn start(self: *Outstream) StreamError!void {
-        return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.outstreamStart(self),
-        };
-    }
-
-    pub fn beginWrite(self: *Outstream, frame_count: *usize) StreamError![]const ChannelArea {
-        return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.outstreamBeginWrite(self, frame_count),
-        };
-    }
-
-    pub fn endWrite(self: *Outstream) StreamError!void {
-        return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.outstreamEndWrite(self),
-        };
-    }
-
-    pub fn clearBuffer(self: *Outstream) StreamError!void {
-        return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.outstreamClearBuffer(self),
-        };
-    }
-
-    pub fn getLatency(self: *Outstream) StreamError!f64 {
-        return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.outstreamGetLatency(self),
-        };
-    }
-
-    pub fn pause(self: *Outstream) StreamError!void {
-        return switch (current_backend.?) {
-            .pulseaudio => {
-                try PulseAudio.outstreamPausePlay(self, true);
-                self.paused = true;
-            },
-        };
-    }
-
-    pub fn play(self: *Outstream) StreamError!void {
-        if (!self.paused) return;
-        return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.outstreamPausePlay(self, false),
-        };
-    }
-
-    pub fn setVolume(self: *Outstream, vol: f64) StreamError!void {
-        std.debug.assert(vol <= 1.0);
-        return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.outstreamSetVolume(self, vol),
-        };
-    }
-
-    pub const GetVolumeError = error{
-        Interrupted,
-        OutOfMemory,
-    };
-
-    pub fn volume(self: *Outstream) GetVolumeError!f64 {
-        return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.outstreamVolume(self),
-        };
-    }
 };
