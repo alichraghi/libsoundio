@@ -8,6 +8,7 @@ const ChannelLayout = @import("main.zig").ChannelLayout;
 const ChannelId = @import("main.zig").ChannelId;
 const ChannelArea = @import("main.zig").ChannelArea;
 const Outstream = @import("main.zig").Outstream;
+const Instream = @import("main.zig").Instream;
 const max_channels = @import("main.zig").max_channels;
 const min_sample_rate = @import("main.zig").min_sample_rate;
 const max_sample_rate = @import("main.zig").max_sample_rate;
@@ -158,6 +159,14 @@ pub fn devicesList(self: PulseAudio, aim: Device.Aim) []const Device {
     };
 }
 
+const OpenStreamError = error{
+    OutOfMemory,
+    Interrupted,
+    IncompatibleBackend,
+    StreamDisconnected,
+    OpeningDevice,
+};
+
 pub const OutstreamData = struct {
     sipa: *const PulseAudio,
     stream: *c.pa_stream,
@@ -170,15 +179,7 @@ pub const OutstreamData = struct {
     volume: f64,
 };
 
-const OpenOutstreamError = error{
-    OutOfMemory,
-    Interrupted,
-    IncompatibleBackend,
-    StreamDisconnected,
-    OpeningDevice,
-};
-
-pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) OpenOutstreamError!void {
+pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) OpenStreamError!void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
@@ -357,6 +358,164 @@ pub fn outstreamVolume(self: *Outstream) OperationError!f64 {
         ),
     );
     return ospa.volume;
+}
+
+pub const InstreamData = struct {
+    sipa: *const PulseAudio,
+    device: Device,
+    stream: *c.pa_stream,
+    buf_attr: c.pa_buffer_attr,
+    stream_ready: std.atomic.Atomic(bool),
+    stream_ready_err: ?StreamError,
+    peek_buf: ?[*]u8,
+    peek_buf_index: usize,
+    peek_buf_size: usize,
+    peek_buf_frames_left: usize,
+    read_frame_count: usize,
+};
+
+pub fn openInstream(self: *PulseAudio, instream: *Instream, device: Device) OpenStreamError!void {
+    c.pa_threaded_mainloop_lock(self.main_loop);
+    defer c.pa_threaded_mainloop_unlock(self.main_loop);
+
+    instream.backend_data = .{
+        .pulseaudio = .{
+            .sipa = self,
+            .device = device,
+            .stream = undefined,
+            .buf_attr = undefined,
+            .stream_ready = std.atomic.Atomic(bool).init(false),
+            .stream_ready_err = null,
+            .peek_buf = null,
+            .peek_buf_index = 0,
+            .peek_buf_size = 0,
+            .peek_buf_frames_left = 0,
+            .read_frame_count = 0,
+        },
+    };
+    var ispa = &instream.backend_data.pulseaudio;
+
+    const sample_spec = c.pa_sample_spec{
+        .format = try toPAFormat(instream.format),
+        .rate = instream.sample_rate,
+        .channels = @intCast(u5, instream.layout.channels.len),
+    };
+    const channel_map = try toPAChannelMap(instream.layout);
+    if (c.pa_stream_new(self.pulse_context, instream.name.ptr, &sample_spec, &channel_map)) |s|
+        ispa.stream = s
+    else
+        return error.OutOfMemory;
+    c.pa_stream_set_state_callback(ispa.stream, recordingStreamStateCallback, ispa);
+    c.pa_stream_set_read_callback(ispa.stream, recordingStreamReadCallback, instream);
+    ispa.buf_attr = .{
+        .maxlength = std.math.maxInt(u32),
+        .tlength = std.math.maxInt(u32),
+        .prebuf = 0,
+        .minreq = std.math.maxInt(u32),
+        .fragsize = std.math.maxInt(u32),
+    };
+    const bytes_per_second = instream.bytes_per_frame * instream.sample_rate;
+    if (instream.software_latency > 0.0) {
+        const buf_len = instream.bytes_per_frame *
+            @floatToInt(
+            u32,
+            std.math.ceil(instream.software_latency * @intToFloat(f64, bytes_per_second) / @intToFloat(f64, instream.bytes_per_frame)),
+        );
+        ispa.buf_attr.fragsize = buf_len;
+    }
+}
+
+pub fn instreamStart(self: *Instream) OpenStreamError!void {
+    var ispa = &self.backend_data.pulseaudio;
+    c.pa_threaded_mainloop_lock(ispa.sipa.main_loop);
+    defer c.pa_threaded_mainloop_unlock(ispa.sipa.main_loop);
+    const flags = c.PA_STREAM_AUTO_TIMING_UPDATE | c.PA_STREAM_INTERPOLATE_TIMING | c.PA_STREAM_ADJUST_LATENCY;
+    if (c.pa_stream_connect_record(ispa.stream, ispa.device.id.ptr, &ispa.buf_attr, flags) != 0)
+        return error.OpeningDevice;
+
+    while (!ispa.stream_ready.loadUnchecked())
+        c.pa_threaded_mainloop_wait(ispa.sipa.main_loop);
+    if (ispa.stream_ready_err) |err|
+        return err;
+
+    try performOperation(ispa.sipa.main_loop, c.pa_stream_update_timing_info(ispa.stream, timingUpdateCallback, self));
+}
+
+fn recordingStreamStateCallback(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
+    var ispa = @ptrCast(*InstreamData, @alignCast(@alignOf(*InstreamData), userdata.?));
+    switch (c.pa_stream_get_state(stream)) {
+        c.PA_STREAM_UNCONNECTED, c.PA_STREAM_CREATING, c.PA_STREAM_TERMINATED => {},
+        c.PA_STREAM_READY => {
+            ispa.stream_ready.storeUnchecked(true);
+            c.pa_threaded_mainloop_signal(ispa.sipa.main_loop, 0);
+        },
+        c.PA_STREAM_FAILED => {
+            ispa.stream_ready_err = error.StreamDisconnected;
+            c.pa_threaded_mainloop_signal(ispa.sipa.main_loop, 0);
+        },
+        else => unreachable,
+    }
+}
+
+fn recordingStreamReadCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
+    var instream = @ptrCast(*Instream, @alignCast(@alignOf(*Instream), userdata.?));
+    std.debug.assert(nbytes % instream.bytes_per_frame == 0);
+    std.debug.assert(nbytes > 0);
+    const available_frame_count = nbytes / instream.bytes_per_frame;
+    instream.readFn(instream, 0, available_frame_count) catch unreachable; // TODO
+}
+
+pub fn instreamBeginRead(self: *Instream, frame_count: *usize) StreamError!?[]const ChannelArea {
+    var ispa = &self.backend_data.pulseaudio;
+    var areas: [max_channels]ChannelArea = undefined;
+
+    if (ispa.peek_buf == null) {
+        if (c.pa_stream_peek(
+            ispa.stream,
+            @ptrCast(
+                [*c]?*anyopaque,
+                @alignCast(@alignOf([*c]?*anyopaque), &ispa.peek_buf),
+            ),
+            &ispa.peek_buf_size,
+        ) != 0)
+            return error.StreamDisconnected;
+
+        ispa.peek_buf_frames_left = ispa.peek_buf_size / self.bytes_per_frame;
+        ispa.peek_buf_index = 0;
+
+        if (ispa.peek_buf == null) {
+            frame_count.* = ispa.peek_buf_frames_left;
+            return null;
+        }
+    }
+
+    ispa.read_frame_count = std.math.min(frame_count.*, ispa.peek_buf_frames_left);
+    frame_count.* = ispa.read_frame_count;
+    for (self.layout.channels.constSlice()) |_, i| {
+        areas[i].ptr = ispa.peek_buf.? + ispa.peek_buf_index + self.bytes_per_sample * i;
+        areas[i].step = self.bytes_per_frame;
+    }
+
+    return areas[0..self.layout.channels.len];
+}
+
+pub fn instreamEndRead(self: *Instream) StreamError!void {
+    var ispa = &self.backend_data.pulseaudio;
+    if (ispa.peek_buf == null) {
+        if (c.pa_stream_drop(ispa.stream) != 0)
+            return error.StreamDisconnected;
+        return;
+    }
+
+    const advance_bytes = ispa.read_frame_count * self.bytes_per_frame;
+    ispa.peek_buf_index += advance_bytes;
+    ispa.peek_buf_frames_left -= ispa.read_frame_count;
+
+    if (ispa.peek_buf_index >= ispa.peek_buf_size) {
+        if (c.pa_stream_drop(ispa.stream) != 0)
+            return error.StreamDisconnected;
+        ispa.peek_buf = null;
+    }
 }
 
 pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {

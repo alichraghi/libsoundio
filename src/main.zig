@@ -3,6 +3,8 @@ const std = @import("std");
 const channel_layout = @import("channel_layout.zig");
 const PulseAudio = @import("PulseAudio.zig");
 
+pub const RingBuffer = @import("ring_buffer.zig").RingBuffer;
+
 pub const max_channels = 24;
 pub const min_sample_rate = 8000;
 pub const max_sample_rate = 5644800;
@@ -109,17 +111,7 @@ pub fn getDevice(self: SoundIO, aim: Device.Aim, index: ?usize) Device {
     };
 }
 
-pub const OutstreamOptions = struct {
-    writeFn: Outstream.WriteFn,
-    underflowFn: ?Outstream.UnderflowFn = null,
-    name: []const u8 = "SoundIoStream",
-    software_latency: f64 = 0.0,
-    sample_rate: u32 = 48000,
-    format: Format = if (builtin.cpu.arch.endian() == .Little) .float32le else .float32be,
-    userdata: ?*anyopaque = null,
-};
-
-pub const CreateOutstreamError = error{
+pub const CreateStreamError = error{
     OutOfMemory,
     Interrupted,
     IncompatibleBackend,
@@ -127,7 +119,17 @@ pub const CreateOutstreamError = error{
     OpeningDevice,
 };
 
-pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions) CreateOutstreamError!Outstream {
+pub const OutstreamOptions = struct {
+    writeFn: Outstream.WriteFn,
+    underflowFn: ?Outstream.UnderflowFn = null,
+    name: []const u8 = "SoundIoOutstream",
+    software_latency: f64 = 0.0,
+    sample_rate: u32 = 48000,
+    format: Format = if (builtin.cpu.arch.endian() == .Little) .float32le else .float32be,
+    userdata: ?*anyopaque = null,
+};
+
+pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions) CreateStreamError!Outstream {
     var outstream = Outstream{
         .backend_data = undefined,
         .writeFn = options.writeFn,
@@ -143,10 +145,51 @@ pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions)
         .paused = false,
     };
     switch (self.data) {
-        .pulseaudio => |tag| try tag.openOutstream(&outstream, device),
+        inline else => |b| try b.openOutstream(&outstream, device),
     }
     return outstream;
 }
+
+pub const InstreamOptions = struct {
+    readFn: Instream.ReadFn,
+    overflowFn: ?Instream.OverflowFn = null,
+    name: [:0]const u8 = "SoundIoInstream",
+    software_latency: f64 = 0.0,
+    sample_rate: u32 = 48000,
+    format: Format = if (builtin.cpu.arch.endian() == .Little) .float32le else .float32be,
+    userdata: ?*anyopaque = null,
+};
+
+pub fn createInstream(self: SoundIO, device: Device, options: InstreamOptions) CreateStreamError!Instream {
+    var instream = Instream{
+        .backend_data = undefined,
+        .readFn = options.readFn,
+        .overflowFn = options.overflowFn,
+        .userdata = options.userdata,
+        .name = options.name,
+        .layout = device.layout,
+        .software_latency = options.software_latency,
+        .sample_rate = device.nearestSampleRate(options.sample_rate),
+        .format = options.format,
+        .bytes_per_frame = options.format.bytesPerFrame(@intCast(u5, device.layout.channels.len)),
+        .bytes_per_sample = options.format.bytesPerSample(),
+        .paused = false,
+    };
+    switch (self.data) {
+        inline else => |b| try b.openInstream(&instream, device),
+    }
+    return instream;
+}
+
+pub const OpenStreamError = error{
+    OutOfMemory,
+    Interrupted,
+    IncompatibleBackend,
+    StreamDisconnected,
+    OpeningDevice,
+};
+
+pub const StreamError = error{StreamDisconnected};
 
 pub const Outstream = struct {
     // TODO: `*Outstream` instead `*anyopaque`
@@ -170,8 +213,6 @@ pub const Outstream = struct {
     const OutstreamBackendData = union {
         pulseaudio: PulseAudio.OutstreamData,
     };
-
-    pub const StreamError = error{StreamDisconnected};
 
     pub fn deinit(self: *Outstream) void {
         return switch (current_backend.?) {
@@ -247,13 +288,13 @@ pub const Outstream = struct {
 pub const Instream = struct {
     // TODO: `*Instream` instead `*anyopaque`
     // https://github.com/ziglang/zig/issues/12325
-    pub const WriteFn = *const fn (self: *anyopaque, frame_count_min: usize, frame_count_max: usize) anyerror!void;
-    pub const UnderflowFn = *const fn (self: *anyopaque) anyerror!void;
+    pub const ReadFn = *const fn (self: *anyopaque, frame_count_min: usize, frame_count_max: usize) anyerror!void;
+    pub const OverflowFn = *const fn (self: *anyopaque) anyerror!void;
 
-    writeFn: WriteFn,
-    underflowFn: ?UnderflowFn,
+    readFn: ReadFn,
+    overflowFn: ?OverflowFn,
     userdata: ?*anyopaque,
-    name: []const u8,
+    name: [:0]const u8,
     layout: ChannelLayout,
     software_latency: f64,
     sample_rate: u32,
@@ -267,29 +308,27 @@ pub const Instream = struct {
         pulseaudio: PulseAudio.InstreamData,
     };
 
-    pub const StreamError = error{StreamDisconnected};
-
     pub fn deinit(self: *Instream) void {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.instreamDeinit(self),
         };
     }
 
-    pub fn start(self: *Instream) StreamError!void {
+    pub fn start(self: *Instream) OpenStreamError!void {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.instreamStart(self),
         };
     }
 
-    pub fn beginWrite(self: *Instream, frame_count: *usize) StreamError![]const ChannelArea {
+    pub fn beginRead(self: *Instream, frame_count: *usize) StreamError!?[]const ChannelArea {
         return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.instreamBeginWrite(self, frame_count),
+            .pulseaudio => PulseAudio.instreamBeginRead(self, frame_count),
         };
     }
 
-    pub fn endWrite(self: *Instream) StreamError!void {
+    pub fn endRead(self: *Instream) StreamError!void {
         return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.instreamEndWrite(self),
+            .pulseaudio => PulseAudio.instreamEndRead(self),
         };
     }
 
@@ -423,7 +462,7 @@ pub const ChannelArea = struct {
     }
 
     pub fn read(self: ChannelArea, comptime T: type, frame_index: usize) T {
-        return @ptrCast(*T, @alignCast(@alignOf(T), &self.ptr[self.step * frame_index]));
+        return @ptrCast(*T, @alignCast(@alignOf(T), &self.ptr[self.step * frame_index])).*;
     }
 };
 
