@@ -44,45 +44,52 @@ const ConnectError = error{
 };
 
 pub fn connect(allocator: std.mem.Allocator) ConnectError!*PulseAudio {
-    var self = try allocator.create(PulseAudio);
-    self.allocator = allocator;
-    self.main_loop = c.pa_threaded_mainloop_new() orelse return error.OutOfMemory;
-    errdefer c.pa_threaded_mainloop_free(self.main_loop);
-    var main_loop_api = c.pa_threaded_mainloop_get_api(self.main_loop);
+    const main_loop = c.pa_threaded_mainloop_new() orelse
+        return error.OutOfMemory;
+    errdefer c.pa_threaded_mainloop_free(main_loop);
+    var main_loop_api = c.pa_threaded_mainloop_get_api(main_loop);
 
-    self.props = c.pa_proplist_new() orelse return error.OutOfMemory;
-    errdefer c.pa_proplist_free(self.props);
+    const props = c.pa_proplist_new() orelse
+        return error.OutOfMemory;
+    errdefer c.pa_proplist_free(props);
 
-    self.pulse_context = c.pa_context_new_with_proplist(main_loop_api, "SoundIO", self.props) orelse return error.OutOfMemory;
-    errdefer c.pa_context_unref(self.pulse_context);
+    const pulse_context = c.pa_context_new_with_proplist(main_loop_api, "SoundIO", props) orelse
+        return error.OutOfMemory;
+    errdefer c.pa_context_unref(pulse_context);
 
-    self.context_state = c.PA_CONTEXT_UNCONNECTED;
-    self.device_scan_queued = false;
-    self.devices_info = .{
-        .outputs = .{},
-        .inputs = .{},
-        .default_output_index = 0,
-        .default_input_index = 0,
-    };
-    self.device_query_err = null;
-    self.default_sink_id = null;
-    self.default_source_id = null;
-
-    c.pa_context_set_subscribe_callback(self.pulse_context, subscribeCallback, self);
-    c.pa_context_set_state_callback(self.pulse_context, contextStateCallback, self);
-
-    if (c.pa_context_connect(self.pulse_context, null, 0, null) != 0)
-        return switch (getError(self.pulse_context)) {
+    if (c.pa_context_connect(pulse_context, null, 0, null) != 0)
+        return switch (getError(pulse_context)) {
             error.InvalidServer => return error.InvalidServer,
             else => unreachable,
         };
-    errdefer c.pa_context_disconnect(self.pulse_context);
+    errdefer c.pa_context_disconnect(pulse_context);
 
-    if (c.pa_threaded_mainloop_start(self.main_loop) > 0)
+    if (c.pa_threaded_mainloop_start(main_loop) != 0)
         return error.OutOfMemory;
 
-    c.pa_threaded_mainloop_lock(self.main_loop);
-    defer c.pa_threaded_mainloop_unlock(self.main_loop);
+    c.pa_threaded_mainloop_lock(main_loop);
+    defer c.pa_threaded_mainloop_unlock(main_loop);
+
+    var self = try allocator.create(PulseAudio);
+    self.* = PulseAudio{
+        .allocator = allocator,
+        .main_loop = main_loop,
+        .props = props,
+        .pulse_context = pulse_context,
+        .context_state = c.PA_CONTEXT_UNCONNECTED,
+        .device_scan_queued = false,
+        .devices_info = .{
+            .outputs = .{},
+            .inputs = .{},
+            .default_output_index = 0,
+            .default_input_index = 0,
+        },
+        .device_query_err = null,
+        .default_sink_id = null,
+        .default_source_id = null,
+    };
+    c.pa_context_set_subscribe_callback(pulse_context, subscribeCallback, self);
+    c.pa_context_set_state_callback(pulse_context, contextStateCallback, self);
 
     while (true) {
         switch (self.context_state) {
@@ -96,7 +103,7 @@ pub fn connect(allocator: std.mem.Allocator) ConnectError!*PulseAudio {
             c.PA_CONTEXT_SETTING_NAME,
             // The connection was terminated cleanly.
             c.PA_CONTEXT_TERMINATED,
-            => c.pa_threaded_mainloop_wait(self.main_loop),
+            => c.pa_threaded_mainloop_wait(main_loop),
             // The connection is established, the context is ready to execute operations.
             c.PA_CONTEXT_READY => break,
             // The connection failed or was disconnected.
@@ -108,7 +115,7 @@ pub fn connect(allocator: std.mem.Allocator) ConnectError!*PulseAudio {
 
     // subscribe to events
     const events = c.PA_SUBSCRIPTION_MASK_SINK | c.PA_SUBSCRIPTION_MASK_SOURCE | c.PA_SUBSCRIPTION_MASK_SERVER;
-    const subscribe_op = c.pa_context_subscribe(self.pulse_context, events, null, self) orelse return error.OutOfMemory;
+    const subscribe_op = c.pa_context_subscribe(pulse_context, events, null, self) orelse return error.OutOfMemory;
     c.pa_operation_unref(subscribe_op);
 
     return self;
