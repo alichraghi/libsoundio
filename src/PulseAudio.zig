@@ -26,7 +26,7 @@ main_loop: *c.pa_threaded_mainloop,
 props: *c.pa_proplist,
 pulse_context: *c.pa_context,
 context_state: c.pa_context_state_t,
-device_scan_queued: bool,
+device_scan_queued: bool, // TODO make this atomic
 devices_info: DevicesInfo,
 device_query_err: ?DeviceQueryError,
 default_sink_id: ?[:0]const u8,
@@ -327,7 +327,8 @@ pub fn outstreamGetLatency(self: *Outstream) !f64 {
     var negative: c_int = 0;
     if (c.pa_stream_get_latency(self.backend_data.pulseaudio.stream, &r_usec, &negative) != 0)
         return switch (getError(self.pulse_context)) {
-            error.NoData => unreachable, // Timing info is automatically updated
+            // Timing info is automatically updated
+            error.NoData => unreachable,
             else => unreachable,
         };
     return @intToFloat(f64, r_usec) / 1000000.0;

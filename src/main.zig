@@ -28,27 +28,51 @@ pub const ConnectError = error{
     OutOfMemory,
     Disconnected,
     InvalidServer,
+    InitAudioBackend,
+    SystemResources,
+    NoSuchClient,
+};
+
+pub const ShutdownFn = *const fn (userdata: ?*anyopaque) void;
+pub const ConnectOptions = struct {
+    /// not called in PulseAudio Backend
+    shutdownFn: ?ShutdownFn = null,
+    /// only useful when `shutdownFn` is used
+    userdata: ?*anyopaque = null,
 };
 
 /// must be called in the main thread
-pub fn connect(allocator: std.mem.Allocator) ConnectError!SoundIO {
+pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SoundIO {
     std.debug.assert(!connected);
     errdefer connected = false;
     connected = true;
+
+    if (backend) |b| {
+        return .{ .data = @unionInit(
+            BackendData,
+            @tagName(b),
+            switch (b) {
+                .pulseaudio => try PulseAudio.connect(allocator),
+                .jack => try Jack.connect(allocator, options),
+            },
+        ) };
+    }
+
     if (current_backend) |b| {
         return switch (b) {
             .pulseaudio => .{ .data = .{
                 .pulseaudio = try PulseAudio.connect(allocator),
             } },
             .jack => .{ .data = .{
-                .jack = try Jack.connect(allocator),
+                .jack = try Jack.connect(allocator, options),
             } },
         };
     }
+
     switch (builtin.os.tag) {
         .linux, .freebsd => {
             current_backend = .pulseaudio;
-            return SoundIO{
+            return .{
                 .data = .{
                     .pulseaudio = PulseAudio.connect(allocator) catch @panic("TODO: Alsa"),
                     // Jack.connect(allocator) catch, TODO
@@ -59,17 +83,6 @@ pub fn connect(allocator: std.mem.Allocator) ConnectError!SoundIO {
         .windows => @panic("TODO: WASAPI"),
         else => @compileError("Unsupported OS"),
     }
-}
-
-fn connectBackend(comptime backend: Backend, allocator: std.mem.Allocator) ConnectError!SoundIO {
-    return .{ .data = @unionInit(
-        Backend,
-        @tagName(backend),
-        switch (backend) {
-            .pulseaudio => try PulseAudio.connect(allocator),
-            .jack => try Jack.connect(allocator),
-        },
-    ) };
 }
 
 pub fn deinit(self: SoundIO) void {

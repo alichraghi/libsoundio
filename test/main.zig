@@ -1,15 +1,28 @@
 const std = @import("std");
 const soundio = @import("soundio");
 
+test "reference" {
+    return error.SkipZigTest;
+}
+
+test "jack" {
+    var a = try soundio.connect(.jack, std.testing.allocator, .{ .shutdownFn = shutdownFn });
+    defer a.deinit();
+}
+
+fn shutdownFn(_: ?*anyopaque) void {
+    std.os.exit(1);
+}
+
 test "flush events" {
-    var a = try soundio.connect(std.testing.allocator);
+    var a = try soundio.connect(null, std.testing.allocator, .{});
     defer a.deinit();
     try a.flushEvents();
     try std.testing.expect(a.devicesList(.output).len > 0);
 }
 
 test "sine wave" {
-    var a = try soundio.connect(std.testing.allocator);
+    var a = try soundio.connect(null, std.testing.allocator, .{});
     defer a.deinit();
     try a.flushEvents();
     const device = a.getDevice(.output, null);
@@ -20,7 +33,7 @@ test "sine wave" {
     var v: f64 = 1.0;
     while (v > 0.3) : (v -= 0.001) {
         try o.setVolume(v);
-        std.time.sleep(std.time.ns_per_ms * 5);
+        std.time.sleep(std.time.ns_per_ms * 1);
     }
     const volume = try o.volume();
     try std.testing.expect(volume >= 0.3 and volume < 0.31);
@@ -50,9 +63,25 @@ fn writeCallback(self_any: *anyopaque, _: usize, frame_count_max: usize) void {
 
 test "wait events" {
     if (true) return error.SkipZigTest;
-    var a = try soundio.connect(std.testing.allocator);
+    var a = try soundio.connect(null, std.testing.allocator, .{});
     defer a.deinit();
     var wait: u2 = 2;
     while (wait > 0) : (wait -= 1)
         try a.waitEvents();
+}
+
+test "init deinit" {
+    var a = try soundio.connect(null, std.testing.allocator, .{});
+    // TODO
+    // try a.flushEvents();
+    // const ad = a.getDevice(.output, null);
+    // var ao = try a.createOutstream(ad, .{ .writeFn = undefined });
+    // defer ao.deinit();
+    a.deinit();
+
+    var b = try soundio.connect(null, std.testing.allocator, .{});
+    b.deinit();
+
+    var c = try soundio.connect(null, std.testing.allocator, .{});
+    c.deinit();
 }
