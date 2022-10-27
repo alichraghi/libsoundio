@@ -14,6 +14,13 @@ const builtin_channel_layouts = @import("channel_layout.zig").builtin_channel_la
 
 const PulseAudio = @This();
 
+const DeviceQueryError = error{
+    OutOfMemory,
+    IncompatibleBackend,
+    InvalidFormat,
+    InvalidChannelPos,
+};
+
 allocator: std.mem.Allocator,
 main_loop: *c.pa_threaded_mainloop,
 props: *c.pa_proplist,
@@ -25,24 +32,7 @@ device_query_err: ?DeviceQueryError,
 default_sink_id: ?[:0]const u8,
 default_source_id: ?[:0]const u8,
 
-const DeviceQueryError = error{
-    OutOfMemory,
-    IncompatibleBackend,
-    InvalidFormat,
-    InvalidChannelPos,
-};
-
-const StreamError = error{
-    StreamDisconnected,
-};
-
-const ConnectError = error{
-    OutOfMemory,
-    Disconnected,
-    InvalidServer,
-};
-
-pub fn connect(allocator: std.mem.Allocator) ConnectError!*PulseAudio {
+pub fn connect(allocator: std.mem.Allocator) !*PulseAudio {
     const main_loop = c.pa_threaded_mainloop_new() orelse
         return error.OutOfMemory;
     errdefer c.pa_threaded_mainloop_free(main_loop);
@@ -136,11 +126,11 @@ pub fn deinit(self: *PulseAudio) void {
     self.allocator.destroy(self);
 }
 
-pub fn flushEvents(self: *PulseAudio) RefreshDevicesError!void {
+pub fn flushEvents(self: *PulseAudio) !void {
     try self.refreshDevices();
 }
 
-pub fn waitEvents(self: *PulseAudio) RefreshDevicesError!void {
+pub fn waitEvents(self: *PulseAudio) !void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
     if (!self.device_scan_queued)
@@ -169,27 +159,24 @@ pub fn devicesList(self: PulseAudio, aim: Device.Aim) []const Device {
     };
 }
 
-const OpenStreamError = error{
-    OutOfMemory,
-    Interrupted,
-    IncompatibleBackend,
-    StreamDisconnected,
-    OpeningDevice,
-};
-
 pub const OutstreamData = struct {
     sipa: *const PulseAudio,
     stream: *c.pa_stream,
     buf_attr: c.pa_buffer_attr,
-    stream_ready: std.atomic.Atomic(bool),
+    stream_ready: std.atomic.Atomic(StreamStatus),
     clear_buffer: std.atomic.Atomic(bool),
-    stream_ready_err: ?StreamError,
     write_byte_count: usize,
     write_ptr: ?[*]u8,
     volume: f64,
 };
 
-pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) OpenStreamError!void {
+const StreamStatus = enum(u8) {
+    unknown,
+    ready,
+    failure,
+};
+
+pub fn outstreamOpen(self: *PulseAudio, outstream: *Outstream, device: Device) !void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
@@ -198,9 +185,8 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) O
             .sipa = self,
             .stream = undefined,
             .buf_attr = undefined,
-            .stream_ready = std.atomic.Atomic(bool).init(false),
+            .stream_ready = std.atomic.Atomic(StreamStatus).init(.unknown),
             .clear_buffer = std.atomic.Atomic(bool).init(false),
-            .stream_ready_err = null,
             .write_byte_count = undefined,
             .write_ptr = null,
             .volume = undefined,
@@ -243,10 +229,13 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) O
             else => unreachable,
         };
 
-    while (!ospa.stream_ready.loadUnchecked())
-        c.pa_threaded_mainloop_wait(self.main_loop);
-    if (ospa.stream_ready_err) |err|
-        return err;
+    while (true) {
+        switch (ospa.stream_ready.loadUnchecked()) {
+            .unknown => c.pa_threaded_mainloop_wait(self.main_loop),
+            .ready => break,
+            .failure => return error.StreamDisconnected,
+        }
+    }
 
     const writable_size = c.pa_stream_writable_size(ospa.stream);
     outstream.software_latency = @intToFloat(f64, writable_size) / @intToFloat(f64, bytes_per_second);
@@ -266,7 +255,7 @@ pub fn outstreamDeinit(self: *Outstream) void {
     c.pa_stream_unref(ospa.stream);
 }
 
-pub fn outstreamStart(self: *Outstream) StreamError!void {
+pub fn outstreamStart(self: *Outstream) !void {
     var ospa = &self.backend_data.pulseaudio;
     c.pa_threaded_mainloop_lock(ospa.sipa.main_loop);
     defer c.pa_threaded_mainloop_unlock(ospa.sipa.main_loop);
@@ -281,7 +270,7 @@ pub fn outstreamStart(self: *Outstream) StreamError!void {
     }
 }
 
-pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) StreamError![]const ChannelArea {
+pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) ![]const ChannelArea {
     var ospa = &self.backend_data.pulseaudio;
     var areas: [max_channels]ChannelArea = undefined;
 
@@ -307,7 +296,7 @@ pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) StreamError![]
     return areas[0..self.layout.channels.len];
 }
 
-pub fn outstreamEndWrite(self: *Outstream) StreamError!void {
+pub fn outstreamEndWrite(self: *Outstream) !void {
     var ospa = &self.backend_data.pulseaudio;
     const seek_mode: c_uint = if (ospa.clear_buffer.loadUnchecked()) c.PA_SEEK_RELATIVE_ON_READ else c.PA_SEEK_RELATIVE;
     if (c.pa_stream_write(ospa.stream, &ospa.write_ptr.?[0], ospa.write_byte_count, null, 0, seek_mode) != 0)
@@ -318,7 +307,7 @@ pub fn outstreamClearBuffer(self: *Outstream) void {
     self.backend_data.pulseaudio.clear_buffer.storeUnchecked(true);
 }
 
-pub fn outstreamPausePlay(self: *Outstream, pause: bool) StreamError!void {
+pub fn outstreamPausePlay(self: *Outstream, pause: bool) !void {
     var ospa = &self.backend_data.pulseaudio;
 
     if (c.pa_threaded_mainloop_in_thread(ospa.sipa.main_loop) == 0)
@@ -333,7 +322,7 @@ pub fn outstreamPausePlay(self: *Outstream, pause: bool) StreamError!void {
     }
 }
 
-pub fn outstreamGetLatency(self: *Outstream) StreamError!f64 {
+pub fn outstreamGetLatency(self: *Outstream) !f64 {
     var r_usec: c.pa_usec_t = 0;
     var negative: c_int = 0;
     if (c.pa_stream_get_latency(self.backend_data.pulseaudio.stream, &r_usec, &negative) != 0)
@@ -344,7 +333,7 @@ pub fn outstreamGetLatency(self: *Outstream) StreamError!f64 {
     return @intToFloat(f64, r_usec) / 1000000.0;
 }
 
-pub fn outstreamSetVolume(self: *Outstream, volume: f64) StreamError!void {
+pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
     var ospa = &self.backend_data.pulseaudio;
     var v: c.pa_cvolume = undefined;
     _ = c.pa_cvolume_init(&v);
@@ -363,7 +352,7 @@ pub fn outstreamSetVolume(self: *Outstream, volume: f64) StreamError!void {
     c.pa_operation_unref(op);
 }
 
-pub fn outstreamVolume(self: *Outstream) OperationError!f64 {
+pub fn outstreamVolume(self: *Outstream) !f64 {
     var ospa = &self.backend_data.pulseaudio;
     try performOperation(
         ospa.sipa.main_loop,
@@ -407,11 +396,11 @@ fn playbackStreamStateCallback(stream: ?*c.pa_stream, userdata: ?*anyopaque) cal
     switch (c.pa_stream_get_state(stream)) {
         c.PA_STREAM_UNCONNECTED, c.PA_STREAM_CREATING, c.PA_STREAM_TERMINATED => {},
         c.PA_STREAM_READY => {
-            ospa.stream_ready.storeUnchecked(true);
+            ospa.stream_ready.storeUnchecked(.ready);
             c.pa_threaded_mainloop_signal(ospa.sipa.main_loop, 0);
         },
         c.PA_STREAM_FAILED => {
-            ospa.stream_ready_err = error.StreamDisconnected;
+            ospa.stream_ready.storeUnchecked(.failure);
             c.pa_threaded_mainloop_signal(ospa.sipa.main_loop, 0);
         },
         else => unreachable,
@@ -423,14 +412,7 @@ fn timingUpdateCallback(_: ?*c.pa_stream, _: c_int, userdata: ?*anyopaque) callc
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
-const RefreshDevicesError = error{
-    OutOfMemory,
-    Interrupted,
-    IncompatibleBackend,
-    InvalidFormat,
-    InvalidChannelPos,
-};
-fn refreshDevices(self: *PulseAudio) RefreshDevicesError!void {
+fn refreshDevices(self: *PulseAudio) !void {
     const list_sink_op = c.pa_context_get_sink_info_list(self.pulse_context, sinkInfoCallback, self);
     const list_source_op = c.pa_context_get_source_info_list(self.pulse_context, sourceInfoCallback, self);
     const server_info_op = c.pa_context_get_server_info(self.pulse_context, serverInfoCallback, self);
@@ -477,8 +459,7 @@ fn refreshDevices(self: *PulseAudio) RefreshDevicesError!void {
     }
 }
 
-const OperationError = error{ OutOfMemory, Interrupted };
-fn performOperation(main_loop: *c.pa_threaded_mainloop, op: ?*c.pa_operation) OperationError!void {
+fn performOperation(main_loop: *c.pa_threaded_mainloop, op: ?*c.pa_operation) !void {
     if (op == null) return error.OutOfMemory;
     while (true) {
         switch (c.pa_operation_get_state(op)) {
@@ -606,7 +587,7 @@ fn serverInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_server_info, userd
     };
 }
 
-fn fromPAChannelMap(map: c.pa_channel_map) error{ IncompatibleBackend, InvalidChannelPos }!ChannelLayout {
+fn fromPAChannelMap(map: c.pa_channel_map) !ChannelLayout {
     var channels = ChannelLayout.Array.init(map.channels) catch return error.IncompatibleBackend;
     for (channels.slice()) |*ch, i|
         ch.* = try fromPAChannelPos(map.map[i]);
@@ -623,7 +604,7 @@ fn fromPAChannelMap(map: c.pa_channel_map) error{ IncompatibleBackend, InvalidCh
     return layout;
 }
 
-fn fromPAChannelPos(pos: c.pa_channel_position_t) error{InvalidChannelPos}!ChannelId {
+fn fromPAChannelPos(pos: c.pa_channel_position_t) !ChannelId {
     return switch (pos) {
         c.PA_CHANNEL_POSITION_MONO => .front_center,
         c.PA_CHANNEL_POSITION_FRONT_LEFT => .front_left,
@@ -666,7 +647,7 @@ fn fromPAChannelPos(pos: c.pa_channel_position_t) error{InvalidChannelPos}!Chann
     };
 }
 
-fn fromPAFormat(format: c.pa_sample_format_t) error{InvalidFormat}!Format {
+fn fromPAFormat(format: c.pa_sample_format_t) !Format {
     return switch (format) {
         c.PA_SAMPLE_U8 => .u8,
         c.PA_SAMPLE_S16LE => .s16le,
@@ -690,7 +671,7 @@ fn fromPAFormat(format: c.pa_sample_format_t) error{InvalidFormat}!Format {
     };
 }
 
-pub fn toPAFormat(format: Format) error{IncompatibleBackend}!c.pa_sample_format_t {
+pub fn toPAFormat(format: Format) !c.pa_sample_format_t {
     return switch (format) {
         .u8 => c.PA_SAMPLE_U8,
         .s16le => c.PA_SAMPLE_S16LE,
@@ -714,7 +695,7 @@ pub fn toPAFormat(format: Format) error{IncompatibleBackend}!c.pa_sample_format_
     };
 }
 
-fn toPAChannelPos(channel_id: ChannelId) error{IncompatibleBackend}!c.pa_channel_position_t {
+fn toPAChannelPos(channel_id: ChannelId) !c.pa_channel_position_t {
     return switch (channel_id) {
         .front_left => c.PA_CHANNEL_POSITION_FRONT_LEFT,
         .front_right => c.PA_CHANNEL_POSITION_FRONT_RIGHT,
@@ -756,7 +737,7 @@ fn toPAChannelPos(channel_id: ChannelId) error{IncompatibleBackend}!c.pa_channel
     };
 }
 
-fn toPAChannelMap(layout: ChannelLayout) error{IncompatibleBackend}!c.pa_channel_map {
+fn toPAChannelMap(layout: ChannelLayout) !c.pa_channel_map {
     var channel_map: c.pa_channel_map = undefined;
     channel_map.channels = @intCast(u5, layout.channels.len);
     for (layout.channels.slice()) |ch, i|

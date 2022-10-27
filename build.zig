@@ -24,6 +24,7 @@ fn link(step: *std.build.LibExeObjStep) void {
     step.linkLibC();
     step.addLibraryPath("pulseaudio/build/src/pulse");
     step.linkSystemLibraryName("pulse");
+    step.linkSystemLibraryName("jack");
 }
 
 fn buildPulseAudio() void {}

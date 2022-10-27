@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const channel_layout = @import("channel_layout.zig");
 const PulseAudio = @import("PulseAudio.zig");
+const Jack = @import("Jack.zig");
 
 pub const max_channels = 24;
 pub const min_sample_rate = 8000;
@@ -12,9 +13,11 @@ var current_backend: ?Backend = null;
 
 pub const Backend = enum {
     pulseaudio,
+    jack,
 };
 const BackendData = union(Backend) {
     pulseaudio: *PulseAudio,
+    jack: *Jack,
 };
 
 const SoundIO = @This();
@@ -37,6 +40,9 @@ pub fn connect(allocator: std.mem.Allocator) ConnectError!SoundIO {
             .pulseaudio => .{ .data = .{
                 .pulseaudio = try PulseAudio.connect(allocator),
             } },
+            .jack => .{ .data = .{
+                .jack = try Jack.connect(allocator),
+            } },
         };
     }
     switch (builtin.os.tag) {
@@ -44,7 +50,8 @@ pub fn connect(allocator: std.mem.Allocator) ConnectError!SoundIO {
             current_backend = .pulseaudio;
             return SoundIO{
                 .data = .{
-                    .pulseaudio = PulseAudio.connect(allocator) catch @panic("TODO: Alsa & Jack"),
+                    .pulseaudio = PulseAudio.connect(allocator) catch @panic("TODO: Alsa"),
+                    // Jack.connect(allocator) catch, TODO
                 },
             };
         },
@@ -60,6 +67,7 @@ fn connectBackend(comptime backend: Backend, allocator: std.mem.Allocator) Conne
         @tagName(backend),
         switch (backend) {
             .pulseaudio => try PulseAudio.connect(allocator),
+            .jack => try Jack.connect(allocator),
         },
     ) };
 }
@@ -143,7 +151,7 @@ pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions)
         .paused = false,
     };
     switch (self.data) {
-        inline else => |b| try b.openOutstream(&outstream, device),
+        inline else => |b| try b.outstreamOpen(&outstream, device),
     }
     return outstream;
 }
@@ -184,59 +192,67 @@ pub const Outstream = struct {
     pub fn deinit(self: *Outstream) void {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamDeinit(self),
+            .jack => Jack.outstreamDeinit(self),
         };
     }
 
     pub fn start(self: *Outstream) StreamError!void {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamStart(self),
+            .jack => Jack.outstreamStart(self),
         };
     }
 
     pub fn beginWrite(self: *Outstream, frame_count: *usize) StreamError![]const ChannelArea {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamBeginWrite(self, frame_count),
+            .jack => Jack.outstreamBeginWrite(self, frame_count),
         };
     }
 
     pub fn endWrite(self: *Outstream) StreamError!void {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamEndWrite(self),
+            .jack => Jack.outstreamEndWrite(self),
         };
     }
 
     pub fn clearBuffer(self: *Outstream) StreamError!void {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamClearBuffer(self),
+            .jack => Jack.outstreamClearBuffer(self),
         };
     }
 
     pub fn getLatency(self: *Outstream) StreamError!f64 {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamGetLatency(self),
+            .jack => Jack.outstreamGetLatency(self),
         };
     }
 
     pub fn pause(self: *Outstream) StreamError!void {
-        return switch (current_backend.?) {
-            .pulseaudio => {
-                try PulseAudio.outstreamPausePlay(self, true);
-                self.paused = true;
-            },
-        };
+        switch (current_backend.?) {
+            .pulseaudio => try PulseAudio.outstreamPausePlay(self, true),
+            .jack => try Jack.outstreamPausePlay(self, true),
+        }
+        self.paused = true;
     }
 
     pub fn play(self: *Outstream) StreamError!void {
         if (!self.paused) return;
-        return switch (current_backend.?) {
-            .pulseaudio => PulseAudio.outstreamPausePlay(self, false),
-        };
+        switch (current_backend.?) {
+            .pulseaudio => try PulseAudio.outstreamPausePlay(self, false),
+            .jack => try Jack.outstreamPausePlay(self, false),
+        }
+        self.paused = false;
     }
 
     pub fn setVolume(self: *Outstream, vol: f64) StreamError!void {
         std.debug.assert(vol <= 1.0);
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamSetVolume(self, vol),
+            .jack => Jack.outstreamSetVolume(self, vol),
         };
     }
 
@@ -248,6 +264,7 @@ pub const Outstream = struct {
     pub fn volume(self: *Outstream) GetVolumeError!f64 {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.outstreamVolume(self),
+            .jack => Jack.outstreamVolume(self),
         };
     }
 };
@@ -274,6 +291,7 @@ pub const Device = struct {
     pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
         return switch (current_backend.?) {
             .pulseaudio => PulseAudio.deviceDeinit(self, allocator),
+            .jack => Jack.deviceDeinit(self, allocator),
         };
     }
 
