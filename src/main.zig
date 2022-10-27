@@ -265,7 +265,7 @@ pub const Device = struct {
     layout: ChannelLayout,
     formats: []const Format,
     current_format: Format,
-    sample_rates: std.BoundedArray(Range, 16),
+    sample_rate_range: Range,
     current_sample_rate: u32,
     software_latency_min: ?f64,
     software_latency_max: ?f64,
@@ -278,25 +278,7 @@ pub const Device = struct {
     }
 
     pub fn nearestSampleRate(self: Device, sample_rate: u32) u32 {
-        var best_rate: u32 = 0;
-        var best_delta: u32 = 0;
-        for (self.sample_rates.constSlice()) |range| {
-            var candidate_rate = std.math.clamp(sample_rate, range.min, range.max);
-            if (candidate_rate == sample_rate)
-                return candidate_rate;
-
-            var delta = std.math.absCast(@intCast(i32, candidate_rate) - @intCast(i32, sample_rate));
-            const best_rate_too_small = best_rate < sample_rate;
-            const candidate_rate_too_small = candidate_rate < sample_rate;
-            if (best_rate == 0 or
-                (best_rate_too_small and !candidate_rate_too_small) or
-                ((best_rate_too_small or !candidate_rate_too_small) and delta < best_delta))
-            {
-                best_rate = candidate_rate;
-                best_delta = delta;
-            }
-        }
-        return best_rate;
+        return std.math.clamp(sample_rate, self.sample_rate_range.min, self.sample_rate_range.max);
     }
 };
 

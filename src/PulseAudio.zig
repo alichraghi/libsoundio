@@ -2,7 +2,6 @@ const std = @import("std");
 const c = @cImport(@cInclude("pulse/pulseaudio.h"));
 const DevicesInfo = @import("main.zig").DevicesInfo;
 const Device = @import("main.zig").Device;
-const Range = @import("main.zig").Range;
 const Format = @import("main.zig").Format;
 const ChannelLayout = @import("main.zig").ChannelLayout;
 const ChannelId = @import("main.zig").ChannelId;
@@ -115,7 +114,8 @@ pub fn connect(allocator: std.mem.Allocator) ConnectError!*PulseAudio {
 
     // subscribe to events
     const events = c.PA_SUBSCRIPTION_MASK_SINK | c.PA_SUBSCRIPTION_MASK_SOURCE | c.PA_SUBSCRIPTION_MASK_SERVER;
-    const subscribe_op = c.pa_context_subscribe(pulse_context, events, null, self) orelse return error.OutOfMemory;
+    const subscribe_op = c.pa_context_subscribe(pulse_context, events, null, self) orelse
+        return error.OutOfMemory;
     c.pa_operation_unref(subscribe_op);
 
     return self;
@@ -533,10 +533,10 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
             self.device_query_err = err;
             return;
         },
-        .sample_rates = std.BoundedArray(Range, 16).fromSlice(&.{.{
+        .sample_rate_range = .{
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
             .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
-        }}) catch unreachable,
+        },
         .current_sample_rate = info.*.sample_spec.rate,
         .current_software_latency = null,
         .software_latency_min = null,
@@ -557,10 +557,6 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
     }
     if (self.device_query_err != null) return;
     if (info.*.name == null or info.*.description == null) self.device_query_err = error.OutOfMemory;
-    const g = &[_]Range{.{
-        .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
-        .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
-    }};
     var device = Device{
         .id = self.allocator.dupeZ(u8, std.mem.span(info.*.name)) catch |err| {
             self.device_query_err = err;
@@ -581,7 +577,10 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
             self.device_query_err = err;
             return;
         },
-        .sample_rates = std.BoundedArray(Range, 16).fromSlice(g) catch unreachable,
+        .sample_rate_range = .{
+            .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
+            .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
+        },
         .current_sample_rate = info.*.sample_spec.rate,
         .current_software_latency = null,
         .software_latency_min = null,
