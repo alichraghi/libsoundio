@@ -104,7 +104,9 @@ static int refresh_devices_bare(struct SoundIoPrivate *si) {
 
     struct SoundIoListJackClient clients = {0};
     const char **port_name_ptr = port_names;
+    int j = 0;
     for (; *port_name_ptr; port_name_ptr += 1) {
+        j++;
         const char *client_and_port_name = *port_name_ptr;
         int client_and_port_name_len = strlen(client_and_port_name);
         jack_port_t *jport = jack_port_by_name(sij->client, client_and_port_name);

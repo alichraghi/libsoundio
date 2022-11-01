@@ -22,7 +22,12 @@ pub fn build(b: *std.build.Builder) void {
 
 fn link(step: *std.build.LibExeObjStep) void {
     step.linkLibC();
-    step.addLibraryPath("pulseaudio/build/src/pulse");
+    step.addCSourceFile("src/pipewire/builder.c", &.{"-D_REENTRANT"});
+    step.defineCMacro("_REENTRANT", null);
+
+    step.addIncludePath("/usr/include/spa-0.2");
+    step.addIncludePath("/usr/include/pipewire-0.3");
+    step.linkSystemLibraryName("pipewire-0.3");
     step.linkSystemLibraryName("pulse");
     step.linkSystemLibraryName("jack");
 }

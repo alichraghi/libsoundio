@@ -10,7 +10,7 @@ const Outstream = @import("main.zig").Outstream;
 const max_channels = @import("main.zig").max_channels;
 const min_sample_rate = @import("main.zig").min_sample_rate;
 const max_sample_rate = @import("main.zig").max_sample_rate;
-const builtin_channel_layouts = @import("channel_layout.zig").builtin_channel_layouts;
+const getLayoutByChannels = @import("channel_layout.zig").getLayoutByChannels;
 
 const PulseAudio = @This();
 
@@ -18,7 +18,6 @@ const DeviceQueryError = error{
     OutOfMemory,
     IncompatibleBackend,
     InvalidFormat,
-    InvalidChannelPos,
 };
 
 allocator: std.mem.Allocator,
@@ -26,7 +25,7 @@ main_loop: *c.pa_threaded_mainloop,
 props: *c.pa_proplist,
 pulse_context: *c.pa_context,
 context_state: c.pa_context_state_t,
-device_scan_queued: bool, // TODO make this atomic
+device_scan_queued: std.atomic.Atomic(bool),
 devices_info: DevicesInfo,
 device_query_err: ?DeviceQueryError,
 default_sink_id: ?[:0]const u8,
@@ -48,7 +47,9 @@ pub fn connect(allocator: std.mem.Allocator) !*PulseAudio {
 
     if (c.pa_context_connect(pulse_context, null, 0, null) != 0)
         return switch (getError(pulse_context)) {
-            error.InvalidServer => return error.InvalidServer,
+            error.InvalidServer => error.InvalidServer,
+            error.ConnectionRefused => error.ConnectionRefused,
+            error.ConnectionTerminated => error.ConnectionTerminated,
             else => unreachable,
         };
     errdefer c.pa_context_disconnect(pulse_context);
@@ -60,16 +61,16 @@ pub fn connect(allocator: std.mem.Allocator) !*PulseAudio {
     defer c.pa_threaded_mainloop_unlock(main_loop);
 
     var self = try allocator.create(PulseAudio);
+    errdefer allocator.destroy(self);
     self.* = PulseAudio{
         .allocator = allocator,
         .main_loop = main_loop,
         .props = props,
         .pulse_context = pulse_context,
         .context_state = c.PA_CONTEXT_UNCONNECTED,
-        .device_scan_queued = false,
+        .device_scan_queued = std.atomic.Atomic(bool).init(false),
         .devices_info = .{
-            .outputs = .{},
-            .inputs = .{},
+            .list = .{},
             .default_output_index = 0,
             .default_input_index = 0,
         },
@@ -108,6 +109,8 @@ pub fn connect(allocator: std.mem.Allocator) !*PulseAudio {
         return error.OutOfMemory;
     c.pa_operation_unref(subscribe_op);
 
+    try self.refreshDevices();
+
     return self;
 }
 
@@ -117,26 +120,25 @@ pub fn deinit(self: *PulseAudio) void {
     c.pa_context_unref(self.pulse_context);
     c.pa_threaded_mainloop_free(self.main_loop);
     c.pa_proplist_free(self.props);
-    for (self.devices_info.outputs.items) |device|
+    for (self.devices_info.list.items) |device|
         deviceDeinit(device, self.allocator);
-    for (self.devices_info.inputs.items) |device|
-        deviceDeinit(device, self.allocator);
-    self.devices_info.outputs.deinit(self.allocator);
-    self.devices_info.inputs.deinit(self.allocator);
+    self.devices_info.list.deinit(self.allocator);
     self.allocator.destroy(self);
 }
 
 pub fn flushEvents(self: *PulseAudio) !void {
+    c.pa_threaded_mainloop_lock(self.main_loop);
+    defer c.pa_threaded_mainloop_unlock(self.main_loop);
     try self.refreshDevices();
 }
 
 pub fn waitEvents(self: *PulseAudio) !void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
-    if (!self.device_scan_queued)
+    if (!self.device_scan_queued.load(.Acquire))
         c.pa_threaded_mainloop_wait(self.main_loop);
+    defer self.device_scan_queued.store(false, .Release);
     try self.refreshDevices();
-    self.device_scan_queued = false;
 }
 
 pub fn wakeUp(self: *PulseAudio) void {
@@ -145,18 +147,8 @@ pub fn wakeUp(self: *PulseAudio) void {
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
-pub fn getDevice(self: PulseAudio, aim: Device.Aim, index: ?usize) Device {
-    return switch (aim) {
-        .output => self.devices_info.outputs.items[index orelse self.devices_info.default_output_index],
-        .input => self.devices_info.inputs.items[index orelse self.devices_info.default_input_index],
-    };
-}
-
-pub fn devicesList(self: PulseAudio, aim: Device.Aim) []const Device {
-    return switch (aim) {
-        .output => self.devices_info.outputs.items,
-        .input => self.devices_info.inputs.items,
-    };
+pub fn devicesList(self: PulseAudio) []const Device {
+    return self.devices_info.list.items;
 }
 
 pub const OutstreamData = struct {
@@ -287,7 +279,7 @@ pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) ![]const Chann
             else => unreachable,
         };
 
-    for (self.layout.channels.constSlice()) |_, i| {
+    for (self.layout.channels.slice()) |_, i| {
         areas[i].ptr = ospa.write_ptr.? + self.bytes_per_sample * i;
         areas[i].step = self.bytes_per_frame;
     }
@@ -340,7 +332,7 @@ pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
     _ = c.pa_cvolume_init(&v);
     v.channels = @intCast(u5, self.layout.channels.len);
     const vol = @floatToInt(u32, @intToFloat(f64, c.PA_VOLUME_NORM) * volume);
-    for (self.layout.channels.constSlice()) |_, i|
+    for (self.layout.channels.slice()) |_, i|
         v.values[i] = vol;
     const op = c.pa_context_set_sink_input_volume(
         ospa.sipa.pulse_context,
@@ -418,45 +410,26 @@ fn refreshDevices(self: *PulseAudio) !void {
     const list_source_op = c.pa_context_get_source_info_list(self.pulse_context, sourceInfoCallback, self);
     const server_info_op = c.pa_context_get_server_info(self.pulse_context, serverInfoCallback, self);
 
-    for (self.devices_info.outputs.items) |device|
+    for (self.devices_info.list.items) |device|
         device.deinit(self.allocator);
-    for (self.devices_info.inputs.items) |device|
-        device.deinit(self.allocator);
-    self.devices_info.outputs.clearAndFree(self.allocator);
-    self.devices_info.inputs.clearAndFree(self.allocator);
+
+    self.devices_info.list.clearAndFree(self.allocator);
+
+    errdefer self.devices_info.list.clearAndFree(self.allocator);
     try performOperation(self.main_loop, list_sink_op);
     try performOperation(self.main_loop, list_source_op);
     try performOperation(self.main_loop, server_info_op);
     if (self.device_query_err) |err| return err;
     defer {
-        if (self.default_sink_id) |id| {
-            self.allocator.free(id);
-            self.default_sink_id = null;
-        }
-        if (self.default_source_id) |id| {
-            self.allocator.free(id);
-            self.default_source_id = null;
-        }
+        self.allocator.free(self.default_sink_id.?);
+        self.allocator.free(self.default_source_id.?);
     }
 
-    if (self.devices_info.outputs.items.len > 0) {
-        self.devices_info.default_output_index = 0;
-        for (self.devices_info.outputs.items) |device, i| {
-            if (std.mem.eql(u8, device.id, self.default_sink_id orelse break)) {
-                self.devices_info.default_output_index = i;
-                break;
-            }
-        }
-    }
-
-    if (self.devices_info.inputs.items.len > 0) {
-        self.devices_info.default_input_index = 0;
-        for (self.devices_info.inputs.items) |device, i| {
-            if (std.mem.eql(u8, device.id, self.default_sink_id orelse break)) {
-                self.devices_info.default_input_index = i;
-                break;
-            }
-        }
+    for (self.devices_info.list.items) |device, i| {
+        if (device.aim == .output and std.mem.eql(u8, device.id, self.default_sink_id.?))
+            self.devices_info.default_output_index = i
+        else if (std.mem.eql(u8, device.id, self.default_source_id.?))
+            self.devices_info.default_input_index = i;
     }
 }
 
@@ -477,7 +450,7 @@ fn performOperation(main_loop: *c.pa_threaded_mainloop, op: ?*c.pa_operation) !v
 
 fn subscribeCallback(_: ?*c.pa_context, _: c.pa_subscription_event_type_t, _: u32, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
-    self.device_scan_queued = true;
+    defer self.device_scan_queued.store(true, .Monotonic);
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
@@ -494,7 +467,8 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
         return;
     }
     if (self.device_query_err != null) return;
-    if (info.*.name == null or info.*.description == null) self.device_query_err = error.OutOfMemory;
+    if (info.*.name == null or info.*.description == null)
+        self.device_query_err = error.OutOfMemory;
     var device = Device{
         .id = self.allocator.dupeZ(u8, std.mem.span(info.*.name)) catch |err| {
             self.device_query_err = err;
@@ -504,28 +478,21 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
             self.device_query_err = err;
             return;
         },
-        .aim = .output,
+        .aim = .input,
         .is_raw = false,
-        .layout = fromPAChannelMap(info.*.channel_map) catch |err| {
-            self.device_query_err = err;
-            return;
-        },
+        .layout = fromPAChannelMap(info.*.channel_map) orelse return, // Incompatible device. skip it
         .formats = allDeviceFormats(),
-        .current_format = fromPAFormat(info.*.sample_spec.format) catch |err| {
-            self.device_query_err = err;
-            return;
-        },
+        .format = fromPAFormat(info.*.sample_spec.format) catch return, // Incompatible device. skip it,
         .sample_rate_range = .{
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
             .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
         },
-        .current_sample_rate = info.*.sample_spec.rate,
-        .current_software_latency = null,
-        .software_latency_min = null,
-        .software_latency_max = null,
+        .sample_rate = info.*.sample_spec.rate,
+        .software_latency = c.PA_SINK_LATENCY,
+        .software_latency_range = .{ .min = c.PA_SINK_LATENCY, .max = c.PA_SINK_LATENCY },
     };
 
-    self.devices_info.outputs.append(self.allocator, device) catch |err| {
+    self.devices_info.list.append(self.allocator, device) catch |err| {
         self.device_query_err = err;
         return;
     };
@@ -538,7 +505,8 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
         return;
     }
     if (self.device_query_err != null) return;
-    if (info.*.name == null or info.*.description == null) self.device_query_err = error.OutOfMemory;
+    if (info.*.name == null or info.*.description == null)
+        self.device_query_err = error.OutOfMemory;
     var device = Device{
         .id = self.allocator.dupeZ(u8, std.mem.span(info.*.name)) catch |err| {
             self.device_query_err = err;
@@ -548,28 +516,21 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
             self.device_query_err = err;
             return;
         },
-        .aim = .input,
+        .aim = .output,
         .is_raw = false,
-        .layout = fromPAChannelMap(info.*.channel_map) catch |err| {
-            self.device_query_err = err;
-            return;
-        },
+        .layout = fromPAChannelMap(info.*.channel_map) orelse return, // Incompatible device. skip it
         .formats = allDeviceFormats(),
-        .current_format = fromPAFormat(info.*.sample_spec.format) catch |err| {
-            self.device_query_err = err;
-            return;
-        },
+        .format = fromPAFormat(info.*.sample_spec.format) catch return, // Incompatible device. skip it,
         .sample_rate_range = .{
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
             .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
         },
-        .current_sample_rate = info.*.sample_spec.rate,
-        .current_software_latency = null,
-        .software_latency_min = null,
-        .software_latency_max = null,
+        .sample_rate = info.*.sample_spec.rate,
+        .software_latency = c.PA_SINK_LATENCY,
+        .software_latency_range = .{ .min = c.PA_SINK_LATENCY, .max = c.PA_SINK_LATENCY },
     };
 
-    self.devices_info.inputs.append(self.allocator, device) catch |err| {
+    self.devices_info.list.append(self.allocator, device) catch |err| {
         self.device_query_err = err;
         return;
     };
@@ -588,44 +549,27 @@ fn serverInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_server_info, userd
     };
 }
 
-fn fromPAChannelMap(map: c.pa_channel_map) !ChannelLayout {
-    var channels = ChannelLayout.Array.init(map.channels) catch return error.IncompatibleBackend;
+fn fromPAChannelMap(map: c.pa_channel_map) ?ChannelLayout {
+    var channels = ChannelLayout.Array.init(map.channels) catch return null;
     for (channels.slice()) |*ch, i|
-        ch.* = try fromPAChannelPos(map.map[i]);
-    var layout = ChannelLayout{
-        .name = null,
-        .channels = channels,
-    };
-    for (builtin_channel_layouts) |bl| {
-        if (bl.eql(layout)) {
-            layout.name = bl.name;
-            break;
-        }
-    }
-    return layout;
+        ch.* = fromPAChannelPos(map.map[i]);
+    return getLayoutByChannels(channels.slice());
 }
 
-fn fromPAChannelPos(pos: c.pa_channel_position_t) !ChannelId {
+fn fromPAChannelPos(pos: c.pa_channel_position_t) ChannelId {
     return switch (pos) {
         c.PA_CHANNEL_POSITION_MONO => .front_center,
-        c.PA_CHANNEL_POSITION_FRONT_LEFT => .front_left,
-        c.PA_CHANNEL_POSITION_FRONT_RIGHT => .front_right,
-        c.PA_CHANNEL_POSITION_FRONT_CENTER => .front_center,
+        c.PA_CHANNEL_POSITION_FRONT_LEFT => .front_left, // = c.PA_CHANNEL_POSITION_LEFT
+        c.PA_CHANNEL_POSITION_FRONT_RIGHT => .front_right, // = c.PA_CHANNEL_POSITION_RIGHT
+        c.PA_CHANNEL_POSITION_FRONT_CENTER => .front_center, // = c.PA_CHANNEL_POSITION_CENTER
         c.PA_CHANNEL_POSITION_REAR_CENTER => .back_center,
         c.PA_CHANNEL_POSITION_REAR_LEFT => .back_left,
         c.PA_CHANNEL_POSITION_REAR_RIGHT => .back_right,
-        c.PA_CHANNEL_POSITION_LFE => .lfe,
+        c.PA_CHANNEL_POSITION_LFE => .lfe, // = c.PA_CHANNEL_POSITION_SUBWOOFER
         c.PA_CHANNEL_POSITION_FRONT_LEFT_OF_CENTER => .front_left_center,
         c.PA_CHANNEL_POSITION_FRONT_RIGHT_OF_CENTER => .front_right_center,
         c.PA_CHANNEL_POSITION_SIDE_LEFT => .side_left,
         c.PA_CHANNEL_POSITION_SIDE_RIGHT => .side_right,
-        c.PA_CHANNEL_POSITION_TOP_CENTER => .top_center,
-        c.PA_CHANNEL_POSITION_TOP_FRONT_LEFT => .top_front_left,
-        c.PA_CHANNEL_POSITION_TOP_FRONT_RIGHT => .top_front_right,
-        c.PA_CHANNEL_POSITION_TOP_FRONT_CENTER => .top_front_center,
-        c.PA_CHANNEL_POSITION_TOP_REAR_LEFT => .top_back_left,
-        c.PA_CHANNEL_POSITION_TOP_REAR_RIGHT => .top_back_right,
-        c.PA_CHANNEL_POSITION_TOP_REAR_CENTER => .top_back_center,
 
         c.PA_CHANNEL_POSITION_AUX0 => .aux0,
         c.PA_CHANNEL_POSITION_AUX1 => .aux1,
@@ -644,30 +588,52 @@ fn fromPAChannelPos(pos: c.pa_channel_position_t) !ChannelId {
         c.PA_CHANNEL_POSITION_AUX14 => .aux14,
         c.PA_CHANNEL_POSITION_AUX15 => .aux15,
 
-        else => error.InvalidChannelPos,
+        // let's keep this unreachable for now, since i don't see why someone may use > 15 AUX
+        c.PA_CHANNEL_POSITION_AUX16,
+        c.PA_CHANNEL_POSITION_AUX17,
+        c.PA_CHANNEL_POSITION_AUX18,
+        c.PA_CHANNEL_POSITION_AUX19,
+        c.PA_CHANNEL_POSITION_AUX20,
+        c.PA_CHANNEL_POSITION_AUX21,
+        c.PA_CHANNEL_POSITION_AUX22,
+        c.PA_CHANNEL_POSITION_AUX23,
+        c.PA_CHANNEL_POSITION_AUX24,
+        c.PA_CHANNEL_POSITION_AUX25,
+        c.PA_CHANNEL_POSITION_AUX26,
+        c.PA_CHANNEL_POSITION_AUX27,
+        c.PA_CHANNEL_POSITION_AUX28,
+        c.PA_CHANNEL_POSITION_AUX29,
+        c.PA_CHANNEL_POSITION_AUX30,
+        c.PA_CHANNEL_POSITION_AUX31,
+        => unreachable,
+
+        c.PA_CHANNEL_POSITION_TOP_CENTER => .top_center,
+        c.PA_CHANNEL_POSITION_TOP_FRONT_LEFT => .top_front_left,
+        c.PA_CHANNEL_POSITION_TOP_FRONT_RIGHT => .top_front_right,
+        c.PA_CHANNEL_POSITION_TOP_FRONT_CENTER => .top_front_center,
+        c.PA_CHANNEL_POSITION_TOP_REAR_LEFT => .top_back_left,
+        c.PA_CHANNEL_POSITION_TOP_REAR_RIGHT => .top_back_right,
+        c.PA_CHANNEL_POSITION_TOP_REAR_CENTER => .top_back_center,
+
+        else => unreachable,
     };
 }
 
 fn fromPAFormat(format: c.pa_sample_format_t) !Format {
     return switch (format) {
         c.PA_SAMPLE_U8 => .u8,
+        c.PA_SAMPLE_ALAW, c.PA_SAMPLE_ULAW => error.InvalidFormat,
         c.PA_SAMPLE_S16LE => .s16le,
         c.PA_SAMPLE_S16BE => .s16be,
         c.PA_SAMPLE_FLOAT32LE => .float32le,
         c.PA_SAMPLE_FLOAT32BE => .float32be,
         c.PA_SAMPLE_S32LE => .s32le,
         c.PA_SAMPLE_S32BE => .s32be,
+        c.PA_SAMPLE_S24LE => .s32le,
+        c.PA_SAMPLE_S24BE => .s32be,
         c.PA_SAMPLE_S24_32LE => .s24le,
         c.PA_SAMPLE_S24_32BE => .s24be,
-
-        c.PA_SAMPLE_MAX,
-        c.PA_SAMPLE_INVALID,
-        c.PA_SAMPLE_ALAW,
-        c.PA_SAMPLE_ULAW,
-        c.PA_SAMPLE_S24LE,
-        c.PA_SAMPLE_S24BE,
-        => error.InvalidFormat,
-
+        c.PA_SAMPLE_INVALID => unreachable,
         else => unreachable,
     };
 }
@@ -676,18 +642,23 @@ pub fn toPAFormat(format: Format) !c.pa_sample_format_t {
     return switch (format) {
         .u8 => c.PA_SAMPLE_U8,
         .s16le => c.PA_SAMPLE_S16LE,
-        .s24le => c.PA_SAMPLE_S24_32LE,
-        .s32le => c.PA_SAMPLE_S32LE,
-        .float32le => c.PA_SAMPLE_FLOAT32LE,
         .s16be => c.PA_SAMPLE_S16BE,
-        .s24be => c.PA_SAMPLE_S24_32BE,
+        .s24le => c.PA_SAMPLE_S24LE,
+        .s24be => c.PA_SAMPLE_S24LE,
+        .s24_32le => c.PA_SAMPLE_S24_32LE,
+        .s24_32be => c.PA_SAMPLE_S24_32BE,
+        .s32le => c.PA_SAMPLE_S32LE,
         .s32be => c.PA_SAMPLE_S32BE,
+        .float32le => c.PA_SAMPLE_FLOAT32LE,
         .float32be => c.PA_SAMPLE_FLOAT32BE,
+
         .s8,
         .u16le,
         .u16be,
         .u24le,
         .u24be,
+        .u24_32le,
+        .u24_32be,
         .u32le,
         .u32be,
         .float64le,

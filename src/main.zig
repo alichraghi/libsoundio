@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const channel_layout = @import("channel_layout.zig");
+const PipeWire = @import("PipeWire.zig");
 const PulseAudio = @import("PulseAudio.zig");
 const Jack = @import("Jack.zig");
 
@@ -12,10 +13,12 @@ var connected = false;
 var current_backend: ?Backend = null;
 
 pub const Backend = enum {
+    pipewire,
     pulseaudio,
     jack,
 };
 const BackendData = union(Backend) {
+    pipewire: *PipeWire,
     pulseaudio: *PulseAudio,
     jack: *Jack,
 };
@@ -28,9 +31,14 @@ pub const ConnectError = error{
     OutOfMemory,
     Disconnected,
     InvalidServer,
+    ConnectionRefused,
+    ConnectionTerminated,
     InitAudioBackend,
     SystemResources,
     NoSuchClient,
+    IncompatibleBackend,
+    InvalidFormat,
+    Interrupted,
 };
 
 pub const ShutdownFn = *const fn (userdata: ?*anyopaque) void;
@@ -52,14 +60,27 @@ pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options
             BackendData,
             @tagName(b),
             switch (b) {
-                .pulseaudio => try PulseAudio.connect(allocator),
-                .jack => try Jack.connect(allocator, options),
+                .pipewire => blk: {
+                    current_backend = .pipewire;
+                    break :blk try PipeWire.connect(allocator);
+                },
+                .pulseaudio => blk: {
+                    current_backend = .pulseaudio;
+                    break :blk try PulseAudio.connect(allocator);
+                },
+                .jack => blk: {
+                    current_backend = .jack;
+                    break :blk try Jack.connect(allocator, options);
+                },
             },
         ) };
     }
 
     if (current_backend) |b| {
         return switch (b) {
+            .pipewire => .{ .data = .{
+                .pipewire = try PipeWire.connect(allocator),
+            } },
             .pulseaudio => .{ .data = .{
                 .pulseaudio = try PulseAudio.connect(allocator),
             } },
@@ -95,9 +116,9 @@ pub fn deinit(self: SoundIO) void {
 pub const FlushEventsError = error{
     OutOfMemory,
     Interrupted,
+    Disconnected,
     IncompatibleBackend,
     InvalidFormat,
-    InvalidChannelPos,
 };
 
 pub fn flushEvents(self: SoundIO) FlushEventsError!void {
@@ -118,16 +139,23 @@ pub fn wakeUp(self: SoundIO) void {
     };
 }
 
-pub fn devicesList(self: SoundIO, aim: Device.Aim) []const Device {
+pub fn devicesList(self: SoundIO) []const Device {
     return switch (self.data) {
-        inline else => |b| b.devicesList(aim),
+        inline else => |b| b.devicesList(),
     };
 }
 
-pub fn getDevice(self: SoundIO, aim: Device.Aim, index: ?usize) Device {
-    return switch (self.data) {
-        inline else => |b| b.getDevice(aim, index),
-    };
+pub fn getDevice(self: SoundIO, aim: Device.Aim, index: ?usize) ?Device {
+    switch (self.data) {
+        inline else => |b| {
+            var i = index orelse switch (aim) {
+                .output => b.devices_info.default_output_index,
+                .input => b.devices_info.default_input_index,
+            };
+            if (i >= b.devices_info.list.items.len) return null;
+            return b.devices_info.list.items[i];
+        },
+    }
 }
 
 pub const CreateStreamError = error{
@@ -144,7 +172,7 @@ pub const OutstreamOptions = struct {
     name: []const u8 = "SoundIoOutstream",
     software_latency: f64 = 0.0,
     sample_rate: u32 = 48000,
-    format: Format = if (builtin.cpu.arch.endian() == .Little) .float32le else .float32be,
+    format: Format = Format.toNativeEndian(.float32le),
     userdata: ?*anyopaque = null,
 };
 
@@ -200,10 +228,12 @@ pub const Outstream = struct {
     backend_data: OutstreamBackendData,
     const OutstreamBackendData = union {
         pulseaudio: PulseAudio.OutstreamData,
+        pipewire: PipeWire.OutstreamData,
     };
 
     pub fn deinit(self: *Outstream) void {
         return switch (current_backend.?) {
+            .pipewire => PipeWire.outstreamDeinit(self),
             .pulseaudio => PulseAudio.outstreamDeinit(self),
             .jack => Jack.outstreamDeinit(self),
         };
@@ -211,6 +241,7 @@ pub const Outstream = struct {
 
     pub fn start(self: *Outstream) StreamError!void {
         return switch (current_backend.?) {
+            .pipewire => PipeWire.outstreamStart(self),
             .pulseaudio => PulseAudio.outstreamStart(self),
             .jack => Jack.outstreamStart(self),
         };
@@ -218,6 +249,7 @@ pub const Outstream = struct {
 
     pub fn beginWrite(self: *Outstream, frame_count: *usize) StreamError![]const ChannelArea {
         return switch (current_backend.?) {
+            .pipewire => PipeWire.outstreamBeginWrite(self, frame_count),
             .pulseaudio => PulseAudio.outstreamBeginWrite(self, frame_count),
             .jack => Jack.outstreamBeginWrite(self, frame_count),
         };
@@ -225,6 +257,7 @@ pub const Outstream = struct {
 
     pub fn endWrite(self: *Outstream) StreamError!void {
         return switch (current_backend.?) {
+            .pipewire => PipeWire.outstreamEndWrite(self),
             .pulseaudio => PulseAudio.outstreamEndWrite(self),
             .jack => Jack.outstreamEndWrite(self),
         };
@@ -232,6 +265,7 @@ pub const Outstream = struct {
 
     pub fn clearBuffer(self: *Outstream) StreamError!void {
         return switch (current_backend.?) {
+            .pipewire => PipeWire.outstreamClearBuffer(self),
             .pulseaudio => PulseAudio.outstreamClearBuffer(self),
             .jack => Jack.outstreamClearBuffer(self),
         };
@@ -239,6 +273,7 @@ pub const Outstream = struct {
 
     pub fn getLatency(self: *Outstream) StreamError!f64 {
         return switch (current_backend.?) {
+            .pipewire => PipeWire.outstreamGetLatency(self),
             .pulseaudio => PulseAudio.outstreamGetLatency(self),
             .jack => Jack.outstreamGetLatency(self),
         };
@@ -246,6 +281,7 @@ pub const Outstream = struct {
 
     pub fn pause(self: *Outstream) StreamError!void {
         switch (current_backend.?) {
+            .pipewire => try PipeWire.outstreamPausePlay(self, true),
             .pulseaudio => try PulseAudio.outstreamPausePlay(self, true),
             .jack => try Jack.outstreamPausePlay(self, true),
         }
@@ -255,6 +291,7 @@ pub const Outstream = struct {
     pub fn play(self: *Outstream) StreamError!void {
         if (!self.paused) return;
         switch (current_backend.?) {
+            .pipewire => try PipeWire.outstreamPausePlay(self, false),
             .pulseaudio => try PulseAudio.outstreamPausePlay(self, false),
             .jack => try Jack.outstreamPausePlay(self, false),
         }
@@ -264,6 +301,7 @@ pub const Outstream = struct {
     pub fn setVolume(self: *Outstream, vol: f64) StreamError!void {
         std.debug.assert(vol <= 1.0);
         return switch (current_backend.?) {
+            .pipewire => PipeWire.outstreamSetVolume(self, vol),
             .pulseaudio => PulseAudio.outstreamSetVolume(self, vol),
             .jack => Jack.outstreamSetVolume(self, vol),
         };
@@ -276,6 +314,7 @@ pub const Outstream = struct {
 
     pub fn volume(self: *Outstream) GetVolumeError!f64 {
         return switch (current_backend.?) {
+            .pipewire => PulseAudio.outstreamVolume(self),
             .pulseaudio => PulseAudio.outstreamVolume(self),
             .jack => Jack.outstreamVolume(self),
         };
@@ -294,15 +333,15 @@ pub const Device = struct {
     is_raw: bool,
     layout: ChannelLayout,
     formats: []const Format,
-    current_format: Format,
-    sample_rate_range: Range,
-    current_sample_rate: u32,
-    software_latency_min: ?f64,
-    software_latency_max: ?f64,
-    current_software_latency: ?f64,
+    format: Format,
+    sample_rate: u32,
+    sample_rate_range: Range(u32),
+    software_latency: f64,
+    software_latency_range: Range(f64),
 
     pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
         return switch (current_backend.?) {
+            .pipewire => PipeWire.deviceDeinit(self, allocator),
             .pulseaudio => PulseAudio.deviceDeinit(self, allocator),
             .jack => Jack.deviceDeinit(self, allocator),
         };
@@ -314,8 +353,7 @@ pub const Device = struct {
 };
 
 pub const DevicesInfo = struct {
-    outputs: std.ArrayListUnmanaged(Device),
-    inputs: std.ArrayListUnmanaged(Device),
+    list: std.ArrayListUnmanaged(Device),
     default_output_index: usize,
     default_input_index: usize,
 };
@@ -323,15 +361,15 @@ pub const DevicesInfo = struct {
 pub const ChannelLayout = struct {
     pub const Array = std.BoundedArray(ChannelId, max_channels);
 
-    name: ?[]const u8,
+    name: []const u8,
     channels: Array,
 
-    pub fn eql(a: ChannelLayout, b: ChannelLayout) bool {
-        if (a.channels.len != b.channels.len)
-            return false;
-        for (a.channels.constSlice()) |_, i|
-            if (a.channels.get(i) != b.channels.get(i))
+    pub fn eql(a: ChannelLayout, b_channels: []const ChannelId) bool {
+        if (a.channels.len != b_channels.len) return false;
+        for (a.channels.slice()) |_, i| {
+            if (a.channels.get(i) != b_channels[i])
                 return false;
+        }
         return true;
     }
 };
@@ -439,6 +477,10 @@ pub const Format = enum {
     s24be,
     u24le,
     u24be,
+    s24_32le,
+    s24_32be,
+    u24_32le,
+    u24_32be,
     s32le,
     s32be,
     u32le,
@@ -449,11 +491,56 @@ pub const Format = enum {
     float64le,
     float64be,
 
+    pub fn toNativeEndian(self: Format) Format {
+        if (builtin.cpu.arch.endian() == .Little) {
+            return switch (self) {
+                .s16be => .s16le,
+                .u16be => .u16le,
+                .s24be => .s24le,
+                .u24be => .u24le,
+                .s24_32be => .s24_32le,
+                .u24_32be => .u24_32le,
+                .s32be => .s32le,
+                .u32be => .u32le,
+                // Range -1.0 to 1.0
+                .float32be => .float32le,
+                .float64be => .float64le,
+                else => self,
+            };
+        } else {
+            return switch (self) {
+                .s16le => .s16be,
+                .u16le => .u16be,
+                .s24le => .s24be,
+                .u24le => .u24be,
+                .s24_32le => .s24_32be,
+                .u24_32le => .u24_32be,
+                .s32le => .s32be,
+                .u32le => .u32be,
+                // Range -1.0 to 1.0
+                .float32le => .float32be,
+                .float64le => .float64be,
+                else => self,
+            };
+        }
+    }
+
     pub fn bytesPerSample(self: Format) u5 {
         return switch (self) {
             .s8, .u8 => 1,
             .s16le, .s16be, .u16le, .u16be => 2,
-            .s24le, .s24be, .u24le, .u24be, .s32le, .s32be, .u32le, .u32be, .float32le, .float32be => 4,
+            .s24le, .s24be, .u24le, .u24be => 3,
+            .s24_32le,
+            .s24_32be,
+            .u24_32le,
+            .u24_32be,
+            .s32le,
+            .s32be,
+            .u32le,
+            .u32be,
+            .float32le,
+            .float32be,
+            => 4,
             .float64le, .float64be => 8,
         };
     }
@@ -463,7 +550,9 @@ pub const Format = enum {
     }
 };
 
-pub const Range = struct {
-    min: u32,
-    max: u32,
-};
+pub fn Range(comptime T: type) type {
+    return struct {
+        min: T,
+        max: T,
+    };
+}
