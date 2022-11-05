@@ -237,17 +237,6 @@ pub fn wakeUp(self: *Jack) void {
     _ = self;
 }
 
-pub fn getDevice(self: Jack, aim: Device.Aim, index: ?usize) Device {
-    _ = self;
-    _ = aim;
-    _ = index;
-    return undefined;
-}
-
-pub fn devicesList(self: Jack) []const Device {
-    return self.devices_info.list.items;
-}
-
 const OpenStreamError = error{
     OutOfMemory,
     IncompatibleBackend,
@@ -255,7 +244,7 @@ const OpenStreamError = error{
     OpeningDevice,
 };
 
-pub fn outstreamOpen(self: *Jack, outstream: *Outstream, device: Device) !void {
+pub fn openOutstream(self: *Jack, outstream: *Outstream, device: Device) !void {
     _ = self;
     _ = outstream;
     _ = device;

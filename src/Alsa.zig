@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @cImport(@cInclude("alsa/asoundlib.h"));
+const c = @cImport(@cInclude("asoundlib.h"));
 const Device = @import("main.zig").Device;
 const Outstream = @import("main.zig").Outstream;
 const ChannelLayout = @import("main.zig").ChannelLayout;
@@ -35,8 +35,11 @@ shutdown_emmited: bool, // TODO: make this atomic
 shutdownFn: ShutdownFn,
 pending_files: std.ArrayListUnmanaged([]const u8),
 aborted: std.atomic.Atomic(bool),
+device_scan_queued: std.atomic.Atomic(bool),
 
-fn defaultShutdownFn(_: ?*anyopaque) void {}
+fn defaultShutdownFn(_: ?*anyopaque) void {
+    unreachable;
+}
 
 pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
     var self = try allocator.create(Alsa);
@@ -59,8 +62,10 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
         .shutdownFn = options.shutdownFn orelse defaultShutdownFn,
         .pending_files = .{},
         .aborted = std.atomic.Atomic(bool).init(false),
+        .device_scan_queued = std.atomic.Atomic(bool).init(false),
     };
 
+    // IN.NONBLOCK
     self.notify_fd = std.os.inotify_init1(IN.NONBLOCK) catch |err| switch (err) {
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
@@ -85,6 +90,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
         error.Unexpected,
         => unreachable,
     };
+    // O.NONBLOCK
     self.notify_pipe_fd = std.os.pipe2(O.NONBLOCK) catch |err| switch (err) {
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
@@ -92,7 +98,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
         error.Unexpected => unreachable,
     };
 
-    _ = c.snd_lib_error_set_handler(null);
+    // _ = c.snd_lib_error_set_handler(null);
     self.wakeUpDevicePoll();
     self.thread = std.Thread.spawn(.{}, threadRun, .{self}) catch |err| switch (err) {
         error.ThreadQuotaExceeded,
@@ -103,7 +109,6 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
         error.Unexpected => unreachable,
     };
 
-    try self.refreshDevices();
     return self;
 }
 
@@ -140,22 +145,12 @@ fn threadRun(self: *Alsa) !void {
         var got_rescan_event = false;
         if (fds[0].revents & POLL.IN != 0) {
             while (true) {
-                const len = std.c.read(self.notify_fd, &buf, buf.len);
-                if (len < 0) {
-                    switch (std.os.errno(len)) {
-                        .FAULT,
-                        .INVAL,
-                        .BADF,
-                        .IO,
-                        .ISDIR,
-                        => {
-                            self.shutdownFn(self.userdata);
-                            return;
-                        },
-                        .INTR, .AGAIN => continue,
-                        else => unreachable,
-                    }
-                } else if (len == 0) break;
+                const len = std.os.read(self.notify_fd, &buf) catch |err| {
+                    if (err == error.WouldBlock) break;
+                    self.shutdownFn(self.userdata);
+                    return;
+                };
+                if (len == 0) break;
 
                 var i: usize = 0;
                 var event: *InotifyEvent = undefined;
@@ -206,57 +201,43 @@ fn threadRun(self: *Alsa) !void {
         if (fds[1].revents & POLL.IN != 0) {
             got_rescan_event = true;
             while (true) {
-                const len = std.c.read(self.notify_pipe_fd[0], &buf, buf.len);
-                if (len < 0) {
-                    switch (std.os.errno(len)) {
-                        .FAULT,
-                        .INVAL,
-                        .BADF,
-                        .IO,
-                        .ISDIR,
-                        => {
-                            self.shutdownFn(self.userdata);
-                            return;
-                        },
-                        .INTR, .AGAIN => break,
-                        else => unreachable,
-                    }
-                } else if (len == 0) break;
+                const len = std.os.read(self.notify_pipe_fd[0], &buf) catch |err| {
+                    if (err == error.WouldBlock) break;
+                    self.shutdownFn(self.userdata);
+                    return;
+                };
+                if (len == 0) break;
             }
         }
         if (got_rescan_event) {
-            self.refreshDevices() catch {
-                self.shutdownFn(self.userdata);
-                return;
-            };
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.device_scan_queued.store(true, .Monotonic);
+            self.cond.signal();
         }
     }
 }
 
 fn wakeUpDevicePoll(self: *Alsa) void {
-    const res = std.os.errno(std.c.write(self.notify_pipe_fd[1], "a", 1));
-    std.debug.assert(res != .BADF);
-    std.debug.assert(res != .IO);
-    std.debug.assert(res != .NOSPC);
-    std.debug.assert(res != .PERM);
-    std.debug.assert(res != .PIPE);
-    std.debug.assert(res == .SUCCESS);
+    _ = std.os.write(self.notify_pipe_fd[1], "a") catch unreachable;
 }
 
 pub fn refreshDevices(self: *Alsa) !void {
-    if (c.snd_config_update_free_global() < 0 or c.snd_config_update() < 0)
+    if (c.snd_config_update_free_global() < 0)
+        return error.SystemResources;
+    if (c.snd_config_update() < 0)
         return error.SystemResources;
 
-    var hints: [*c][*c]?*anyopaque = null;
-    if (c.snd_device_name_hint(-1, "pcm", hints) < 0)
+    var hints: []?*anyopaque = undefined;
+    if (c.snd_device_name_hint(-1, "pcm", @ptrCast([*c][*c]?*anyopaque, &hints)) < 0)
         return error.OutOfMemory;
-
-    // var sysdefault_output_index = -1;
-    // var sysdefault_input_index = -1;
+    defer _ = c.snd_device_name_free_hint(hints[0..].ptr);
 
     var i: usize = 0;
     while (hints[i] != null) : (i += 1) {
-        const name = std.mem.span(c.snd_device_name_get_hint(hints[i], "NAME"));
+        const name = std.mem.span(c.snd_device_name_get_hint(hints[i], "NAME") orelse continue);
+        defer std.heap.c_allocator.free(name); // TODO: require a c_allocator option
+
         // null - libsoundio has its own dummy backend. API clients should use
         // that instead of alsa null device.
         if (std.mem.eql(u8, name, "null") or
@@ -269,9 +250,143 @@ pub fn refreshDevices(self: *Alsa) !void {
             std.mem.startsWith(u8, name, "surround51:") or
             std.mem.startsWith(u8, name, "surround71:"))
         {
-            self.allocator.free(name);
             continue;
         }
+
+        const desc = c.snd_device_name_get_hint(hints[i], "DESC");
+        var desc_first: ?[]const u8 = null;
+        var desc_next: ?[]const u8 = null;
+        if (desc != null) {
+            var desc_iter = std.mem.split(u8, std.mem.span(desc), "\n");
+            desc_first = desc_iter.first();
+            desc_next = desc_iter.next();
+        }
+
+        // WTF!?
+        var aims = std.BoundedArray(Device.Aim, 2).init(0) catch unreachable;
+
+        if (c.snd_device_name_get_hint(hints[i], "IOID")) |io| {
+            const io_span = std.mem.span(io);
+            if (std.mem.eql(u8, io_span, "Output")) {
+                aims.append(.output) catch unreachable;
+            } else {
+                aims.append(.input) catch unreachable;
+            }
+            std.heap.c_allocator.free(io_span);
+        } else {
+            aims.appendSlice(&.{ .output, .input }) catch unreachable;
+        }
+
+        for (aims.slice()) |aim| {
+            var device = Device{
+                .id = try self.allocator.dupeZ(u8, name),
+                .name = blk: {
+                    if (desc_first == null)
+                        break :blk try self.allocator.dupeZ(u8, name);
+                    if (desc_next == null)
+                        break :blk try self.allocator.dupeZ(u8, desc_first.?);
+                    break :blk try std.fmt.allocPrintZ(self.allocator, "{s}: {s}", .{ desc_first.?, desc_next.? });
+                },
+                .aim = aim,
+                .is_raw = false,
+                .layout = undefined,
+                .formats = undefined,
+                .format = undefined,
+                .sample_rate = undefined,
+                .sample_rate_range = undefined,
+                .software_latency = undefined,
+                .software_latency_range = undefined,
+            };
+            errdefer {
+                self.allocator.free(device.id);
+                self.allocator.free(device.name);
+            }
+
+            try self.devices_info.list.append(self.allocator, device);
+
+            const is_default = std.mem.startsWith(u8, name, "default:") or std.mem.eql(u8, name, "default") or std.mem.startsWith(u8, name, "sysdefault:") or std.mem.eql(u8, name, "sysdefault");
+            if (is_default) {
+                switch (aim) {
+                    .output => self.devices_info.default_output_index = self.devices_info.list.items.len,
+                    .input => self.devices_info.default_input_index = self.devices_info.list.items.len,
+                }
+            }
+        }
+    }
+
+    var card_index: c_int = -1;
+    if (c.snd_card_next(&card_index) < 0)
+        return error.SystemResources;
+
+    var card_info = try self.allocator.create(snd_ctl_card_info_t);
+    defer self.allocator.destroy(card_info);
+    var pcm_info = try self.allocator.create(snd_pcm_info_t);
+    defer self.allocator.destroy(pcm_info);
+
+    while (card_index >= 0) {
+        var handle: ?*c.snd_ctl_t = undefined;
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrintZ(&name_buf, "hw:{d}", .{card_index}) catch unreachable;
+        _ = switch (std.os.errno(c.snd_ctl_open(@ptrCast([*c]?*c.snd_ctl_t, &handle), name.ptr, 0))) {
+            .SUCCESS => {},
+            .NOENT => break,
+            else => return error.OpeningDevice,
+        };
+        defer _ = c.snd_ctl_close(handle);
+
+        if (std.os.errno(c.snd_ctl_card_info(handle, @ptrCast(*c.snd_ctl_card_info_t, card_info))) != .SUCCESS)
+            return error.SystemResources;
+        const card_name = c.snd_ctl_card_info_get_name(@ptrCast(*c.snd_ctl_card_info_t, card_info));
+
+        var device_index: c_int = -1;
+        while (true) {
+            if (c.snd_ctl_pcm_next_device(handle, &device_index) < 0)
+                return error.SystemResources;
+
+            if (device_index < 0) break;
+
+            c.snd_pcm_info_set_device(@ptrCast(*c.snd_pcm_info_t, pcm_info), @intCast(c_uint, device_index));
+            c.snd_pcm_info_set_subdevice(@ptrCast(*c.snd_pcm_info_t, pcm_info), 0);
+
+            for (&[_]Device.Aim{ .output, .input }) |aim| {
+                const snd_stream: c.snd_pcm_stream_t = switch (aim) {
+                    .output => c.SND_PCM_STREAM_PLAYBACK,
+                    .input => c.SND_PCM_STREAM_CAPTURE,
+                };
+                c.snd_pcm_info_set_stream(@ptrCast(*c.snd_pcm_info_t, pcm_info), snd_stream);
+
+                _ = switch (std.os.errno(c.snd_ctl_pcm_info(handle, @ptrCast(*c.snd_pcm_info_t, pcm_info)))) {
+                    .SUCCESS => {},
+                    .NOENT => continue,
+                    else => return error.SystemResources,
+                };
+
+                const device_name = c.snd_pcm_info_get_name(@ptrCast(*c.snd_pcm_info_t, pcm_info));
+
+                var device = Device{
+                    .id = try std.fmt.allocPrintZ(self.allocator, "hw:{d},{d}", .{ card_index, device_index }),
+                    .name = try std.fmt.allocPrintZ(self.allocator, "{s} {s}", .{ card_name, device_name }),
+                    .aim = aim,
+                    .is_raw = true,
+                    .layout = undefined,
+                    .formats = undefined,
+                    .format = undefined,
+                    .sample_rate = undefined,
+                    .sample_rate_range = undefined,
+                    .software_latency = undefined,
+                    .software_latency_range = undefined,
+                };
+                errdefer {
+                    self.allocator.free(device.id);
+                    self.allocator.free(device.name);
+                }
+
+                try self.devices_info.list.append(self.allocator, device);
+            }
+        }
+
+        if (std.os.errno(c.snd_card_next(&card_index)) != .SUCCESS)
+            return error.SystemResources;
     }
 }
 
@@ -289,30 +404,27 @@ pub fn deinit(self: *Alsa) void {
 }
 
 pub fn flushEvents(self: *Alsa) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
     try self.refreshDevices();
 }
 
 pub fn waitEvents(self: *Alsa) !void {
-    // while (!self.device_scan_queued.loadUnchecked())
-    //     self.cond.wait(&self.mutex);
+    self.mutex.lock();
+    defer self.mutex.unlock();
 
-    // defer self.device_scan_queued.storeUnchecked(false);
+    while (!self.device_scan_queued.load(.Acquire))
+        self.cond.wait(&self.mutex);
+
+    defer self.device_scan_queued.store(false, .Monotonic);
     try self.refreshDevices();
 }
 
 pub fn wakeUp(self: *Alsa) void {
-    _ = self;
-}
-
-pub fn getDevice(self: Alsa, aim: Device.Aim, index: ?usize) Device {
-    _ = self;
-    _ = aim;
-    _ = index;
-    return undefined;
-}
-
-pub fn devicesList(self: Alsa) []const Device {
-    return self.devices_info.list.items;
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    self.device_scan_queued.store(true, .Monotonic);
+    self.cond.signal();
 }
 
 const OpenStreamError = error{
@@ -371,7 +483,41 @@ pub fn outstreamVolume(self: *Outstream) error{}!f64 {
 }
 
 pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
-    _ = self;
-    _ = allocator;
-    // allocator.free(self.id);
+    allocator.free(self.id);
+    allocator.free(self.name);
 }
+
+// Generated from types.h
+pub const snd_pcm_sync_id_t = extern union {
+    id: [16]u8,
+    id16: [8]c_ushort,
+    id32: [4]c_uint,
+};
+
+pub const snd_pcm_info_t = extern struct {
+    device: c_uint,
+    subdevice: c_uint,
+    stream: c_int,
+    card: c_int,
+    id: [64]u8,
+    name: [80]u8,
+    subname: [32]u8,
+    dev_class: c_int,
+    dev_subclass: c_int,
+    subdevices_count: c_uint,
+    subdevices_avail: c_uint,
+    sync: snd_pcm_sync_id_t,
+    reserved: [64]u8,
+};
+
+pub const snd_ctl_card_info_t = extern struct {
+    card: c_int,
+    pad: c_int,
+    id: [16]u8,
+    driver: [16]u8,
+    name: [32]u8,
+    longname: [80]u8,
+    reserved_: [16]u8,
+    mixername: [80]u8,
+    components: [128]u8,
+};

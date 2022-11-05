@@ -16,9 +16,17 @@
             "program": "${workspaceFolder}/build/sio_sine",
             "args": [
                 "--backend",
-                "pulseaudio",
+                "alsa",
             ],
             "preLaunchTask": "Build C"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug TC",
+            "program": "${workspaceFolder}/z",
+            "args": [],
+            "preLaunchTask": "Build TC"
         }
     ]
 }

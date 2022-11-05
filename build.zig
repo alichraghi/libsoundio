@@ -22,14 +22,12 @@ pub fn build(b: *std.build.Builder) void {
 
 fn link(step: *std.build.LibExeObjStep) void {
     step.linkLibC();
-    step.addCSourceFile("src/pipewire/builder.c", &.{"-D_REENTRANT"});
-    step.defineCMacro("_REENTRANT", null);
-
-    step.addIncludePath("/usr/include/spa-0.2");
-    step.addIncludePath("/usr/include/pipewire-0.3");
-    step.linkSystemLibraryName("pipewire-0.3");
-    step.linkSystemLibraryName("pulse");
-    step.linkSystemLibraryName("jack");
+    step.addIncludePath("/usr/include");
+    step.addIncludePath("alsa-lib/include");
+    step.addLibraryPath("/home/ali/dev/libsoundio/alsa-lib/src/.libs");
+    step.linkSystemLibrary("pulse");
+    step.linkSystemLibrary("asound");
+    step.linkSystemLibrary("jack");
 }
 
 fn buildPulseAudio() void {}

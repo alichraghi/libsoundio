@@ -109,8 +109,6 @@ pub fn connect(allocator: std.mem.Allocator) !*PulseAudio {
         return error.OutOfMemory;
     c.pa_operation_unref(subscribe_op);
 
-    try self.refreshDevices();
-
     return self;
 }
 
@@ -144,15 +142,12 @@ pub fn waitEvents(self: *PulseAudio) !void {
 pub fn wakeUp(self: *PulseAudio) void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
+    self.device_scan_queued.store(true, .Monotonic);
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
-pub fn devicesList(self: PulseAudio) []const Device {
-    return self.devices_info.list.items;
-}
-
 pub const OutstreamData = struct {
-    sipa: *const PulseAudio,
+    pa: *const PulseAudio,
     stream: *c.pa_stream,
     buf_attr: c.pa_buffer_attr,
     stream_ready: std.atomic.Atomic(StreamStatus),
@@ -168,13 +163,12 @@ const StreamStatus = enum(u8) {
     failure,
 };
 
-pub fn outstreamOpen(self: *PulseAudio, outstream: *Outstream, device: Device) !void {
+pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) !void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
-
     outstream.backend_data = .{
-        .pulseaudio = .{
-            .sipa = self,
+        .PulseAudio = .{
+            .pa = self,
             .stream = undefined,
             .buf_attr = undefined,
             .stream_ready = std.atomic.Atomic(StreamStatus).init(.unknown),
@@ -184,7 +178,7 @@ pub fn outstreamOpen(self: *PulseAudio, outstream: *Outstream, device: Device) !
             .volume = undefined,
         },
     };
-    var ospa = &outstream.backend_data.pulseaudio;
+    var bd = &outstream.backend_data.PulseAudio;
 
     const sample_spec = c.pa_sample_spec{
         .format = try toPAFormat(outstream.format),
@@ -193,11 +187,11 @@ pub fn outstreamOpen(self: *PulseAudio, outstream: *Outstream, device: Device) !
     };
     const channel_map = try toPAChannelMap(outstream.layout);
     if (c.pa_stream_new(self.pulse_context, outstream.name.ptr, &sample_spec, &channel_map)) |s|
-        ospa.stream = s
+        bd.stream = s
     else
         return error.OutOfMemory;
-    c.pa_stream_set_state_callback(ospa.stream, playbackStreamStateCallback, ospa);
-    ospa.buf_attr = .{
+    c.pa_stream_set_state_callback(bd.stream, playbackStreamStateCallback, bd);
+    bd.buf_attr = .{
         .maxlength = std.math.maxInt(u32),
         .tlength = std.math.maxInt(u32),
         .prebuf = 0,
@@ -211,104 +205,99 @@ pub fn outstreamOpen(self: *PulseAudio, outstream: *Outstream, device: Device) !
             u32,
             std.math.ceil(outstream.software_latency * @intToFloat(f64, bytes_per_second) / @intToFloat(f64, outstream.bytes_per_frame)),
         );
-        ospa.buf_attr.maxlength = buf_len;
-        ospa.buf_attr.tlength = buf_len;
+        bd.buf_attr.maxlength = buf_len;
+        bd.buf_attr.tlength = buf_len;
     }
 
     const flags = c.PA_STREAM_START_CORKED | c.PA_STREAM_AUTO_TIMING_UPDATE | c.PA_STREAM_INTERPOLATE_TIMING | c.PA_STREAM_ADJUST_LATENCY;
-    if (c.pa_stream_connect_playback(ospa.stream, device.id.ptr, &ospa.buf_attr, flags, null, null) != 0)
+    if (c.pa_stream_connect_playback(bd.stream, device.id.ptr, &bd.buf_attr, flags, null, null) != 0)
         return switch (getError(self.pulse_context)) {
-            else => unreachable,
+            else => error.OpeningDevice,
         };
 
     while (true) {
-        switch (ospa.stream_ready.loadUnchecked()) {
+        switch (bd.stream_ready.load(.Acquire)) {
             .unknown => c.pa_threaded_mainloop_wait(self.main_loop),
             .ready => break,
             .failure => return error.StreamDisconnected,
         }
     }
 
-    const writable_size = c.pa_stream_writable_size(ospa.stream);
+    const writable_size = c.pa_stream_writable_size(bd.stream);
     outstream.software_latency = @intToFloat(f64, writable_size) / @intToFloat(f64, bytes_per_second);
 
-    try performOperation(self.main_loop, c.pa_stream_update_timing_info(ospa.stream, timingUpdateCallback, self));
+    try performOperation(self.main_loop, c.pa_stream_update_timing_info(bd.stream, timingUpdateCallback, self));
 }
 
 pub fn outstreamDeinit(self: *Outstream) void {
-    var ospa = &self.backend_data.pulseaudio;
-    c.pa_threaded_mainloop_lock(ospa.sipa.main_loop);
-    defer c.pa_threaded_mainloop_unlock(ospa.sipa.main_loop);
-    c.pa_stream_set_write_callback(ospa.stream, null, null);
-    c.pa_stream_set_state_callback(ospa.stream, null, null);
-    c.pa_stream_set_underflow_callback(ospa.stream, null, null);
-    c.pa_stream_set_overflow_callback(ospa.stream, null, null);
-    _ = c.pa_stream_disconnect(ospa.stream);
-    c.pa_stream_unref(ospa.stream);
+    var bd = &self.backend_data.PulseAudio;
+    c.pa_threaded_mainloop_lock(bd.pa.main_loop);
+    defer c.pa_threaded_mainloop_unlock(bd.pa.main_loop);
+    c.pa_stream_set_write_callback(bd.stream, null, null);
+    c.pa_stream_set_state_callback(bd.stream, null, null);
+    c.pa_stream_set_underflow_callback(bd.stream, null, null);
+    c.pa_stream_set_overflow_callback(bd.stream, null, null);
+    _ = c.pa_stream_disconnect(bd.stream);
+    c.pa_stream_unref(bd.stream);
 }
 
 pub fn outstreamStart(self: *Outstream) !void {
-    var ospa = &self.backend_data.pulseaudio;
-    c.pa_threaded_mainloop_lock(ospa.sipa.main_loop);
-    defer c.pa_threaded_mainloop_unlock(ospa.sipa.main_loop);
-    ospa.write_byte_count = c.pa_stream_writable_size(ospa.stream);
-    const op = c.pa_stream_cork(ospa.stream, 0, null, null) orelse
+    var bd = &self.backend_data.PulseAudio;
+    c.pa_threaded_mainloop_lock(bd.pa.main_loop);
+    defer c.pa_threaded_mainloop_unlock(bd.pa.main_loop);
+    const op = c.pa_stream_cork(bd.stream, 0, null, null) orelse
         return error.StreamDisconnected;
     c.pa_operation_unref(op);
-    c.pa_stream_set_write_callback(ospa.stream, playbackStreamWriteCallback, self);
-    if (self.underflowFn) |_| {
-        c.pa_stream_set_underflow_callback(ospa.stream, playbackStreamUnderflowCallback, self);
-        c.pa_stream_set_overflow_callback(ospa.stream, playbackStreamUnderflowCallback, self);
-    }
+    c.pa_stream_set_write_callback(bd.stream, playbackStreamWriteCallback, self);
 }
 
 pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) ![]const ChannelArea {
-    var ospa = &self.backend_data.pulseaudio;
+    var bd = &self.backend_data.pulseaudio;
     var areas: [max_channels]ChannelArea = undefined;
 
-    ospa.write_byte_count = frame_count.* * self.bytes_per_frame;
+    bd.write_byte_count = frame_count.* * self.bytes_per_frame;
     if (c.pa_stream_begin_write(
-        ospa.stream,
+        bd.stream,
         @ptrCast(
             [*c]?*anyopaque,
-            @alignCast(@alignOf([*c]?*anyopaque), &ospa.write_ptr),
+            @alignCast(@alignOf([*c]?*anyopaque), &bd.write_ptr),
         ),
-        &ospa.write_byte_count,
+        &bd.write_byte_count,
     ) != 0)
-        return switch (getError(ospa.sipa.pulse_context)) {
+        return switch (getError(bd.pa.pulse_context)) {
             else => unreachable,
         };
 
     for (self.layout.channels.slice()) |_, i| {
-        areas[i].ptr = ospa.write_ptr.? + self.bytes_per_sample * i;
+        areas[i].ptr = bd.write_ptr.? + self.bytes_per_sample * i;
         areas[i].step = self.bytes_per_frame;
     }
 
-    frame_count.* = ospa.write_byte_count / self.bytes_per_frame;
+    frame_count.* = bd.write_byte_count / self.bytes_per_frame;
     return areas[0..self.layout.channels.len];
 }
 
 pub fn outstreamEndWrite(self: *Outstream) !void {
-    var ospa = &self.backend_data.pulseaudio;
-    const seek_mode: c_uint = if (ospa.clear_buffer.loadUnchecked()) c.PA_SEEK_RELATIVE_ON_READ else c.PA_SEEK_RELATIVE;
-    if (c.pa_stream_write(ospa.stream, &ospa.write_ptr.?[0], ospa.write_byte_count, null, 0, seek_mode) != 0)
+    var bd = &self.backend_data.pulseaudio;
+    const seek_mode: c_uint = if (bd.clear_buffer.load(.Acquire)) c.PA_SEEK_RELATIVE_ON_READ else c.PA_SEEK_RELATIVE;
+    if (c.pa_stream_write(bd.stream, &bd.write_ptr.?[0], bd.write_byte_count, null, 0, seek_mode) != 0)
         return error.StreamDisconnected;
 }
 
 pub fn outstreamClearBuffer(self: *Outstream) void {
-    self.backend_data.pulseaudio.clear_buffer.storeUnchecked(true);
+    self.backend_data.pulseaudio.clear_buffer.store(true, .Monotonic);
 }
 
 pub fn outstreamPausePlay(self: *Outstream, pause: bool) !void {
-    var ospa = &self.backend_data.pulseaudio;
+    var bd = &self.backend_data.pulseaudio;
 
-    if (c.pa_threaded_mainloop_in_thread(ospa.sipa.main_loop) == 0)
-        c.pa_threaded_mainloop_lock(ospa.sipa.main_loop);
-    defer if (c.pa_threaded_mainloop_in_thread(ospa.sipa.main_loop) == 0)
-        c.pa_threaded_mainloop_unlock(ospa.sipa.main_loop);
+    if (c.pa_threaded_mainloop_in_thread(bd.pa.main_loop) == 0)
+        c.pa_threaded_mainloop_lock(bd.pa.main_loop);
+    defer if (c.pa_threaded_mainloop_in_thread(bd.pa.main_loop) == 0)
+        c.pa_threaded_mainloop_unlock(bd.pa.main_loop);
 
-    if (pause != (c.pa_stream_is_corked(ospa.stream) != 0)) {
-        const op = c.pa_stream_cork(ospa.stream, @bitCast(c_int, pause), null, null) orelse
+    if (pause != (c.pa_stream_is_corked(bd.stream) != 0)) {
+        const op = c.pa_stream_cork(bd.stream, @bitCast(c_int, pause), null, null) orelse
             return error.StreamDisconnected;
         c.pa_operation_unref(op);
     }
@@ -327,7 +316,7 @@ pub fn outstreamGetLatency(self: *Outstream) !f64 {
 }
 
 pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
-    var ospa = &self.backend_data.pulseaudio;
+    var bd = &self.backend_data.PulseAudio;
     var v: c.pa_cvolume = undefined;
     _ = c.pa_cvolume_init(&v);
     v.channels = @intCast(u5, self.layout.channels.len);
@@ -335,8 +324,8 @@ pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
     for (self.layout.channels.slice()) |_, i|
         v.values[i] = vol;
     const op = c.pa_context_set_sink_input_volume(
-        ospa.sipa.pulse_context,
-        c.pa_stream_get_index(ospa.stream),
+        bd.pa.pulse_context,
+        c.pa_stream_get_index(bd.stream),
         &v,
         null,
         null,
@@ -346,17 +335,17 @@ pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
 }
 
 pub fn outstreamVolume(self: *Outstream) !f64 {
-    var ospa = &self.backend_data.pulseaudio;
+    var bd = &self.backend_data.pulseaudio;
     try performOperation(
-        ospa.sipa.main_loop,
+        bd.pa.main_loop,
         c.pa_context_get_sink_input_info(
-            ospa.sipa.pulse_context,
-            c.pa_stream_get_index(ospa.stream),
+            bd.pa.pulse_context,
+            c.pa_stream_get_index(bd.stream),
             sinkInputInfoCallback,
-            ospa,
+            bd,
         ),
     );
-    return ospa.volume;
+    return bd.volume;
 }
 
 pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
@@ -365,36 +354,93 @@ pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
 }
 
 fn sinkInputInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
-    var ospa = @ptrCast(*OutstreamData, @alignCast(@alignOf(*OutstreamData), userdata.?));
+    var bd = @ptrCast(*OutstreamData, @alignCast(@alignOf(*OutstreamData), userdata.?));
     if (eol != 0) {
-        c.pa_threaded_mainloop_signal(ospa.sipa.main_loop, 0);
+        c.pa_threaded_mainloop_signal(bd.pa.main_loop, 0);
         return;
     }
-    ospa.volume = @intToFloat(f64, info.*.volume.values[0]) / @intToFloat(f64, c.PA_VOLUME_NORM);
+    bd.volume = @intToFloat(f64, info.*.volume.values[0]) / @intToFloat(f64, c.PA_VOLUME_NORM);
 }
 
 fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
-    var outstream = @ptrCast(*Outstream, @alignCast(@alignOf(*Outstream), userdata.?));
-    const frame_count = nbytes / outstream.bytes_per_frame;
-    outstream.writeFn(outstream, 0, frame_count);
+    var self = @ptrCast(*Outstream, @alignCast(@alignOf(*Outstream), userdata.?));
+    var bd = &self.backend_data.PulseAudio;
+    var areas: [max_channels]ChannelArea = undefined;
+    var frames_left = nbytes;
+    while (frames_left > 0) {
+        var chunk_size = frames_left;
+        if (c.pa_stream_begin_write(
+            bd.stream,
+            @ptrCast(
+                [*c]?*anyopaque,
+                @alignCast(@alignOf([*c]?*anyopaque), &bd.write_ptr),
+            ),
+            &chunk_size,
+        ) != 0)
+            return switch (getError(bd.pa.pulse_context)) {
+                else => unreachable,
+            };
+
+        for (self.layout.channels.slice()) |_, i| {
+            areas[i].ptr = bd.write_ptr.? + self.bytes_per_sample * i;
+            areas[i].step = self.bytes_per_frame;
+        }
+
+        const frames = chunk_size / self.bytes_per_frame;
+        self.writeFn(self, areas[0..self.layout.channels.len], frames);
+
+        const seek_mode: c_uint = if (bd.clear_buffer.load(.Acquire)) c.PA_SEEK_RELATIVE_ON_READ else c.PA_SEEK_RELATIVE;
+        if (c.pa_stream_write(bd.stream, &bd.write_ptr.?[0], chunk_size, null, 0, seek_mode) != 0)
+            unreachable;
+        frames_left -= chunk_size;
+    }
 }
 
-fn playbackStreamUnderflowCallback(_: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
-    var outstream = @ptrCast(*Outstream, @alignCast(@alignOf(*Outstream), userdata.?));
-    outstream.underflowFn.?(outstream);
-}
+// fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
+//     var self = @ptrCast(*Outstream, @alignCast(@alignOf(*Outstream), userdata.?));
+//     var bd = &self.backend_data.pulseaudio;
+//     var areas: [max_channels]ChannelArea = undefined;
+//     var to_write = nbytes;
+//     while (to_write > 0) {
+//         // var chunk_size = std.math.min(to_write, c.pa_stream_writable_size(bd.stream));
+//         if (c.pa_stream_begin_write(
+//             bd.stream,
+//             @ptrCast(
+//                 [*c]?*anyopaque,
+//                 @alignCast(@alignOf([*c]?*anyopaque), &bd.write_ptr),
+//             ),
+//             &to_write,
+//         ) != 0)
+//             return switch (getError(bd.pa.pulse_context)) {
+//                 else => unreachable,
+//             };
+
+//         for (self.layout.channels.slice()) |_, i| {
+//             areas[i].ptr = bd.write_ptr.? + self.bytes_per_sample * i;
+//             areas[i].step = self.bytes_per_frame;
+//         }
+
+//         self.writeFn(self, areas[0..self.layout.channels.len], to_write);
+
+//         const seek_mode: c_uint = if (bd.clear_buffer.loadUnchecked()) c.PA_SEEK_RELATIVE_ON_READ else c.PA_SEEK_RELATIVE;
+//         if (c.pa_stream_write(bd.stream, &bd.write_ptr.?[0], to_write, null, 0, seek_mode) != 0)
+//             unreachable;
+
+//         // to_write -= chunk_size;
+//     }
+// }
 
 fn playbackStreamStateCallback(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
-    var ospa = @ptrCast(*OutstreamData, @alignCast(@alignOf(*OutstreamData), userdata.?));
+    var bd = @ptrCast(*OutstreamData, @alignCast(@alignOf(*OutstreamData), userdata.?));
     switch (c.pa_stream_get_state(stream)) {
         c.PA_STREAM_UNCONNECTED, c.PA_STREAM_CREATING, c.PA_STREAM_TERMINATED => {},
         c.PA_STREAM_READY => {
-            ospa.stream_ready.storeUnchecked(.ready);
-            c.pa_threaded_mainloop_signal(ospa.sipa.main_loop, 0);
+            bd.stream_ready.store(.ready, .Monotonic);
+            c.pa_threaded_mainloop_signal(bd.pa.main_loop, 0);
         },
         c.PA_STREAM_FAILED => {
-            ospa.stream_ready.storeUnchecked(.failure);
-            c.pa_threaded_mainloop_signal(ospa.sipa.main_loop, 0);
+            bd.stream_ready.store(.failure, .Monotonic);
+            c.pa_threaded_mainloop_signal(bd.pa.main_loop, 0);
         },
         else => unreachable,
     }
