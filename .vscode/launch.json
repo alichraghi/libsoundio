@@ -12,6 +12,14 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "Debug B",
+            "program": "${workspaceFolder}/brucelib/modules/platform/zig-out/bin/test",
+            // "arguments": [],
+            "preLaunchTask": "Build B"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug C",
             "program": "${workspaceFolder}/build/sio_sine",
             "args": [

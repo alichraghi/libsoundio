@@ -6,6 +6,8 @@ test "Alsa connect()" {
     defer a.deinit();
     try a.flushEvents();
     try std.testing.expect(a.devicesList().len > 0);
+
+    std.debug.print("Alsa default: {s}\n", .{a.getDevice(.output, null).?.id});
 }
 
 test "PulseAudio connect()" {
@@ -13,6 +15,8 @@ test "PulseAudio connect()" {
     defer a.deinit();
     try a.flushEvents();
     try std.testing.expect(a.devicesList().len > 0);
+
+    std.debug.print("PulseAudio: {d}\n", .{a.devicesList().len});
 }
 
 test "Jack connect()" {

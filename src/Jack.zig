@@ -136,8 +136,7 @@ pub fn refreshDevices(self: *Jack) !void {
                     .max = std.math.clamp(self.sample_rate, min_sample_rate, max_sample_rate),
                 };
                 device.sample_rate = self.sample_rate;
-                device.software_latency = @intToFloat(f64, self.period_size) / @intToFloat(f64, self.sample_rate);
-                device.software_latency_range = .{
+                device.latency_range = .{
                     .min = @intToFloat(f64, self.period_size) / @intToFloat(f64, self.sample_rate),
                     .max = @intToFloat(f64, self.period_size) / @intToFloat(f64, self.sample_rate),
                 };

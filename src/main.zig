@@ -125,12 +125,7 @@ pub fn devicesList(self: SoundIO) []const Device {
 pub fn getDevice(self: SoundIO, aim: Device.Aim, index: ?usize) ?Device {
     switch (self.data) {
         inline else => |b| {
-            var i = index orelse switch (aim) {
-                .output => b.devices_info.default_output_index,
-                .input => b.devices_info.default_input_index,
-            };
-            if (i >= b.devices_info.list.items.len) return null;
-            return b.devices_info.list.items[i];
+            return b.devices_info.get(index orelse return b.devices_info.defaultDevice(aim));
         },
     }
 }
@@ -146,7 +141,7 @@ pub const CreateStreamError = error{
 pub const OutstreamOptions = struct {
     writeFn: Outstream.WriteFn,
     name: [:0]const u8 = "SoundIoOutstream",
-    software_latency: f64 = 0.0,
+    latency: f64 = 0.0,
     sample_rate: u32 = 48000,
     format: Format = Format.toNativeEndian(.float32le),
     userdata: ?*anyopaque = null,
@@ -159,7 +154,7 @@ pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions)
         .userdata = options.userdata,
         .name = options.name,
         .layout = device.layout,
-        .software_latency = options.software_latency,
+        .latency = options.latency,
         .sample_rate = device.nearestSampleRate(options.sample_rate),
         .format = options.format,
         .bytes_per_frame = options.format.bytesPerFrame(@intCast(u5, device.layout.channels.len)),
@@ -191,7 +186,7 @@ pub const Outstream = struct {
     userdata: ?*anyopaque,
     name: [:0]const u8,
     layout: ChannelLayout,
-    software_latency: f64,
+    latency: f64,
     sample_rate: u32,
     format: Format,
     bytes_per_frame: u32,
@@ -278,8 +273,7 @@ pub const Device = struct {
     format: Format,
     sample_rate: u32,
     sample_rate_range: Range(u32),
-    software_latency: f64,
-    software_latency_range: Range(f64),
+    latency_range: Range(f64),
 
     pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
         return switch (current_backend.?) {
@@ -294,8 +288,30 @@ pub const Device = struct {
 
 pub const DevicesInfo = struct {
     list: std.ArrayListUnmanaged(Device),
-    default_output_index: usize,
-    default_input_index: usize,
+    default_output_index: ?usize,
+    default_input_index: ?usize,
+
+    pub fn get(self: DevicesInfo, i: usize) Device {
+        return self.list.items[i];
+    }
+
+    pub fn setDefaultIndex(self: *DevicesInfo, aim: Device.Aim, i: usize) void {
+        switch (aim) {
+            .output => self.default_output_index = i,
+            .input => self.default_input_index = i,
+        }
+    }
+
+    pub fn defaultIndex(self: DevicesInfo, aim: Device.Aim) ?usize {
+        return switch (aim) {
+            .output => self.default_output_index,
+            .input => self.default_input_index,
+        };
+    }
+
+    pub fn defaultDevice(self: DevicesInfo, aim: Device.Aim) ?Device {
+        return self.list.items[self.defaultIndex(aim) orelse return null];
+    }
 };
 
 pub const ChannelLayout = struct {
@@ -492,7 +508,13 @@ pub const Format = enum {
 
 pub fn Range(comptime T: type) type {
     return struct {
+        const Self = @This();
+
         min: T,
         max: T,
+
+        pub fn in(self: Self, num: T) bool {
+            return if (num >= self.min and num <= self.max) true else false;
+        }
     };
 }

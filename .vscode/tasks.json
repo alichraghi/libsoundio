@@ -4,7 +4,20 @@
         {
             "label": "Build",
             "type": "shell",
-            "command": "zig2 build",
+            "command": "zigo build",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "clear": true
+            }
+        },
+        {
+            "label": "Build B",
+            "type": "shell",
+            "command": "cd brucelib && ~/dev/zig/build/stage3/bin/zig build",
             "problemMatcher": [],
             "group": {
                 "kind": "build",
@@ -17,7 +30,7 @@
         {
             "label": "Build C",
             "type": "shell",
-            // "command": "cd build && make",
+            "command": "cd build && make",
             "problemMatcher": [],
             "group": {
                 "kind": "build",

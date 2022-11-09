@@ -199,11 +199,11 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) !
         .fragsize = std.math.maxInt(u32),
     };
     const bytes_per_second = outstream.bytes_per_frame * outstream.sample_rate;
-    if (outstream.software_latency > 0.0) {
+    if (outstream.latency > 0.0) {
         const buf_len = outstream.bytes_per_frame *
             @floatToInt(
             u32,
-            std.math.ceil(outstream.software_latency * @intToFloat(f64, bytes_per_second) / @intToFloat(f64, outstream.bytes_per_frame)),
+            std.math.ceil(outstream.latency * @intToFloat(f64, bytes_per_second) / @intToFloat(f64, outstream.bytes_per_frame)),
         );
         bd.buf_attr.maxlength = buf_len;
         bd.buf_attr.tlength = buf_len;
@@ -224,7 +224,7 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) !
     }
 
     const writable_size = c.pa_stream_writable_size(bd.stream);
-    outstream.software_latency = @intToFloat(f64, writable_size) / @intToFloat(f64, bytes_per_second);
+    outstream.latency = @intToFloat(f64, writable_size) / @intToFloat(f64, bytes_per_second);
 
     try performOperation(self.main_loop, c.pa_stream_update_timing_info(bd.stream, timingUpdateCallback, self));
 }
@@ -312,7 +312,7 @@ pub fn outstreamGetLatency(self: *Outstream) !f64 {
             error.NoData => unreachable,
             else => unreachable,
         };
-    return @intToFloat(f64, r_usec) / 1000000.0;
+    return @intToFloat(f64, r_usec) / std.time.us_per_s;
 }
 
 pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
@@ -452,14 +452,15 @@ fn timingUpdateCallback(_: ?*c.pa_stream, _: c_int, userdata: ?*anyopaque) callc
 }
 
 fn refreshDevices(self: *PulseAudio) !void {
+    self.devices_info.default_output_index = null;
+    self.devices_info.default_input_index = null;
+    for (self.devices_info.list.items) |device|
+        device.deinit(self.allocator);
+    self.devices_info.list.clearAndFree(self.allocator);
+
     const list_sink_op = c.pa_context_get_sink_info_list(self.pulse_context, sinkInfoCallback, self);
     const list_source_op = c.pa_context_get_source_info_list(self.pulse_context, sourceInfoCallback, self);
     const server_info_op = c.pa_context_get_server_info(self.pulse_context, serverInfoCallback, self);
-
-    for (self.devices_info.list.items) |device|
-        device.deinit(self.allocator);
-
-    self.devices_info.list.clearAndFree(self.allocator);
 
     errdefer self.devices_info.list.clearAndFree(self.allocator);
     try performOperation(self.main_loop, list_sink_op);
@@ -472,10 +473,13 @@ fn refreshDevices(self: *PulseAudio) !void {
     }
 
     for (self.devices_info.list.items) |device, i| {
-        if (device.aim == .output and std.mem.eql(u8, device.id, self.default_sink_id.?))
-            self.devices_info.default_output_index = i
-        else if (std.mem.eql(u8, device.id, self.default_source_id.?))
+        if (device.aim == .output and std.mem.eql(u8, device.id, self.default_sink_id.?)) {
+            self.devices_info.default_output_index = i;
+            break;
+        } else if (device.aim == .input and std.mem.eql(u8, device.id, self.default_source_id.?)) {
             self.devices_info.default_input_index = i;
+            break;
+        }
     }
 }
 
@@ -515,30 +519,43 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
     if (self.device_query_err != null) return;
     if (info.*.name == null or info.*.description == null)
         self.device_query_err = error.OutOfMemory;
+
+    const id = self.allocator.dupeZ(u8, std.mem.span(info.*.name)) catch |err| {
+        self.device_query_err = err;
+        return;
+    };
+    const name = self.allocator.dupeZ(u8, std.mem.span(info.*.description)) catch |err| {
+        self.allocator.free(id);
+        self.device_query_err = err;
+        return;
+    };
     var device = Device{
-        .id = self.allocator.dupeZ(u8, std.mem.span(info.*.name)) catch |err| {
-            self.device_query_err = err;
-            return;
-        },
-        .name = self.allocator.dupeZ(u8, std.mem.span(info.*.description)) catch |err| {
-            self.device_query_err = err;
-            return;
-        },
-        .aim = .input,
+        .id = id,
+        .name = name,
+        .aim = .output,
         .is_raw = false,
-        .layout = fromPAChannelMap(info.*.channel_map) orelse return, // Incompatible device. skip it
+        .layout = fromPAChannelMap(info.*.channel_map) orelse {
+            self.allocator.free(id);
+            self.allocator.free(name);
+            return;
+        }, // Incompatible device. skip it
         .formats = allDeviceFormats(),
-        .format = fromPAFormat(info.*.sample_spec.format) catch return, // Incompatible device. skip it,
+        .format = fromPAFormat(info.*.sample_spec.format) catch {
+            self.allocator.free(id);
+            self.allocator.free(name);
+            return;
+        }, // Incompatible device. skip it,
         .sample_rate_range = .{
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
             .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
         },
         .sample_rate = info.*.sample_spec.rate,
-        .software_latency = c.PA_SINK_LATENCY,
-        .software_latency_range = .{ .min = c.PA_SINK_LATENCY, .max = c.PA_SINK_LATENCY },
+        .latency_range = .{ .min = c.PA_SINK_LATENCY, .max = c.PA_SINK_LATENCY },
     };
 
     self.devices_info.list.append(self.allocator, device) catch |err| {
+        self.allocator.free(id);
+        self.allocator.free(name);
         self.device_query_err = err;
         return;
     };
@@ -553,30 +570,43 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
     if (self.device_query_err != null) return;
     if (info.*.name == null or info.*.description == null)
         self.device_query_err = error.OutOfMemory;
+
+    const id = self.allocator.dupeZ(u8, std.mem.span(info.*.name)) catch |err| {
+        self.device_query_err = err;
+        return;
+    };
+    const name = self.allocator.dupeZ(u8, std.mem.span(info.*.description)) catch |err| {
+        self.allocator.free(id);
+        self.device_query_err = err;
+        return;
+    };
     var device = Device{
-        .id = self.allocator.dupeZ(u8, std.mem.span(info.*.name)) catch |err| {
-            self.device_query_err = err;
-            return;
-        },
-        .name = self.allocator.dupeZ(u8, std.mem.span(info.*.description)) catch |err| {
-            self.device_query_err = err;
-            return;
-        },
-        .aim = .output,
+        .id = id,
+        .name = name,
+        .aim = .input,
         .is_raw = false,
-        .layout = fromPAChannelMap(info.*.channel_map) orelse return, // Incompatible device. skip it
+        .layout = fromPAChannelMap(info.*.channel_map) orelse {
+            self.allocator.free(id);
+            self.allocator.free(name);
+            return;
+        }, // Incompatible device. skip it
         .formats = allDeviceFormats(),
-        .format = fromPAFormat(info.*.sample_spec.format) catch return, // Incompatible device. skip it,
+        .format = fromPAFormat(info.*.sample_spec.format) catch {
+            self.allocator.free(id);
+            self.allocator.free(name);
+            return;
+        }, // Incompatible device. skip it,
         .sample_rate_range = .{
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
             .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
         },
         .sample_rate = info.*.sample_spec.rate,
-        .software_latency = c.PA_SINK_LATENCY,
-        .software_latency_range = .{ .min = c.PA_SINK_LATENCY, .max = c.PA_SINK_LATENCY },
+        .latency_range = .{ .min = c.PA_SOURCE_LATENCY, .max = c.PA_SOURCE_LATENCY },
     };
 
     self.devices_info.list.append(self.allocator, device) catch |err| {
+        self.allocator.free(id);
+        self.allocator.free(name);
         self.device_query_err = err;
         return;
     };
@@ -634,7 +664,7 @@ fn fromPAChannelPos(pos: c.pa_channel_position_t) ChannelId {
         c.PA_CHANNEL_POSITION_AUX14 => .aux14,
         c.PA_CHANNEL_POSITION_AUX15 => .aux15,
 
-        // let's keep this unreachable for now, since i don't see why someone may use > 15 AUX
+        // let's keep this unreachable for now, since i don't see why someone should use > 15 AUX
         c.PA_CHANNEL_POSITION_AUX16,
         c.PA_CHANNEL_POSITION_AUX17,
         c.PA_CHANNEL_POSITION_AUX18,

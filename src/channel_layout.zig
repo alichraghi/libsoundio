@@ -380,10 +380,42 @@ pub fn getLayout(id: ChannelLayoutId) ChannelLayout {
 }
 
 pub fn getLayoutByChannels(channels: []const ChannelId) ?ChannelLayout {
-    for (builtin_channel_layouts) |bl| {
-        if (bl.eql(channels)) {
-            return bl;
+    outer: for (builtin_channel_layouts) |bl| {
+        if (channels.len != bl.channels.len) continue;
+        inner: for (bl.channels.slice()) |bl_ch| {
+            for (channels) |ch|
+                if (bl_ch == ch) continue :inner;
+            continue :outer;
         }
+        return bl;
+    }
+    return null;
+}
+
+test "getLayoutByChannels" {
+    const stereo = &.{
+        .front_left,
+        .front_right,
+    };
+    const stereo_inverted = &.{
+        .front_right,
+        .front_left,
+    };
+    const stereo_dup = &.{
+        .front_left,
+        .front_left,
+        .front_right,
+    };
+    try std.testing.expectEqual(builtin_channel_layouts[1], getLayoutByChannels(stereo).?);
+    try std.testing.expectEqual(builtin_channel_layouts[1], getLayoutByChannels(stereo_inverted).?);
+    try std.testing.expect(getLayoutByChannels(stereo_dup) == null);
+    try std.testing.expect(getLayoutByChannels(&.{}) == null);
+}
+
+pub fn getLayoutByChannelCount(count: u6) ?ChannelLayout {
+    for (builtin_channel_layouts) |bl| {
+        if (count == bl.channels.len)
+            return bl;
     }
     return null;
 }
