@@ -270,10 +270,8 @@ pub const Device = struct {
     is_raw: bool,
     layout: ChannelLayout,
     formats: []const Format,
-    format: Format,
-    sample_rate: u32,
-    sample_rate_range: Range(u32),
-    latency_range: Range(f64),
+    sample_rate: Range(u32),
+    latency: Range(f64),
 
     pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
         return switch (current_backend.?) {
@@ -282,7 +280,7 @@ pub const Device = struct {
     }
 
     pub fn nearestSampleRate(self: Device, sample_rate: u32) u32 {
-        return std.math.clamp(sample_rate, self.sample_rate_range.min, self.sample_rate_range.max);
+        return std.math.clamp(sample_rate, self.sample_rate.min, self.sample_rate.max);
     }
 };
 

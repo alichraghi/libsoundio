@@ -540,17 +540,11 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
             return;
         }, // Incompatible device. skip it
         .formats = allDeviceFormats(),
-        .format = fromPAFormat(info.*.sample_spec.format) catch {
-            self.allocator.free(id);
-            self.allocator.free(name);
-            return;
-        }, // Incompatible device. skip it,
-        .sample_rate_range = .{
+        .sample_rate = .{
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
             .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
         },
-        .sample_rate = info.*.sample_spec.rate,
-        .latency_range = .{ .min = c.PA_SINK_LATENCY, .max = c.PA_SINK_LATENCY },
+        .latency = .{ .min = c.PA_SINK_LATENCY, .max = c.PA_SINK_LATENCY },
     };
 
     self.devices_info.list.append(self.allocator, device) catch |err| {
@@ -591,17 +585,11 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
             return;
         }, // Incompatible device. skip it
         .formats = allDeviceFormats(),
-        .format = fromPAFormat(info.*.sample_spec.format) catch {
-            self.allocator.free(id);
-            self.allocator.free(name);
-            return;
-        }, // Incompatible device. skip it,
-        .sample_rate_range = .{
+        .sample_rate = .{
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
             .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
         },
-        .sample_rate = info.*.sample_spec.rate,
-        .latency_range = .{ .min = c.PA_SOURCE_LATENCY, .max = c.PA_SOURCE_LATENCY },
+        .latency = .{ .min = c.PA_SOURCE_LATENCY, .max = c.PA_SOURCE_LATENCY },
     };
 
     self.devices_info.list.append(self.allocator, device) catch |err| {

@@ -130,21 +130,19 @@ pub fn refreshDevices(self: *Jack) !void {
                 device.aim = aim;
                 device.is_raw = flags & c.JackPortIsPhysical != 0;
                 device.layout.channels.append(parseChannelId(channel_name) orelse continue) catch continue;
-                device.format = Format.toNativeEndian(.float32le);
-                device.sample_rate_range = .{
+                device.sample_rate = .{
                     .min = std.math.clamp(self.sample_rate, min_sample_rate, max_sample_rate),
                     .max = std.math.clamp(self.sample_rate, min_sample_rate, max_sample_rate),
                 };
-                device.sample_rate = self.sample_rate;
-                device.latency_range = .{
+                device.latency = .{
                     .min = @intToFloat(f64, self.period_size) / @intToFloat(f64, self.sample_rate),
                     .max = @intToFloat(f64, self.period_size) / @intToFloat(f64, self.sample_rate),
                 };
 
-                var latency_range: c.jack_latency_range_t = undefined;
+                var latency: c.jack_latency_range_t = undefined;
                 const latency_mode = @intCast(c_uint, if (device.aim == .output) c.JackPlaybackLatency else c.JackCaptureLatency);
-                c.jack_port_get_latency_range(port, latency_mode, &latency_range);
-                try self.devices_latency_range.append(self.allocator, .{ .min = latency_range.min, .max = latency_range.max });
+                c.jack_port_get_latency_range(port, latency_mode, &latency);
+                try self.devices_latency_range.append(self.allocator, .{ .min = latency.min, .max = latency.max });
 
                 try self.devices_info.list.append(self.allocator, device);
                 errdefer _ = self.devices_latency_range.pop();

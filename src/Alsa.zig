@@ -8,7 +8,6 @@ const ConnectOptions = @import("main.zig").ConnectOptions;
 const ShutdownFn = @import("main.zig").ShutdownFn;
 const DevicesInfo = @import("main.zig").DevicesInfo;
 const ChannelId = @import("main.zig").ChannelId;
-const Range = @import("main.zig").Range;
 const Format = @import("main.zig").Format;
 const max_channels = @import("main.zig").max_channels;
 const min_sample_rate = @import("main.zig").min_sample_rate;
@@ -16,7 +15,6 @@ const max_sample_rate = @import("main.zig").max_sample_rate;
 const builtin_channel_layouts = @import("channel_layout.zig").builtin_channel_layouts;
 const getLayoutByChannels = @import("channel_layout.zig").getLayoutByChannels;
 const getLayoutByChannelCount = @import("channel_layout.zig").getLayoutByChannelCount;
-const parseChannelId = @import("channel_layout.zig").parseChannelId;
 const IN = std.os.linux.IN;
 const O = std.os.O;
 const POLL = std.os.POLL;
@@ -30,14 +28,13 @@ allocator: std.mem.Allocator,
 mutex: std.Thread.Mutex,
 cond: std.Thread.Condition,
 thread: std.Thread,
+devices_info: DevicesInfo,
+pending_files: std.ArrayListUnmanaged([]const u8),
 notify_fd: std.os.linux.fd_t,
 notify_wd: std.os.linux.fd_t,
 notify_pipe_fd: [2]std.os.linux.fd_t,
-devices_info: DevicesInfo,
 userdata: ?*anyopaque,
-shutdown_emmited: bool, // TODO: make this atomic
 shutdownFn: ShutdownFn,
-pending_files: std.ArrayListUnmanaged([]const u8),
 aborted: std.atomic.Atomic(bool),
 device_scan_queued: std.atomic.Atomic(bool),
 
@@ -53,23 +50,21 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
         .mutex = std.Thread.Mutex{},
         .cond = std.Thread.Condition{},
         .thread = undefined,
-        .notify_fd = undefined,
-        .notify_wd = undefined,
-        .notify_pipe_fd = undefined,
         .devices_info = .{
             .list = .{},
             .default_output_index = 0,
             .default_input_index = 0,
         },
-        .userdata = options.userdata,
-        .shutdown_emmited = false,
-        .shutdownFn = options.shutdownFn orelse defaultShutdownFn,
         .pending_files = .{},
+        .notify_fd = undefined,
+        .notify_wd = undefined,
+        .notify_pipe_fd = undefined,
+        .userdata = options.userdata,
+        .shutdownFn = options.shutdownFn orelse defaultShutdownFn,
         .aborted = std.atomic.Atomic(bool).init(false),
         .device_scan_queued = std.atomic.Atomic(bool).init(false),
     };
 
-    // IN.NONBLOCK
     self.notify_fd = std.os.inotify_init1(IN.NONBLOCK) catch |err| switch (err) {
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
@@ -94,7 +89,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
         error.Unexpected,
         => unreachable,
     };
-    // O.NONBLOCK
+
     self.notify_pipe_fd = std.os.pipe2(O.NONBLOCK) catch |err| switch (err) {
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
@@ -102,8 +97,8 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
         error.Unexpected => unreachable,
     };
 
-    // _ = c.snd_lib_error_set_handler(null);
-    self.wakeUpDevicePoll();
+    _ = c.snd_lib_error_set_handler(null);
+    self.wakeUpDevicePoll() catch return error.SystemResources;
     self.thread = std.Thread.spawn(.{}, threadRun, .{self}) catch |err| switch (err) {
         error.ThreadQuotaExceeded,
         error.SystemResources,
@@ -117,7 +112,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
 }
 
 fn eventName(self: [*]const u8, len: usize) []const u8 {
-    return self[@sizeOf(InotifyEvent) .. @sizeOf(InotifyEvent) + len];
+    return self[@sizeOf(InotifyEvent) .. @sizeOf(InotifyEvent) + std.math.min(max_snd_file_len, len)];
 }
 
 fn threadRun(self: *Alsa) !void {
@@ -170,7 +165,7 @@ fn threadRun(self: *Alsa) !void {
                         continue;
 
                     if (event.mask & IN.CREATE != 0) {
-                        const event_name = self.allocator.dupe(u8, eventName(buf[i..].ptr, std.math.min(max_snd_file_len, event.len))) catch {
+                        const event_name = self.allocator.dupe(u8, eventName(buf[i..].ptr, event.len)) catch {
                             self.shutdownFn(self.userdata);
                             return;
                         };
@@ -180,14 +175,12 @@ fn threadRun(self: *Alsa) !void {
                         };
                         continue;
                     }
+
                     if (self.pending_files.items.len > 0) {
-                        // At this point ignore IN.DELETE in favor of waiting until the files
-                        // opened with IN.CREATE have their IN.CLOSE_WRITE event.
-                        if (event.mask & IN.CLOSE_WRITE == 0)
-                            continue;
+                        if (event.mask & IN.CLOSE_WRITE == 0) continue;
 
                         for (self.pending_files.items) |file, j| {
-                            if (std.mem.eql(u8, file, eventName(buf[i..].ptr, std.math.min(max_snd_file_len, event.len)))) {
+                            if (std.mem.eql(u8, file, eventName(buf[i..].ptr, event.len))) {
                                 self.allocator.free(self.pending_files.swapRemove(j));
                                 if (self.pending_files.items.len == 0)
                                     got_rescan_event = true;
@@ -195,8 +188,6 @@ fn threadRun(self: *Alsa) !void {
                             }
                         }
                     } else if (event.mask & IN.DELETE != 0) {
-                        // We are not waiting on created files to be closed, so when
-                        // a delete happens we act on it.
                         got_rescan_event = true;
                     }
                 }
@@ -214,7 +205,7 @@ fn threadRun(self: *Alsa) !void {
             }
         }
         if (got_rescan_event) {
-            self.mutex.lock();
+            if (!self.mutex.tryLock()) continue;
             defer self.mutex.unlock();
             self.device_scan_queued.store(true, .Monotonic);
             self.cond.signal();
@@ -222,8 +213,8 @@ fn threadRun(self: *Alsa) !void {
     }
 }
 
-fn wakeUpDevicePoll(self: *Alsa) void {
-    _ = std.os.write(self.notify_pipe_fd[1], "a") catch unreachable;
+fn wakeUpDevicePoll(self: *Alsa) !void {
+    _ = try std.os.write(self.notify_pipe_fd[1], "a");
 }
 
 pub fn refreshDevices(self: *Alsa) !void {
@@ -233,14 +224,9 @@ pub fn refreshDevices(self: *Alsa) !void {
         device.deinit(self.allocator);
     self.devices_info.list.clearAndFree(self.allocator);
 
-    if (c.snd_config_update_free_global() < 0)
-        return error.SystemResources;
     if (c.snd_config_update() < 0)
         return error.SystemResources;
-
-    var card_index: c_int = -1;
-    if (c.snd_card_next(&card_index) < 0)
-        return error.SystemResources;
+    defer _ = c.snd_config_update_free_global();
 
     var card_info: ?*c.snd_ctl_card_info_t = null;
     _ = c.snd_ctl_card_info_malloc(&card_info);
@@ -250,62 +236,57 @@ pub fn refreshDevices(self: *Alsa) !void {
     _ = c.snd_pcm_info_malloc(&pcm_info);
     defer c.snd_pcm_info_free(pcm_info);
 
+    var card_index: c_int = -1;
+    if (c.snd_card_next(&card_index) < 0)
+        return error.SystemResources;
     while (card_index >= 0) {
         var handle: ?*c.snd_ctl_t = undefined;
-        var name_buf: [32]u8 = undefined;
-        const name = std.fmt.bufPrintZ(&name_buf, "hw:{d}", .{card_index}) catch unreachable;
-        _ = switch (c.snd_ctl_open(&handle, name.ptr, 0)) {
+        var card_id_buf: [8]u8 = undefined;
+        const card_id = std.fmt.bufPrintZ(&card_id_buf, "hw:{d}", .{card_index}) catch break;
+        _ = switch (c.snd_ctl_open(&handle, card_id.ptr, 0)) {
             0 => {},
             -@intCast(i16, @enumToInt(std.os.linux.E.NOENT)) => break,
             else => return error.OpeningDevice,
         };
         defer _ = c.snd_ctl_close(handle);
 
-        if (c.snd_ctl_card_info(handle, @ptrCast(*c.snd_ctl_card_info_t, card_info)) < 0)
+        if (c.snd_ctl_card_info(handle, card_info) < 0)
             return error.SystemResources;
-        const card_name = c.snd_ctl_card_info_get_name(@ptrCast(*c.snd_ctl_card_info_t, card_info));
+        const card_name = c.snd_ctl_card_info_get_name(card_info);
 
         var device_index: c_int = -1;
         while (true) {
             if (c.snd_ctl_pcm_next_device(handle, &device_index) < 0)
                 return error.SystemResources;
-
             if (device_index < 0) break;
 
-            c.snd_pcm_info_set_device(@ptrCast(*c.snd_pcm_info_t, pcm_info), @intCast(c_uint, device_index));
-            c.snd_pcm_info_set_subdevice(@ptrCast(*c.snd_pcm_info_t, pcm_info), 0);
+            c.snd_pcm_info_set_device(pcm_info, @intCast(c_uint, device_index));
+            c.snd_pcm_info_set_subdevice(pcm_info, 0);
 
             for (&[_]Device.Aim{ .output, .input }) |aim| {
                 const snd_stream = aimToStream(aim);
-                c.snd_pcm_info_set_stream(@ptrCast(*c.snd_pcm_info_t, pcm_info), snd_stream);
+                c.snd_pcm_info_set_stream(pcm_info, snd_stream);
 
-                _ = switch (c.snd_ctl_pcm_info(handle, @ptrCast(*c.snd_pcm_info_t, pcm_info))) {
+                _ = switch (c.snd_ctl_pcm_info(handle, pcm_info)) {
                     0 => {},
                     -@intCast(i16, @enumToInt(std.os.linux.E.NOENT)) => break,
                     else => return error.SystemResources,
                 };
 
-                const device_name = c.snd_pcm_info_get_name(@ptrCast(*c.snd_pcm_info_t, pcm_info));
-
+                const device_name = c.snd_pcm_info_get_name(pcm_info);
                 var device = Device{
                     .id = try std.fmt.allocPrintZ(self.allocator, "hw:{d},{d}", .{ card_index, device_index }),
                     .name = try std.fmt.allocPrintZ(self.allocator, "{s} {s}", .{ card_name, device_name }),
                     .aim = aim,
                     .is_raw = true,
+
                     .layout = undefined,
                     .formats = undefined,
-                    .format = undefined,
                     .sample_rate = undefined,
-                    .sample_rate_range = undefined,
-                    .latency_range = undefined,
+                    .latency = undefined,
                 };
-                errdefer {
-                    self.allocator.free(device.id);
-                    self.allocator.free(device.name);
-                }
 
                 self.probeDevice(&device) catch {
-                    std.debug.print("{s} Skipped\n", .{device.id}); // TODO
                     self.allocator.free(device.id);
                     self.allocator.free(device.name);
                     continue;
@@ -324,6 +305,129 @@ pub fn refreshDevices(self: *Alsa) !void {
         if (c.snd_card_next(&card_index) < 0)
             return error.SystemResources;
     }
+}
+
+fn probeDevice(self: *Alsa, device: *Device) !void {
+    var pcm: ?*c.snd_pcm_t = null;
+    const snd_stream = aimToStream(device.aim);
+
+    if (c.snd_pcm_open(&pcm, device.id.ptr, snd_stream, 0) < 0)
+        return error.OpeningDevice;
+    defer _ = c.snd_pcm_close(pcm);
+
+    var hw_params: ?*c.snd_pcm_hw_params_t = null;
+    _ = c.snd_pcm_hw_params_malloc(&hw_params);
+    defer c.snd_pcm_hw_params_free(hw_params);
+
+    if (c.snd_pcm_hw_params_any(pcm, hw_params) < 0)
+        return error.OpeningDevice;
+
+    if (c.snd_pcm_hw_params_set_rate_resample(pcm, hw_params, @bitCast(u1, !device.is_raw)) < 0) // TODO: revert is_raw?
+        return error.OpeningDevice;
+
+    if (c.snd_pcm_hw_params_get_rate_min(hw_params, &device.sample_rate.min, null) < 0)
+        return error.OpeningDevice;
+    if (c.snd_pcm_hw_params_set_rate_last(pcm, hw_params, &device.sample_rate.max, null) < 0)
+        return error.OpeningDevice;
+
+    const one_over_actual_rate = 1.0 / @intToFloat(f32, device.sample_rate.max);
+
+    var min_frames: c.snd_pcm_uframes_t = 0;
+    var max_frames: c.snd_pcm_uframes_t = 0;
+    if (c.snd_pcm_hw_params_get_buffer_size_min(hw_params, &min_frames) < 0)
+        return error.OpeningDevice;
+    if (c.snd_pcm_hw_params_get_buffer_size_max(hw_params, &max_frames) < 0)
+        return error.OpeningDevice;
+
+    device.latency.min = @intToFloat(f32, min_frames) * one_over_actual_rate;
+    device.latency.max = @intToFloat(f32, max_frames) * one_over_actual_rate;
+
+    if (c.snd_pcm_hw_params_set_buffer_size_first(pcm, hw_params, &min_frames) < 0)
+        return error.OpeningDevice;
+
+    var fmt_mask: ?*c.snd_pcm_format_mask_t = null;
+    _ = c.snd_pcm_format_mask_malloc(&fmt_mask);
+    defer c.snd_pcm_format_mask_free(fmt_mask);
+    c.snd_pcm_format_mask_none(fmt_mask);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S8);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U8);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S16_LE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S16_BE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U16_LE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U16_BE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S24_LE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S24_BE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U24_LE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U24_BE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S32_LE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S32_BE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U32_LE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U32_BE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT_LE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT_BE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT64_LE);
+    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT64_BE);
+
+    if (c.snd_pcm_hw_params_set_format_mask(pcm, hw_params, fmt_mask) < 0)
+        return error.OpeningDevice;
+    c.snd_pcm_hw_params_get_format_mask(hw_params, fmt_mask);
+
+    var fmt_arr = std.ArrayList(Format).init(self.allocator);
+    for (alsa_supported_formats) |format| {
+        if (c.snd_pcm_format_mask_test(fmt_mask, toAlsaFormat(format) catch unreachable) != 0)
+            try fmt_arr.append(format);
+    }
+    device.formats = fmt_arr.toOwnedSlice();
+    errdefer self.allocator.free(device.formats);
+
+    const chmap = c.snd_pcm_query_chmaps(pcm) orelse return error.OpeningDevice;
+    defer c.snd_pcm_free_chmaps(chmap);
+    if (chmap[0] == null or chmap[0][0].map.channels <= 0) return error.OpeningDevice;
+    device.layout.channels = ChannelLayout.Array.init(std.math.min(max_channels, chmap[0][0].map.channels)) catch unreachable;
+    for (device.layout.channels.slice()) |*pos, i|
+        pos.* = fromAlsaChmapPos(chmap[0][0].map.pos()[i]);
+    device.layout = getLayoutByChannels(device.layout.channels.slice()) orelse return error.OpeningDevice;
+}
+
+pub fn deinit(self: *Alsa) void {
+    self.aborted.store(true, .Monotonic);
+    self.wakeUpDevicePoll() catch {};
+    self.thread.join();
+    std.os.close(self.notify_pipe_fd[0]);
+    std.os.close(self.notify_pipe_fd[1]);
+    std.os.close(self.notify_fd);
+
+    for (self.devices_info.list.items) |device|
+        deviceDeinit(device, self.allocator);
+    for (self.pending_files.items) |file|
+        self.allocator.free(file);
+    self.devices_info.list.deinit(self.allocator);
+    self.pending_files.deinit(self.allocator);
+    self.allocator.destroy(self);
+}
+
+pub fn flushEvents(self: *Alsa) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    try self.refreshDevices();
+}
+
+pub fn waitEvents(self: *Alsa) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
+    while (!self.device_scan_queued.load(.Acquire))
+        self.cond.wait(&self.mutex);
+
+    defer self.device_scan_queued.store(false, .Monotonic);
+    try self.refreshDevices();
+}
+
+pub fn wakeUp(self: *Alsa) void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+    self.device_scan_queued.store(true, .Monotonic);
+    self.cond.signal();
 }
 
 fn aimToStream(aim: Device.Aim) c_uint {
@@ -374,98 +478,6 @@ fn toAlsaFormat(format: Format) !c.snd_pcm_format_t {
     };
 }
 
-fn probeDevice(self: *Alsa, device: *Device) !void {
-    var handle: ?*c.snd_pcm_t = null;
-    const snd_stream = aimToStream(device.aim);
-
-    if (c.snd_pcm_open(&handle, device.id.ptr, snd_stream, 0) < 0)
-        return error.OpeningDevice;
-    defer _ = c.snd_pcm_close(handle);
-
-    var hw_params: ?*c.snd_pcm_hw_params_t = null;
-    _ = c.snd_pcm_hw_params_malloc(&hw_params);
-    defer c.snd_pcm_hw_params_free(hw_params);
-
-    if (c.snd_pcm_hw_params_any(handle, hw_params) < 0)
-        return error.OpeningDevice;
-
-    if (c.snd_pcm_hw_params_set_rate_resample(handle, hw_params, @bitCast(u1, !device.is_raw)) < 0) // TODO: revert is_raw?
-        return error.OpeningDevice;
-
-    if (c.snd_pcm_hw_params_get_rate_min(hw_params, &device.sample_rate_range.min, null) < 0)
-        return error.OpeningDevice;
-    if (c.snd_pcm_hw_params_set_rate_last(handle, hw_params, &device.sample_rate_range.max, null) < 0)
-        return error.OpeningDevice;
-    if (c.snd_pcm_hw_params_get_rate(hw_params, &device.sample_rate, null) < 0)
-        return error.OpeningDevice;
-
-    const one_over_actual_rate = 1.0 / @intToFloat(f32, device.sample_rate_range.max);
-
-    var min_frames: c.snd_pcm_uframes_t = 0;
-    var max_frames: c.snd_pcm_uframes_t = 0;
-    if (c.snd_pcm_hw_params_get_buffer_size_min(hw_params, &min_frames) < 0)
-        return error.OpeningDevice;
-    if (c.snd_pcm_hw_params_get_buffer_size_max(hw_params, &max_frames) < 0)
-        return error.OpeningDevice;
-
-    device.latency_range.min = @intToFloat(f32, min_frames) * one_over_actual_rate;
-    device.latency_range.max = @intToFloat(f32, max_frames) * one_over_actual_rate;
-
-    if (c.snd_pcm_hw_params_set_buffer_size_first(handle, hw_params, &min_frames) < 0)
-        return error.OpeningDevice;
-
-    var fmt_mask: ?*c.snd_pcm_format_mask_t = null;
-    _ = c.snd_pcm_format_mask_malloc(&fmt_mask);
-    defer c.snd_pcm_format_mask_free(fmt_mask);
-    c.snd_pcm_format_mask_none(fmt_mask);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S8);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U8);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S16_LE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S16_BE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U16_LE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U16_BE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S24_LE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S24_BE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U24_LE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U24_BE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S32_LE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S32_BE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U32_LE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U32_BE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT_LE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT_BE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT64_LE);
-    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT64_BE);
-
-    if (c.snd_pcm_hw_params_set_format_mask(handle, hw_params, fmt_mask) < 0)
-        return error.OpeningDevice;
-    c.snd_pcm_hw_params_get_format_mask(hw_params, fmt_mask);
-
-    var fmt_arr = std.ArrayList(Format).init(self.allocator);
-    for (alsa_supported_formats) |format| {
-        if (c.snd_pcm_format_mask_test(fmt_mask, toAlsaFormat(format) catch unreachable) != 0)
-            try fmt_arr.append(format);
-    }
-    device.formats = fmt_arr.toOwnedSlice();
-    errdefer self.allocator.free(device.formats);
-
-    const chmap = c.snd_pcm_get_chmap(handle);
-    if (chmap != null) {
-        defer std.heap.c_allocator.destroy(chmap);
-        if (chmap.*.channels <= 0) return error.OpeningDevice;
-
-        device.layout.channels = ChannelLayout.Array.init(std.math.min(max_channels, chmap.*.channels)) catch unreachable;
-        for (device.layout.channels.slice()) |*pos, i|
-            pos.* = fromAlsaChmapPos(chmap.*.pos()[i]);
-        device.layout = getLayoutByChannels(device.layout.channels.slice()) orelse return error.OpeningDevice;
-    } else {
-        var min_channels: c_uint = 0;
-        if (c.snd_pcm_hw_params_get_channels_min(hw_params, &min_channels) < 0)
-            return error.OpeningDevice;
-        device.layout = getLayoutByChannelCount(@intCast(u6, min_channels)) orelse return error.OpeningDevice;
-    }
-}
-
 fn fromAlsaChmapPos(pos: c_uint) ChannelId {
     return switch (pos) {
         c.SND_CHMAP_UNKNOWN, c.SND_CHMAP_NA => unreachable, // TODO
@@ -507,43 +519,6 @@ fn fromAlsaChmapPos(pos: c_uint) ChannelId {
 
         else => unreachable,
     };
-}
-
-pub fn deinit(self: *Alsa) void {
-    self.aborted.store(true, .Monotonic);
-    self.wakeUpDevicePoll();
-    self.thread.detach();
-    for (self.devices_info.list.items) |device|
-        deviceDeinit(device, self.allocator);
-    for (self.pending_files.items) |file|
-        self.allocator.free(file);
-    self.devices_info.list.deinit(self.allocator);
-    self.pending_files.deinit(self.allocator);
-    self.allocator.destroy(self);
-}
-
-pub fn flushEvents(self: *Alsa) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    try self.refreshDevices();
-}
-
-pub fn waitEvents(self: *Alsa) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
-    while (!self.device_scan_queued.load(.Acquire))
-        self.cond.wait(&self.mutex);
-
-    defer self.device_scan_queued.store(false, .Monotonic);
-    try self.refreshDevices();
-}
-
-pub fn wakeUp(self: *Alsa) void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    self.device_scan_queued.store(true, .Monotonic);
-    self.cond.signal();
 }
 
 const OpenStreamError = error{
@@ -626,39 +601,4 @@ const alsa_supported_formats = &[_]Format{
     .float32be,
     .float64le,
     .float64be,
-};
-
-// Generated from types.h
-const snd_pcm_sync_id_t = extern union {
-    id: [16]u8,
-    id16: [8]c_ushort,
-    id32: [4]c_uint,
-};
-
-const snd_pcm_info_t = extern struct {
-    device: c_uint,
-    subdevice: c_uint,
-    stream: c_int,
-    card: c_int,
-    id: [64]u8,
-    name: [80]u8,
-    subname: [32]u8,
-    dev_class: c_int,
-    dev_subclass: c_int,
-    subdevices_count: c_uint,
-    subdevices_avail: c_uint,
-    sync: snd_pcm_sync_id_t,
-    reserved: [64]u8,
-};
-
-const snd_ctl_card_info_t = extern struct {
-    card: c_int,
-    pad: c_int,
-    id: [16]u8,
-    driver: [16]u8,
-    name: [32]u8,
-    longname: [80]u8,
-    reserved_: [16]u8,
-    mixername: [80]u8,
-    components: [128]u8,
 };
