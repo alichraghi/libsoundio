@@ -66,8 +66,8 @@ pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options
             .linux, .freebsd => {
                 if (PulseAudio.connect(allocator)) |res| {
                     data = res;
-                } else |_| {
-                    @panic("TODO: Alsa");
+                } else |err| {
+                    Alsa.connect(allocator, options) catch return err;
                 }
             },
             .macos, .ios, .watchos, .tvos => @panic("TODO: CoreAudio"),
@@ -134,7 +134,9 @@ pub const CreateStreamError = error{
     OutOfMemory,
     Interrupted,
     IncompatibleBackend,
+    IncompatibleDevice,
     StreamDisconnected,
+    SystemResources,
     OpeningDevice,
 };
 
@@ -148,6 +150,13 @@ pub const OutstreamOptions = struct {
 };
 
 pub fn createOutstream(self: SoundIO, device: Device, options: OutstreamOptions) CreateStreamError!Outstream {
+    var fmt_found = false;
+    for (device.formats) |fmt| {
+        if (options.format == fmt) {
+            fmt_found = true;
+        }
+    }
+    if (!fmt_found) return error.IncompatibleDevice;
     var outstream = Outstream{
         .backend_data = undefined,
         .writeFn = options.writeFn,
@@ -176,6 +185,7 @@ pub const OpenStreamError = error{
 };
 
 pub const StreamError = error{StreamDisconnected};
+pub const StartStreamError = error{ StreamDisconnected, OutOfMemory, SystemResources };
 
 pub const Outstream = struct {
     // TODO: `*Outstream` instead `*anyopaque`
@@ -196,7 +206,7 @@ pub const Outstream = struct {
     backend_data: OutstreamBackendData,
     const OutstreamBackendData = union(Backend) {
         PulseAudio: PulseAudio.OutstreamData,
-        Alsa: void,
+        Alsa: Alsa.OutstreamData,
         Jack: void,
     };
 
@@ -206,7 +216,7 @@ pub const Outstream = struct {
         };
     }
 
-    pub fn start(self: *Outstream) StreamError!void {
+    pub fn start(self: *Outstream) StartStreamError!void {
         return switch (current_backend.?) {
             inline else => |b| @field(SoundIO, @tagName(b)).outstreamStart(self),
         };
@@ -439,7 +449,7 @@ pub const Format = enum {
     s32be,
     u32le,
     u32be,
-    // Range -1.0 to 1.0
+    /// -1.0<->1.0
     float32le,
     float32be,
     float64le,
@@ -456,7 +466,6 @@ pub const Format = enum {
                 .u24_32be => .u24_32le,
                 .s32be => .s32le,
                 .u32be => .u32le,
-                // Range -1.0 to 1.0
                 .float32be => .float32le,
                 .float64be => .float64le,
                 else => self,
@@ -471,7 +480,6 @@ pub const Format = enum {
                 .u24_32le => .u24_32be,
                 .s32le => .s32be,
                 .u32le => .u32be,
-                // Range -1.0 to 1.0
                 .float32le => .float32be,
                 .float64le => .float64be,
                 else => self,

@@ -2,21 +2,21 @@ const std = @import("std");
 const soundio = @import("soundio");
 
 test "Alsa connect()" {
+    if (true) return error.SkipZigTest;
+
     var a = try soundio.connect(.Alsa, std.testing.allocator, .{});
     defer a.deinit();
     try a.flushEvents();
     try std.testing.expect(a.devicesList().len > 0);
-
-    std.debug.print("Alsa default: {s}\n", .{a.getDevice(.output, null).?.id});
 }
 
 test "PulseAudio connect()" {
+    if (true) return error.SkipZigTest;
+
     var a = try soundio.connect(.PulseAudio, std.testing.allocator, .{});
     defer a.deinit();
     try a.flushEvents();
     try std.testing.expect(a.devicesList().len > 0);
-
-    std.debug.print("PulseAudio: {d}\n", .{a.devicesList().len});
 }
 
 test "Jack connect()" {
@@ -32,7 +32,30 @@ fn shutdownFn(_: ?*anyopaque) void {
     std.os.exit(1);
 }
 
+test "Alsa start()" {
+    var a = try soundio.connect(.Alsa, std.testing.allocator, .{});
+    defer a.deinit();
+    try a.flushEvents();
+    const device = a.getDevice(.output, null) orelse return error.SkipZigTest;
+    for (a.devicesList()) |f| {
+        std.debug.print("Device{{\n\tid: {s}\n\tname: {s}\n\taim: {s}\n}}\n", .{ f.id, f.name, @tagName(f.aim) });
+    }
+    std.debug.print("\n", .{});
+    for (device.formats) |f| {
+        std.debug.print("{s} - ", .{@tagName(f)});
+    }
+    std.debug.print("\n", .{});
+    var o = try a.createOutstream(device, .{ .writeFn = writeCallback, .format = .u24_32le });
+    defer o.deinit();
+    try o.start();
+
+    // try o.setVolume(1.0);
+    std.time.sleep(std.time.ns_per_ms * 100);
+}
+
 test "PulseAudio waitEvents()" {
+    if (true) return error.SkipZigTest;
+
     var a = try soundio.connect(.PulseAudio, std.testing.allocator, .{});
     defer a.deinit();
     var wait: u4 = 0;
@@ -43,6 +66,8 @@ test "PulseAudio waitEvents()" {
 }
 
 test "Alsa waitEvents()" {
+    if (true) return error.SkipZigTest;
+
     var a = try soundio.connect(.Alsa, std.testing.allocator, .{});
     defer a.deinit();
     var wait: u4 = 0;
@@ -53,10 +78,12 @@ test "Alsa waitEvents()" {
 }
 
 test "PulseAudio SineWave" {
+    if (true) return error.SkipZigTest;
+
     var a = try soundio.connect(.PulseAudio, std.testing.allocator, .{});
     defer a.deinit();
     try a.flushEvents();
-    const device = a.getDevice(.output, null) orelse return error.OhNo;
+    const device = a.getDevice(.output, null) orelse return error.SkipZigTest;
     var o = try a.createOutstream(device, .{ .writeFn = writeCallback });
     defer o.deinit();
     try o.start();
@@ -72,10 +99,10 @@ test "PulseAudio SineWave" {
     // try std.testing.expect(volume > 0.1499 and volume <= 0.15);
 }
 
-const pi_mul = 2.0 * std.math.pi;
 var accumulator: f32 = 0;
 fn writeCallback(self_opaque: *anyopaque, areas: []const soundio.ChannelArea, n_frame: usize) void {
     const self = @ptrCast(*soundio.Outstream, @alignCast(@alignOf(*soundio.Outstream), self_opaque));
+    const pi_mul = 2.0 * std.math.pi;
     var i: usize = 0;
     while (i < n_frame) : (i += 1) {
         accumulator += pi_mul * 440.0 / @intToFloat(f32, self.sample_rate);

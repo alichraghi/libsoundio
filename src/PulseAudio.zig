@@ -135,7 +135,7 @@ pub fn waitEvents(self: *PulseAudio) !void {
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
     if (!self.device_scan_queued.load(.Acquire))
         c.pa_threaded_mainloop_wait(self.main_loop);
-    defer self.device_scan_queued.store(false, .Release);
+    self.device_scan_queued.store(false, .Release);
     try self.refreshDevices();
 }
 
@@ -251,39 +251,6 @@ pub fn outstreamStart(self: *Outstream) !void {
     c.pa_stream_set_write_callback(bd.stream, playbackStreamWriteCallback, self);
 }
 
-pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) ![]const ChannelArea {
-    var bd = &self.backend_data.pulseaudio;
-    var areas: [max_channels]ChannelArea = undefined;
-
-    bd.write_byte_count = frame_count.* * self.bytes_per_frame;
-    if (c.pa_stream_begin_write(
-        bd.stream,
-        @ptrCast(
-            [*c]?*anyopaque,
-            @alignCast(@alignOf([*c]?*anyopaque), &bd.write_ptr),
-        ),
-        &bd.write_byte_count,
-    ) != 0)
-        return switch (getError(bd.pa.pulse_context)) {
-            else => unreachable,
-        };
-
-    for (self.layout.channels.slice()) |_, i| {
-        areas[i].ptr = bd.write_ptr.? + self.bytes_per_sample * i;
-        areas[i].step = self.bytes_per_frame;
-    }
-
-    frame_count.* = bd.write_byte_count / self.bytes_per_frame;
-    return areas[0..self.layout.channels.len];
-}
-
-pub fn outstreamEndWrite(self: *Outstream) !void {
-    var bd = &self.backend_data.pulseaudio;
-    const seek_mode: c_uint = if (bd.clear_buffer.load(.Acquire)) c.PA_SEEK_RELATIVE_ON_READ else c.PA_SEEK_RELATIVE;
-    if (c.pa_stream_write(bd.stream, &bd.write_ptr.?[0], bd.write_byte_count, null, 0, seek_mode) != 0)
-        return error.StreamDisconnected;
-}
-
 pub fn outstreamClearBuffer(self: *Outstream) void {
     self.backend_data.pulseaudio.clear_buffer.store(true, .Monotonic);
 }
@@ -396,40 +363,6 @@ fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyo
     }
 }
 
-// fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
-//     var self = @ptrCast(*Outstream, @alignCast(@alignOf(*Outstream), userdata.?));
-//     var bd = &self.backend_data.pulseaudio;
-//     var areas: [max_channels]ChannelArea = undefined;
-//     var to_write = nbytes;
-//     while (to_write > 0) {
-//         // var chunk_size = std.math.min(to_write, c.pa_stream_writable_size(bd.stream));
-//         if (c.pa_stream_begin_write(
-//             bd.stream,
-//             @ptrCast(
-//                 [*c]?*anyopaque,
-//                 @alignCast(@alignOf([*c]?*anyopaque), &bd.write_ptr),
-//             ),
-//             &to_write,
-//         ) != 0)
-//             return switch (getError(bd.pa.pulse_context)) {
-//                 else => unreachable,
-//             };
-
-//         for (self.layout.channels.slice()) |_, i| {
-//             areas[i].ptr = bd.write_ptr.? + self.bytes_per_sample * i;
-//             areas[i].step = self.bytes_per_frame;
-//         }
-
-//         self.writeFn(self, areas[0..self.layout.channels.len], to_write);
-
-//         const seek_mode: c_uint = if (bd.clear_buffer.loadUnchecked()) c.PA_SEEK_RELATIVE_ON_READ else c.PA_SEEK_RELATIVE;
-//         if (c.pa_stream_write(bd.stream, &bd.write_ptr.?[0], to_write, null, 0, seek_mode) != 0)
-//             unreachable;
-
-//         // to_write -= chunk_size;
-//     }
-// }
-
 fn playbackStreamStateCallback(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
     var bd = @ptrCast(*OutstreamData, @alignCast(@alignOf(*OutstreamData), userdata.?));
     switch (c.pa_stream_get_state(stream)) {
@@ -500,7 +433,7 @@ fn performOperation(main_loop: *c.pa_threaded_mainloop, op: ?*c.pa_operation) !v
 
 fn subscribeCallback(_: ?*c.pa_context, _: c.pa_subscription_event_type_t, _: u32, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
-    defer self.device_scan_queued.store(true, .Monotonic);
+    self.device_scan_queued.store(true, .Monotonic);
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
