@@ -417,8 +417,6 @@ fn probeDevice(self: *Alsa, device: *Device) !void {
     if (c.snd_pcm_hw_params_set_rate_resample(pcm, hw_params, @bitCast(u1, !device.is_raw)) < 0) // TODO: revert is_raw?
         return error.OpeningDevice;
 
-    _ = try setAccess(pcm.?, hw_params.?);
-
     if (c.snd_pcm_hw_params_get_rate_min(hw_params, &device.sample_rate.min, null) < 0)
         return error.OpeningDevice;
     if (c.snd_pcm_hw_params_set_rate_last(pcm, hw_params, &device.sample_rate.max, null) < 0)
@@ -535,22 +533,6 @@ fn aimToStream(aim: Device.Aim) c_uint {
         .output => c.SND_PCM_STREAM_PLAYBACK,
         .input => c.SND_PCM_STREAM_CAPTURE,
     };
-}
-
-const prioritized_access_types = &[_]c.snd_pcm_access_t{
-    c.SND_PCM_ACCESS_MMAP_INTERLEAVED,
-    c.SND_PCM_ACCESS_MMAP_NONINTERLEAVED,
-    c.SND_PCM_ACCESS_MMAP_COMPLEX,
-    c.SND_PCM_ACCESS_RW_INTERLEAVED,
-    c.SND_PCM_ACCESS_RW_NONINTERLEAVED,
-};
-
-fn setAccess(handle: *c.snd_pcm_t, hw_params: *c.snd_pcm_hw_params_t) !c.snd_pcm_access_t {
-    for (prioritized_access_types) |access| {
-        if (c.snd_pcm_hw_params_set_access(handle, hw_params, access) == 0)
-            return access;
-    }
-    return error.OpeningDevice;
 }
 
 // TODO: a test to make sure this is exact same as `supported_alsa_formats`
@@ -711,7 +693,8 @@ pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
     if (c.snd_pcm_hw_params_set_rate_resample(bd.pcm, hw_params, @bitCast(u1, !device.is_raw)) < 0) // TODO: revert is_raw?
         return error.OpeningDevice;
 
-    bd.access = try setAccess(bd.pcm.?, hw_params.?);
+    if (c.snd_pcm_hw_params_set_access(bd.pcm, hw_params, c.SND_PCM_ACCESS_RW_INTERLEAVED) < 0)
+        return error.OpeningDevice;
 
     if (c.snd_pcm_hw_params_set_channels(bd.pcm, hw_params, @intCast(u6, outstream.layout.channels.len)) < 0)
         return error.OpeningDevice;
@@ -769,12 +752,10 @@ pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
         else => return error.OpeningDevice,
     }
 
-    if (bd.access == c.SND_PCM_ACCESS_RW_INTERLEAVED or bd.access == c.SND_PCM_ACCESS_RW_NONINTERLEAVED) {
-        bd.sample_buffer = try self.allocator.alloc(
-            u8,
-            outstream.layout.channels.len * bd.period_size * phys_bytes_per_sample,
-        );
-    }
+    bd.sample_buffer = try self.allocator.alloc(
+        u8,
+        outstream.layout.channels.len * bd.period_size * phys_bytes_per_sample,
+    );
 
     const poll_fd_count = c.snd_pcm_poll_descriptors_count(bd.pcm);
     if (poll_fd_count <= 0)
@@ -810,95 +791,29 @@ pub fn outstreamDeinit(self: *Outstream) void {
 
 fn outstreamThreadRun(self: *Outstream) void {
     var bd = &self.backend_data.Alsa;
+    var areas: [max_channels]ChannelArea = undefined;
+
     while (true) {
-        if (bd.aborted.load(.Acquire))
-            return;
-        switch (c.snd_pcm_state(bd.pcm)) {
-            c.SND_PCM_STATE_SETUP => {
-                if (c.snd_pcm_prepare(bd.pcm) < 0) {
-                    bd.alsa.shutdownFn(bd.alsa.userdata);
-                    return;
-                }
-            },
-            c.SND_PCM_STATE_PREPARED => {
-                if (c.snd_pcm_avail(bd.pcm) < 0) {
-                    bd.alsa.shutdownFn(bd.alsa.userdata);
-                    return;
-                }
-
-                if (bd.buffer_size_frames > 0) {
-                    handleWrite(self, bd.buffer_size_frames) catch unreachable; // TODO: catch here
-                    continue;
-                }
-
-                if (c.snd_pcm_start(bd.pcm) < 0) {
-                    bd.alsa.shutdownFn(bd.alsa.userdata);
-                    return;
-                }
-            },
-            c.SND_PCM_STATE_RUNNING, c.SND_PCM_STATE_PAUSED => {
-                waitForPoll(self) catch |err| {
-                    if (err != error.Interrupted)
-                        bd.alsa.shutdownFn(bd.alsa.userdata);
-                    return;
-                };
-                // if (!SOUNDIO_ATOMIC_FLAG_TEST_AND_SET(bd.clear_buffer_flag)) {
-                //     if ((err = snd_pcm_drop(bd.pcm)) < 0) {
-                //         outstream->error_callback(outstream, error.Streaming);
-                //         return;
-                //     }
-                //     if ((err = snd_pcm_reset(bd.pcm)) < 0) {
-                //         if (err == -EBADFD) {
-                //             // If this happens the snd_pcm_drop will have done
-                //             // the function of the reset so it's ok that this
-                //             // did not work.
-                //         } else {
-                //             outstream->error_callback(outstream, error.Streaming);
-                //             return;
-                //         }
-                //     }
-                //     continue;
-                // }
-
-                const avail = c.snd_pcm_avail_update(bd.pcm);
-                if (avail > 0) {
-                    handleWrite(self, @intCast(c_ulong, avail)) catch unreachable;
-                } else {
-                    const errno = std.os.errno(avail);
-                    const err = switch (errno) {
-                        .PIPE => error.BrokenPipe,
-                        .STRPIPE => error.StreamBrokenPipe,
-                        else => {
-                            bd.alsa.shutdownFn(bd.alsa.userdata);
-                            return;
-                        },
-                    };
-                    xrunRecovery(bd, err) catch {
-                        bd.alsa.shutdownFn(bd.alsa.userdata);
-                        return;
-                    };
-                }
-            },
-            c.SND_PCM_STATE_XRUN => {
+        for (self.layout.channels.slice()) |_, i| {
+            areas[i].ptr = bd.sample_buffer.?.ptr + i * self.bytes_per_sample;
+            areas[i].step = self.bytes_per_frame;
+        }
+        self.writeFn(self, areas[0..self.layout.channels.len], bd.period_size);
+        var ptr = bd.sample_buffer;
+        var cptr = bd.period_size;
+        while (cptr > 0) {
+            const err = c.snd_pcm_writei(bd.pcm, ptr.?.ptr, cptr);
+            if (-err == @enumToInt(std.os.linux.E.AGAIN))
+                continue;
+            if (err < 0) {
                 xrunRecovery(bd, error.BrokenPipe) catch {
                     bd.alsa.shutdownFn(bd.alsa.userdata);
                     return;
                 };
-            },
-            c.SND_PCM_STATE_SUSPENDED => {
-                xrunRecovery(bd, error.StreamBrokenPipe) catch {
-                    bd.alsa.shutdownFn(bd.alsa.userdata);
-                    return;
-                };
-            },
-            c.SND_PCM_STATE_OPEN,
-            c.SND_PCM_STATE_DRAINING,
-            c.SND_PCM_STATE_DISCONNECTED,
-            => {
-                bd.alsa.shutdownFn(bd.alsa.userdata);
-                return;
-            },
-            else => continue,
+                break;
+            }
+            ptr.?.ptr += @intCast(c_uint, err) * self.layout.channels.len;
+            cptr -= @intCast(c_uint, err);
         }
     }
 }
@@ -940,65 +855,18 @@ fn handleWrite(self: *Outstream, max_frame_count: c_ulong) !void {
     var frames_left = max_frame_count;
     while (frames_left > 0) {
         var chunk_size = frames_left;
-        var offset: c.snd_pcm_uframes_t = 0;
-        //// Begin
-        if (bd.access == c.SND_PCM_ACCESS_RW_INTERLEAVED) {
-            for (self.layout.channels.slice()) |_, i| {
-                areas[i].ptr = bd.sample_buffer.?.ptr + self.bytes_per_sample * i;
-                areas[i].step = self.bytes_per_frame;
-            }
-
-            chunk_size = std.math.min(chunk_size, bd.period_size);
-        } else if (bd.access == c.SND_PCM_ACCESS_RW_NONINTERLEAVED) {
-            for (self.layout.channels.slice()) |_, i| {
-                areas[i].ptr = bd.sample_buffer.?.ptr + self.bytes_per_sample * i * bd.period_size;
-                areas[i].step = self.bytes_per_frame;
-            }
-
-            chunk_size = std.math.min(chunk_size, bd.period_size);
-        } else {
-            var snd_areas: [*c]const c.snd_pcm_channel_area_t = undefined;
-
-            const err = c.snd_pcm_mmap_begin(bd.pcm, &snd_areas, &offset, &chunk_size);
-            if (err < 0) {
-                return switch (std.os.errno(err)) {
-                    .PIPE, .STRPIPE => error.Underflow,
-                    else => error.Streaming,
-                };
-            }
-
-            if (snd_areas[0].first % 8 != 0 or snd_areas[0].step % 8 != 0)
-                return error.IncompatibleDevice;
-            for (self.layout.channels.slice()) |_, i| {
-                areas[i].step = snd_areas[i].step / 8;
-                areas[i].ptr = @ptrCast([*]u8, snd_areas[i].addr) + (snd_areas[i].first / 8) + (areas[i].step * offset);
-            }
+        for (self.layout.channels.slice()) |_, i| {
+            areas[i].ptr = bd.sample_buffer.?.ptr + self.bytes_per_sample * i;
+            areas[i].step = self.bytes_per_frame;
         }
-        //// ~Begin
+        chunk_size = std.math.min(chunk_size, bd.period_size);
         const frames = chunk_size / self.bytes_per_frame;
         self.writeFn(self, areas[0..self.layout.channels.len], frames);
-        //// End
-        var commitres: c.snd_pcm_sframes_t = undefined;
-        if (bd.access == c.SND_PCM_ACCESS_RW_INTERLEAVED) {
-            commitres = c.snd_pcm_writei(bd.pcm, bd.sample_buffer.?.ptr, chunk_size);
-        } else if (bd.access == c.SND_PCM_ACCESS_RW_NONINTERLEAVED) {
-            unreachable;
-            // var ptrs: [max_channels][*]u8 = undefined;
-            // for (self.layout.channels.slice()) |_, i| {
-            //     ptrs[i] = bd.sample_buffer.?.ptr + i * self.bytes_per_sample * bd.period_size;
-            // }
-            // commitres = c.snd_pcm_writen(bd.pcm, ptrs[0], chunk_size);
-        } else {
-            commitres = c.snd_pcm_mmap_commit(bd.pcm, offset, chunk_size);
-        }
-
-        if (commitres < 0 or commitres != chunk_size) {
-            return if (commitres >= 0)
-                error.Underflow
-            else
-                error.Streaming;
-        }
-        //// ~End
+        const commitres = c.snd_pcm_writei(bd.pcm, bd.sample_buffer.?.ptr, chunk_size);
+        if (commitres < 0)
+            return error.Streaming
+        else if (commitres != chunk_size)
+            return error.Underflow;
         frames_left -= chunk_size;
     }
 }

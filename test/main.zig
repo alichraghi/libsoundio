@@ -36,21 +36,15 @@ test "Alsa start()" {
     var a = try soundio.connect(.Alsa, std.testing.allocator, .{});
     defer a.deinit();
     try a.flushEvents();
-    const device = a.getDevice(.output, null) orelse return error.SkipZigTest;
-    for (a.devicesList()) |f| {
-        std.debug.print("Device{{\n\tid: {s}\n\tname: {s}\n\taim: {s}\n}}\n", .{ f.id, f.name, @tagName(f.aim) });
-    }
-    std.debug.print("\n", .{});
-    for (device.formats) |f| {
-        std.debug.print("{s} - ", .{@tagName(f)});
-    }
-    std.debug.print("\n", .{});
-    var o = try a.createOutstream(device, .{ .writeFn = writeCallback, .format = .u24_32le });
+    for (a.devicesList()) |f|
+        std.debug.print("{s} - {s}\n", .{ f.id, @tagName(f.aim) });
+    const device = a.getDevice(.output, 7) orelse return error.OOps;
+    var o = try a.createOutstream(device, .{ .writeFn = writeCallback });
     defer o.deinit();
     try o.start();
 
     // try o.setVolume(1.0);
-    std.time.sleep(std.time.ns_per_ms * 100);
+    std.time.sleep(std.time.ns_per_ms * 2000);
 }
 
 test "PulseAudio waitEvents()" {
