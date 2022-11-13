@@ -69,11 +69,7 @@ pub fn connect(allocator: std.mem.Allocator) !*PulseAudio {
         .pulse_context = pulse_context,
         .context_state = c.PA_CONTEXT_UNCONNECTED,
         .device_scan_queued = std.atomic.Atomic(bool).init(false),
-        .devices_info = .{
-            .list = .{},
-            .default_output_index = 0,
-            .default_input_index = 0,
-        },
+        .devices_info = DevicesInfo.init(),
         .device_query_err = null,
         .default_sink_id = null,
         .default_source_id = null,
@@ -118,9 +114,7 @@ pub fn deinit(self: *PulseAudio) void {
     c.pa_context_unref(self.pulse_context);
     c.pa_threaded_mainloop_free(self.main_loop);
     c.pa_proplist_free(self.props);
-    for (self.devices_info.list.items) |device|
-        deviceDeinit(device, self.allocator);
-    self.devices_info.list.deinit(self.allocator);
+    self.devices_info.deinit(self.allocator);
     self.allocator.destroy(self);
 }
 
@@ -252,11 +246,11 @@ pub fn outstreamStart(self: *Outstream) !void {
 }
 
 pub fn outstreamClearBuffer(self: *Outstream) void {
-    self.backend_data.pulseaudio.clear_buffer.store(true, .Monotonic);
+    self.backend_data.PulseAudio.clear_buffer.store(true, .Monotonic);
 }
 
 pub fn outstreamPausePlay(self: *Outstream, pause: bool) !void {
-    var bd = &self.backend_data.pulseaudio;
+    var bd = &self.backend_data.PulseAudio;
 
     if (c.pa_threaded_mainloop_in_thread(bd.pa.main_loop) == 0)
         c.pa_threaded_mainloop_lock(bd.pa.main_loop);
@@ -264,17 +258,18 @@ pub fn outstreamPausePlay(self: *Outstream, pause: bool) !void {
         c.pa_threaded_mainloop_unlock(bd.pa.main_loop);
 
     if (pause != (c.pa_stream_is_corked(bd.stream) != 0)) {
-        const op = c.pa_stream_cork(bd.stream, @bitCast(c_int, pause), null, null) orelse
+        const op = c.pa_stream_cork(bd.stream, if (pause) 1 else 0, null, null) orelse
             return error.StreamDisconnected;
         c.pa_operation_unref(op);
     }
 }
 
 pub fn outstreamGetLatency(self: *Outstream) !f64 {
+    var bd = &self.backend_data.PulseAudio;
     var r_usec: c.pa_usec_t = 0;
     var negative: c_int = 0;
-    if (c.pa_stream_get_latency(self.backend_data.pulseaudio.stream, &r_usec, &negative) != 0)
-        return switch (getError(self.pulse_context)) {
+    if (c.pa_stream_get_latency(bd.stream, &r_usec, &negative) != 0)
+        return switch (getError(bd.pa.pulse_context)) {
             // Timing info is automatically updated
             error.NoData => unreachable,
             else => unreachable,
@@ -302,7 +297,7 @@ pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
 }
 
 pub fn outstreamVolume(self: *Outstream) !f64 {
-    var bd = &self.backend_data.pulseaudio;
+    var bd = &self.backend_data.PulseAudio;
     try performOperation(
         bd.pa.main_loop,
         c.pa_context_get_sink_input_info(
@@ -385,11 +380,7 @@ fn timingUpdateCallback(_: ?*c.pa_stream, _: c_int, userdata: ?*anyopaque) callc
 }
 
 fn refreshDevices(self: *PulseAudio) !void {
-    self.devices_info.default_output_index = null;
-    self.devices_info.default_input_index = null;
-    for (self.devices_info.list.items) |device|
-        device.deinit(self.allocator);
-    self.devices_info.list.clearAndFree(self.allocator);
+    self.devices_info.clear(self.allocator);
 
     const list_sink_op = c.pa_context_get_sink_info_list(self.pulse_context, sinkInfoCallback, self);
     const list_source_op = c.pa_context_get_source_info_list(self.pulse_context, sourceInfoCallback, self);
@@ -406,11 +397,10 @@ fn refreshDevices(self: *PulseAudio) !void {
     }
 
     for (self.devices_info.list.items) |device, i| {
-        if (device.aim == .output and std.mem.eql(u8, device.id, self.default_sink_id.?)) {
-            self.devices_info.default_output_index = i;
-            break;
-        } else if (device.aim == .input and std.mem.eql(u8, device.id, self.default_source_id.?)) {
-            self.devices_info.default_input_index = i;
+        if ((device.aim == .output and std.mem.eql(u8, device.id, self.default_sink_id.?)) or
+            (device.aim == .input and std.mem.eql(u8, device.id, self.default_source_id.?)))
+        {
+            self.devices_info.setDefault(device.aim, i);
             break;
         }
     }

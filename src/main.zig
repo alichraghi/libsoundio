@@ -5,6 +5,14 @@ const PulseAudio = @import("PulseAudio.zig");
 const Alsa = @import("Alsa.zig");
 const Jack = @import("Jack.zig");
 
+comptime {
+    std.testing.refAllDeclsRecursive(channel_layout);
+    std.testing.refAllDeclsRecursive(PulseAudio);
+    std.testing.refAllDeclsRecursive(Alsa);
+    std.testing.refAllDeclsRecursive(Jack);
+    std.testing.refAllDeclsRecursive(@import("util.zig"));
+}
+
 pub const max_channels = 24;
 pub const min_sample_rate = 8000;
 pub const max_sample_rate = 5644800;
@@ -38,6 +46,7 @@ pub const ConnectError = error{
     IncompatibleBackend,
     InvalidFormat,
     Interrupted,
+    AccessDenied,
 };
 
 pub const ShutdownFn = *const fn (userdata: ?*anyopaque) void;
@@ -82,10 +91,10 @@ pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options
 }
 
 pub fn deinit(self: SoundIO) void {
-    current_backend = null;
-    return switch (self.data) {
+    switch (self.data) {
         inline else => |b| b.deinit(),
-    };
+    }
+    current_backend = null;
 }
 
 pub const FlushEventsError = error{
@@ -125,7 +134,7 @@ pub fn devicesList(self: SoundIO) []const Device {
 pub fn getDevice(self: SoundIO, aim: Device.Aim, index: ?usize) ?Device {
     switch (self.data) {
         inline else => |b| {
-            return b.devices_info.get(index orelse return b.devices_info.defaultDevice(aim));
+            return b.devices_info.get(index orelse return b.devices_info.default(aim));
         },
     }
 }
@@ -296,29 +305,51 @@ pub const Device = struct {
 
 pub const DevicesInfo = struct {
     list: std.ArrayListUnmanaged(Device),
-    default_output_index: ?usize,
-    default_input_index: ?usize,
+    default_output: ?usize,
+    default_input: ?usize,
+
+    pub fn init() DevicesInfo {
+        return .{
+            .list = .{},
+            .default_output = null,
+            .default_input = null,
+        };
+    }
+
+    pub fn deinit(self: *DevicesInfo, allocator: std.mem.Allocator) void {
+        for (self.list.items) |device|
+            device.deinit(allocator);
+        self.list.deinit(allocator);
+    }
+
+    pub fn clear(self: *DevicesInfo, allocator: std.mem.Allocator) void {
+        self.default_output = null;
+        self.default_input = null;
+        for (self.list.items) |device|
+            device.deinit(allocator);
+        self.list.clearAndFree(allocator);
+    }
 
     pub fn get(self: DevicesInfo, i: usize) Device {
         return self.list.items[i];
     }
 
-    pub fn setDefaultIndex(self: *DevicesInfo, aim: Device.Aim, i: usize) void {
+    pub fn default(self: DevicesInfo, aim: Device.Aim) ?Device {
+        return self.get(self.defaultIndex(aim) orelse return null);
+    }
+
+    pub fn setDefault(self: *DevicesInfo, aim: Device.Aim, i: usize) void {
         switch (aim) {
-            .output => self.default_output_index = i,
-            .input => self.default_input_index = i,
+            .output => self.default_output = i,
+            .input => self.default_input = i,
         }
     }
 
     pub fn defaultIndex(self: DevicesInfo, aim: Device.Aim) ?usize {
         return switch (aim) {
-            .output => self.default_output_index,
-            .input => self.default_input_index,
+            .output => self.default_output,
+            .input => self.default_input,
         };
-    }
-
-    pub fn defaultDevice(self: DevicesInfo, aim: Device.Aim) ?Device {
-        return self.list.items[self.defaultIndex(aim) orelse return null];
     }
 };
 

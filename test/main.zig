@@ -2,17 +2,15 @@ const std = @import("std");
 const soundio = @import("soundio");
 
 test "Alsa connect()" {
-    if (true) return error.SkipZigTest;
-
     var a = try soundio.connect(.Alsa, std.testing.allocator, .{});
     defer a.deinit();
     try a.flushEvents();
     try std.testing.expect(a.devicesList().len > 0);
+    for (a.devicesList()) |f|
+        std.debug.print("{s}\n", .{f.id});
 }
 
 test "PulseAudio connect()" {
-    if (true) return error.SkipZigTest;
-
     var a = try soundio.connect(.PulseAudio, std.testing.allocator, .{});
     defer a.deinit();
     try a.flushEvents();
@@ -44,12 +42,10 @@ test "Alsa start()" {
     try o.start();
 
     // try o.setVolume(1.0);
-    std.time.sleep(std.time.ns_per_ms * 2000);
+    std.time.sleep(std.time.ns_per_ms * 100);
 }
 
 test "PulseAudio waitEvents()" {
-    if (true) return error.SkipZigTest;
-
     var a = try soundio.connect(.PulseAudio, std.testing.allocator, .{});
     defer a.deinit();
     var wait: u4 = 0;
@@ -60,8 +56,6 @@ test "PulseAudio waitEvents()" {
 }
 
 test "Alsa waitEvents()" {
-    if (true) return error.SkipZigTest;
-
     var a = try soundio.connect(.Alsa, std.testing.allocator, .{});
     defer a.deinit();
     var wait: u4 = 0;
@@ -72,8 +66,6 @@ test "Alsa waitEvents()" {
 }
 
 test "PulseAudio SineWave" {
-    if (true) return error.SkipZigTest;
-
     var a = try soundio.connect(.PulseAudio, std.testing.allocator, .{});
     defer a.deinit();
     try a.flushEvents();

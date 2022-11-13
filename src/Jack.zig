@@ -43,11 +43,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Jack {
         .shutdown_emmited = false,
         .shutdownFn = options.shutdownFn,
         .userdata = options.userdata,
-        .devices_info = .{
-            .list = .{},
-            .default_output_index = 0,
-            .default_input_index = 0,
-        },
+        .devices_info = DevicesInfo.init(),
         .client = c.jack_client_open("SoundIO", c.JackNoStartServer, &status) orelse {
             std.debug.assert(status & c.JackInvalidOption == 0);
             return if (status & c.JackShmFailure != 0)
@@ -277,6 +273,7 @@ pub fn outstreamPausePlay(self: *Outstream, pause: bool) !void {
 
 pub fn outstreamGetLatency(self: *Outstream) !f64 {
     _ = self;
+    return undefined;
 }
 
 pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
