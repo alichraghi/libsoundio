@@ -5,19 +5,13 @@ const queryRawDevices = @import("Alsa/device.zig").queryRawDevices;
 const alsa_util = @import("Alsa/util.zig");
 const Device = @import("main.zig").Device;
 const Outstream = @import("main.zig").Outstream;
-const ChannelLayout = @import("main.zig").ChannelLayout;
 const ChannelArea = @import("main.zig").ChannelArea;
 const ConnectOptions = @import("main.zig").ConnectOptions;
 const ShutdownFn = @import("main.zig").ShutdownFn;
 const DevicesInfo = @import("main.zig").DevicesInfo;
-const ChannelId = @import("main.zig").ChannelId;
-const Format = @import("main.zig").Format;
 const max_channels = @import("main.zig").max_channels;
-const min_sample_rate = @import("main.zig").min_sample_rate;
-const max_sample_rate = @import("main.zig").max_sample_rate;
 const util = @import("util.zig");
 const linux = std.os.linux;
-const InotifyEvent = linux.inotify_event;
 
 const Alsa = @This();
 
@@ -36,10 +30,6 @@ shutdownFn: ShutdownFn,
 userdata: ?*anyopaque,
 aborted: std.atomic.Atomic(bool),
 device_scan_queued: std.atomic.Atomic(bool),
-
-fn defaultShutdownFn(_: ?*anyopaque) void {
-    unreachable;
-}
 
 pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
     var self = try allocator.create(Alsa);
@@ -107,14 +97,34 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
     return self;
 }
 
-fn alsaErrorHandler() callconv(.C) void {}
+pub fn deinit(self: *Alsa) void {
+    self.aborted.store(true, .Monotonic);
+    self.wakeUpDevicePoll() catch {};
+    self.thread.join();
+    std.os.close(self.notify_pipe_fd[0]);
+    std.os.close(self.notify_pipe_fd[1]);
+    std.os.inotify_rm_watch(self.notify_fd, self.notify_wd);
+    std.os.close(self.notify_fd);
 
-fn eventName(self: []const u8, len: usize) []const u8 {
-    return self.ptr[@sizeOf(InotifyEvent) .. @sizeOf(InotifyEvent) + std.math.min(max_snd_file_len, len)];
+    self.devices_info.deinit(self.allocator);
+    for (self.pending_files.items) |file|
+        self.allocator.free(file);
+    self.pending_files.deinit(self.allocator);
+    self.allocator.destroy(self);
 }
 
+fn defaultShutdownFn(_: ?*anyopaque) void {
+    @panic("Unhandled Shutdown");
+}
+
+fn wakeUpDevicePoll(self: *Alsa) !void {
+    _ = try std.os.write(self.notify_pipe_fd[1], "a");
+}
+
+fn alsaErrorHandler() callconv(.C) void {}
+
 fn deviceEventLoop(self: *Alsa) !void {
-    var buf: [4096]u8 align(@alignOf(InotifyEvent)) = undefined;
+    var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
     var fds = [2]std.os.pollfd{
         .{
             .fd = self.notify_fd,
@@ -149,10 +159,10 @@ fn deviceEventLoop(self: *Alsa) !void {
                 };
                 if (len == 0) break;
 
-                var event: *InotifyEvent = undefined;
+                var event: *linux.inotify_event = undefined;
                 var i: usize = 0;
-                while (i < buf.len) : (i += @sizeOf(InotifyEvent) + event.len) {
-                    event = @ptrCast(*InotifyEvent, @alignCast(@alignOf(InotifyEvent), buf[i..]));
+                while (i < buf.len) : (i += @sizeOf(linux.inotify_event) + event.len) {
+                    event = @ptrCast(*linux.inotify_event, @alignCast(@alignOf(linux.inotify_event), buf[i..]));
 
                     if (!(util.hasFlag(event.mask, linux.IN.CLOSE_WRITE) or
                         util.hasFlag(event.mask, linux.IN.DELETE) or
@@ -214,35 +224,8 @@ fn deviceEventLoop(self: *Alsa) !void {
     }
 }
 
-fn wakeUpDevicePoll(self: *Alsa) !void {
-    _ = try std.os.write(self.notify_pipe_fd[1], "a");
-}
-
-pub fn refreshDevices(self: *Alsa) !void {
-    self.devices_info.clear(self.allocator);
-
-    if (c.snd_config_update() < 0)
-        return error.SystemResources;
-    defer _ = c.snd_config_update_free_global();
-
-    try queryCookedDevices(&self.devices_info, self.allocator);
-    try queryRawDevices(&self.devices_info, self.allocator);
-}
-
-pub fn deinit(self: *Alsa) void {
-    self.aborted.store(true, .Monotonic);
-    self.wakeUpDevicePoll() catch {};
-    self.thread.join();
-    std.os.close(self.notify_pipe_fd[0]);
-    std.os.close(self.notify_pipe_fd[1]);
-    std.os.inotify_rm_watch(self.notify_fd, self.notify_wd);
-    std.os.close(self.notify_fd);
-
-    self.devices_info.deinit(self.allocator);
-    for (self.pending_files.items) |file|
-        self.allocator.free(file);
-    self.pending_files.deinit(self.allocator);
-    self.allocator.destroy(self);
+fn eventName(self: []const u8, len: usize) []const u8 {
+    return self.ptr[@sizeOf(linux.inotify_event) .. @sizeOf(linux.inotify_event) + std.math.min(max_snd_file_len, len)];
 }
 
 pub fn flushEvents(self: *Alsa) !void {
@@ -263,6 +246,17 @@ pub fn waitEvents(self: *Alsa) !void {
     try self.refreshDevices();
 }
 
+fn refreshDevices(self: *Alsa) !void {
+    self.devices_info.clear(self.allocator);
+
+    if (c.snd_config_update() < 0)
+        return error.SystemResources;
+    defer _ = c.snd_config_update_free_global();
+
+    try queryCookedDevices(&self.devices_info, self.allocator);
+    try queryRawDevices(&self.devices_info, self.allocator);
+}
+
 pub fn wakeUp(self: *Alsa) void {
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -270,23 +264,13 @@ pub fn wakeUp(self: *Alsa) void {
     self.cond.signal();
 }
 
-const OpenStreamError = error{
-    OutOfMemory,
-    IncompatibleBackend,
-    StreamDisconnected,
-    OpeningDevice,
-};
-
 pub const OutstreamData = struct {
     alsa: *const Alsa,
     buffer_size_frames: c_ulong,
     period_size: c.snd_pcm_uframes_t,
-    sample_buffer: ?[]u8,
-    poll_fds: []std.os.pollfd,
-    poll_exit_pipe_fd: [2]linux.fd_t,
+    sample_buffer: []u8,
     thread: std.Thread,
     pcm: ?*c.snd_pcm_t,
-    access: c.snd_pcm_access_t,
     aborted: std.atomic.Atomic(bool),
 };
 
@@ -296,11 +280,8 @@ pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
             .alsa = self,
             .buffer_size_frames = undefined,
             .period_size = undefined,
-            .sample_buffer = null,
-            .poll_fds = undefined,
-            .poll_exit_pipe_fd = undefined,
+            .sample_buffer = undefined,
             .pcm = null,
-            .access = undefined,
             .thread = undefined,
             .aborted = std.atomic.Atomic(bool).init(false),
         },
@@ -383,27 +364,6 @@ pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
         u8,
         outstream.layout.channels.len * bd.period_size * phys_bytes_per_sample,
     );
-
-    const poll_fd_count = c.snd_pcm_poll_descriptors_count(bd.pcm);
-    if (poll_fd_count <= 0)
-        return error.OpeningDevice;
-
-    bd.poll_fds = try self.allocator.alloc(std.os.pollfd, @intCast(c_uint, poll_fd_count + 1));
-
-    if (c.snd_pcm_poll_descriptors(bd.pcm, @ptrCast([*c]c.pollfd, bd.poll_fds), @intCast(c_uint, poll_fd_count)) < 0)
-        return error.OpeningDevice;
-
-    bd.poll_exit_pipe_fd = std.os.pipe2(linux.O.NONBLOCK) catch |err| switch (err) {
-        error.ProcessFdQuotaExceeded,
-        error.SystemFdQuotaExceeded,
-        => return error.SystemResources,
-        error.Unexpected => unreachable,
-    };
-    bd.poll_fds[@intCast(c_uint, poll_fd_count)] = .{
-        .fd = bd.poll_exit_pipe_fd[0],
-        .events = linux.POLL.IN,
-        .revents = 0,
-    };
 }
 
 pub fn outstreamDeinit(self: *Outstream) void {
@@ -411,27 +371,37 @@ pub fn outstreamDeinit(self: *Outstream) void {
     bd.aborted.store(true, .Monotonic);
     bd.thread.join();
     _ = c.snd_pcm_close(bd.pcm);
-    bd.alsa.allocator.free(bd.poll_fds);
-    if (bd.sample_buffer) |sb|
-        bd.alsa.allocator.free(sb);
+    bd.alsa.allocator.free(bd.sample_buffer);
 }
 
-fn outstreamThreadRun(self: *Outstream) void {
+pub fn outstreamStart(self: *Outstream) !void {
+    var bd = &self.backend_data.Alsa;
+    bd.thread = std.Thread.spawn(.{}, outstreamLoop, .{self}) catch |err| switch (err) {
+        error.ThreadQuotaExceeded,
+        error.SystemResources,
+        error.LockedMemoryLimitExceeded,
+        => return error.SystemResources,
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Unexpected => unreachable,
+    };
+}
+
+fn outstreamLoop(self: *Outstream) void {
     var bd = &self.backend_data.Alsa;
     var areas: [max_channels]ChannelArea = undefined;
 
     while (true) {
         for (self.layout.channels.slice()) |_, i| {
-            areas[i].ptr = bd.sample_buffer.?.ptr + i * self.bytes_per_sample;
+            areas[i].ptr = bd.sample_buffer.ptr + i * self.bytes_per_sample;
             areas[i].step = self.bytes_per_frame;
         }
         self.writeFn(self, areas[0..self.layout.channels.len], bd.period_size);
-        var ptr = bd.sample_buffer;
+        var ptr = bd.sample_buffer.ptr;
         var cptr = bd.period_size;
         while (cptr > 0) {
             // var t = std.time.Timer.start() catch unreachable;
             if (bd.aborted.load(.Acquire)) return;
-            const err = c.snd_pcm_writei(bd.pcm, ptr.?.ptr, cptr);
+            const err = c.snd_pcm_writei(bd.pcm, ptr, cptr);
             if (-err == @enumToInt(linux.E.AGAIN))
                 continue;
             if (err < 0) {
@@ -441,27 +411,12 @@ fn outstreamThreadRun(self: *Outstream) void {
                 };
                 break;
             }
-            ptr.?.ptr += @intCast(c_uint, err) * self.layout.channels.len;
+            ptr += @intCast(c_uint, err) * self.layout.channels.len;
             cptr -= @intCast(c_uint, err);
             // std.debug.print("{d}\n", .{t.read()});
         } else {
             if (bd.aborted.load(.Acquire)) return;
         }
-    }
-}
-
-fn waitForPoll(self: *Outstream) !void {
-    var bd = &self.backend_data.Alsa;
-    var revents: u16 = undefined;
-    while (true) {
-        _ = try std.os.poll(bd.poll_fds, -1);
-        if (bd.aborted.load(.Acquire))
-            return error.Interrupted;
-        if (c.snd_pcm_poll_descriptors_revents(bd.pcm, @ptrCast([*c]c.pollfd, bd.poll_fds), @intCast(c_uint, bd.poll_fds.len - 1), &revents) < 0)
-            return error.Streaming;
-        if (util.hasFlag(revents, linux.POLL.ERR | linux.POLL.NVAL | linux.POLL.HUP) or
-            util.hasFlag(revents, linux.POLL.OUT))
-            return;
     }
 }
 
@@ -480,50 +435,6 @@ fn xrunRecovery(self: *OutstreamData, err: XRunError) !void {
             _ = c.snd_pcm_prepare(self.pcm);
         },
     }
-}
-
-fn handleWrite(self: *Outstream, max_frame_count: c_ulong) !void {
-    var bd = &self.backend_data.Alsa;
-    var areas: [max_channels]ChannelArea = undefined;
-    var frames_left = max_frame_count;
-    while (frames_left > 0) {
-        var chunk_size = frames_left;
-        for (self.layout.channels.slice()) |_, i| {
-            areas[i].ptr = bd.sample_buffer.?.ptr + self.bytes_per_sample * i;
-            areas[i].step = self.bytes_per_frame;
-        }
-        chunk_size = std.math.min(chunk_size, bd.period_size);
-        const frames = chunk_size / self.bytes_per_frame;
-        self.writeFn(self, areas[0..self.layout.channels.len], frames);
-        const commitres = c.snd_pcm_writei(bd.pcm, bd.sample_buffer.?.ptr, chunk_size);
-        if (commitres < 0)
-            return error.Streaming
-        else if (commitres != chunk_size)
-            return error.Underflow;
-        frames_left -= chunk_size;
-    }
-}
-
-pub fn outstreamStart(self: *Outstream) !void {
-    var bd = &self.backend_data.Alsa;
-    bd.thread = std.Thread.spawn(.{}, outstreamThreadRun, .{self}) catch |err| switch (err) {
-        error.ThreadQuotaExceeded,
-        error.SystemResources,
-        error.LockedMemoryLimitExceeded,
-        => return error.SystemResources,
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Unexpected => unreachable,
-    };
-}
-
-pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) ![]const ChannelArea {
-    _ = self;
-    _ = frame_count;
-    return undefined;
-}
-
-pub fn outstreamEndWrite(self: *Outstream) !void {
-    _ = self;
 }
 
 pub fn outstreamClearBuffer(self: *Outstream) void {

@@ -252,16 +252,6 @@ pub fn outstreamStart(self: *Outstream) !void {
     _ = self;
 }
 
-pub fn outstreamBeginWrite(self: *Outstream, frame_count: *usize) ![]const ChannelArea {
-    _ = self;
-    _ = frame_count;
-    return undefined;
-}
-
-pub fn outstreamEndWrite(self: *Outstream) !void {
-    _ = self;
-}
-
 pub fn outstreamClearBuffer(self: *Outstream) void {
     _ = self;
 }
