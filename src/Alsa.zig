@@ -287,21 +287,26 @@ pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
         },
     };
     var bd = &outstream.backend_data.Alsa;
-    const snd_stream = alsa_util.aimToStream(device.aim);
 
+    const snd_stream = alsa_util.aimToStream(device.aim);
     if (c.snd_pcm_open(&bd.pcm, device.id.ptr, snd_stream, 0) < 0)
         return error.OpeningDevice;
 
     const format = alsa_util.toAlsaFormat(outstream.format) catch return error.IncompatibleBackend;
-
-    if ((c.snd_pcm_set_params(bd.pcm, format, c.SND_PCM_ACCESS_RW_INTERLEAVED, 2, outstream.sample_rate, 1, 500000)) < 0) {
-        @panic("Off");
-    }
+    if ((c.snd_pcm_set_params(
+        bd.pcm,
+        format,
+        c.SND_PCM_ACCESS_RW_INTERLEAVED,
+        @intCast(u6, outstream.layout.channels.len),
+        outstream.sample_rate,
+        @bitCast(u1, !device.is_raw),
+        @floatToInt(c_uint, outstream.latency * std.time.us_per_s),
+    )) < 0)
+        return error.OpeningDevice;
 
     var hw_params: ?*c.snd_pcm_hw_params_t = null;
     _ = c.snd_pcm_hw_params_malloc(&hw_params);
     defer c.snd_pcm_hw_params_free(hw_params);
-
     if (c.snd_pcm_hw_params_current(bd.pcm, hw_params) < 0)
         return error.OpeningDevice;
 
@@ -354,8 +359,8 @@ fn outstreamLoop(self: *Outstream) void {
         if (bd.aborted.load(.Acquire)) return;
         var frames_left = bd.period_size;
         while (frames_left > 0) {
+            var t = std.time.Timer.start() catch unreachable;
             self.writeFn(self, areas[0..self.layout.channels.len], frames_left);
-            // var t = std.time.Timer.start() catch unreachable;
             const written = c.snd_pcm_writei(bd.pcm, bd.sample_buffer.ptr, frames_left);
             if (written < 0) {
                 switch (@intToEnum(linux.E, -written)) {
@@ -367,9 +372,8 @@ fn outstreamLoop(self: *Outstream) void {
                         while (true) {
                             const res = c.snd_pcm_resume(bd.pcm);
                             if (-res != @enumToInt(linux.E.AGAIN)) {
-                                if (res >= 0) {
+                                if (res < 0)
                                     _ = c.snd_pcm_prepare(bd.pcm);
-                                }
                                 break;
                             }
                             _ = std.os.poll(&.{}, 1) catch {
@@ -379,7 +383,6 @@ fn outstreamLoop(self: *Outstream) void {
                         }
                     },
                     else => {
-                        std.debug.print("error: {d} {s}\n", .{ written, @tagName(std.os.errno(-written)) });
                         bd.alsa.shutdownFn(bd.alsa.userdata);
                         return;
                     },
@@ -387,39 +390,8 @@ fn outstreamLoop(self: *Outstream) void {
                 break;
             }
             frames_left -= @intCast(c_uint, written);
-            // std.debug.print("{d}\n", .{t.read()});
+            std.debug.print("{d}\n", .{t.read() / std.time.ns_per_ms});
         }
-    }
-}
-
-fn waitForPoll(self: *OutstreamData) !void {
-    var revents: u16 = undefined;
-    while (true) {
-        _ = try std.os.poll(self.poll_fds, -1);
-        if (self.aborted.load(.Acquire))
-            return error.Interrupted;
-        if (c.snd_pcm_poll_descriptors_revents(self.pcm, @ptrCast([*c]c.pollfd, self.poll_fds), @intCast(c_uint, self.poll_fds.len), &revents) < 0)
-            return error.Streaming;
-        if (util.hasFlag(revents, linux.POLL.ERR | linux.POLL.NVAL | linux.POLL.HUP) or
-            util.hasFlag(revents, linux.POLL.OUT))
-            return;
-    }
-}
-
-const XRunError = error{
-    BrokenPipe,
-    StreamBrokenPipe,
-};
-fn xrunRecovery(self: *OutstreamData, err: XRunError) !void {
-    switch (err) {
-        error.BrokenPipe => _ = c.snd_pcm_prepare(self.pcm),
-        error.StreamBrokenPipe => {
-            while (std.os.errno(c.snd_pcm_resume(self.pcm)) == .AGAIN) {
-                // wait until suspend flag is released
-                _ = try std.os.poll(&.{}, 1);
-            }
-            _ = c.snd_pcm_prepare(self.pcm);
-        },
     }
 }
 

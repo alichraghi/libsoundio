@@ -6,8 +6,6 @@ test "Alsa connect()" {
     defer a.deinit();
     try a.flushEvents();
     try std.testing.expect(a.devicesList().len > 0);
-    for (a.devicesList()) |f|
-        std.debug.print("{s}\n", .{f.id});
 }
 
 test "PulseAudio connect()" {
@@ -34,8 +32,6 @@ test "Alsa start()" {
     var a = try soundio.connect(.Alsa, std.testing.allocator, .{});
     defer a.deinit();
     try a.flushEvents();
-    for (a.devicesList()) |f|
-        std.debug.print("{s} - {s}\n", .{ f.id, @tagName(f.aim) });
     const device = a.getDevice(.output, null) orelse return error.OOps;
     var o = try a.createOutstream(device, .{ .writeFn = writeCallback, .format = .float32le });
     defer o.deinit();

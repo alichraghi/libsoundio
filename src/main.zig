@@ -152,8 +152,8 @@ pub const CreateStreamError = error{
 pub const OutstreamOptions = struct {
     writeFn: Outstream.WriteFn,
     name: [:0]const u8 = "SoundIoOutstream",
-    latency: f64 = 0.0,
-    sample_rate: u32 = 48000,
+    latency: f64 = 0.5,
+    sample_rate: u32 = 44100,
     format: Format = Format.toNativeEndian(.float32le),
     userdata: ?*anyopaque = null,
 };
