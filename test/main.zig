@@ -36,13 +36,13 @@ test "Alsa start()" {
     try a.flushEvents();
     for (a.devicesList()) |f|
         std.debug.print("{s} - {s}\n", .{ f.id, @tagName(f.aim) });
-    const device = a.getDevice(.output, 7) orelse return error.OOps;
-    var o = try a.createOutstream(device, .{ .writeFn = writeCallback });
+    const device = a.getDevice(.output, null) orelse return error.OOps;
+    var o = try a.createOutstream(device, .{ .writeFn = writeCallback, .format = .float32le });
     defer o.deinit();
     try o.start();
 
     // try o.setVolume(1.0);
-    std.time.sleep(std.time.ns_per_ms * 100);
+    std.time.sleep(std.time.ns_per_ms * 10000);
 }
 
 test "PulseAudio waitEvents()" {
@@ -75,7 +75,7 @@ test "PulseAudio SineWave" {
     try o.start();
 
     try o.setVolume(1.0);
-    std.time.sleep(std.time.ns_per_ms * 100);
+    std.time.sleep(std.time.ns_per_ms * 10000);
     // var v: f64 = 0.7;
     // while (v > 0.15) : (v -= 0.0005) {
     //     try o.setVolume(v);
@@ -85,15 +85,28 @@ test "PulseAudio SineWave" {
     // try std.testing.expect(volume > 0.1499 and volume <= 0.15);
 }
 
-var accumulator: f32 = 0;
+const pitch = 440.0;
+const radians_per_second = pitch * 2.0 * std.math.pi;
+var seconds_offset: f32 = 0.0;
 fn writeCallback(self_opaque: *anyopaque, areas: []const soundio.ChannelArea, n_frame: usize) void {
-    const self = @ptrCast(*soundio.Outstream, @alignCast(@alignOf(*soundio.Outstream), self_opaque));
-    const pi_mul = 2.0 * std.math.pi;
-    var i: usize = 0;
-    while (i < n_frame) : (i += 1) {
-        accumulator += pi_mul * 440.0 / @intToFloat(f32, self.sample_rate);
-        if (accumulator >= pi_mul) accumulator -= pi_mul;
-        for (areas) |area|
-            area.write(std.math.sin(accumulator), i);
+    const self = @ptrCast(*const soundio.Outstream, @alignCast(@alignOf(soundio.Outstream), self_opaque));
+    // _ = self_opaque;
+    // var r = std.rand.DefaultPrng.init(@intCast(u64, std.time.timestamp()));
+    // var frame: usize = 0;
+    // while (frame < n_frame) : (frame += 1) {
+    //     const sample: f32 = 4.0 * r.random().float(f32);
+    //     for (areas) |area| {
+    //         area.write(sample, frame);
+    //     }
+    // }
+
+    const seconds_per_frame = 1.0 / @intToFloat(f32, self.sample_rate);
+    var frame: usize = 0;
+    while (frame < n_frame) : (frame += 1) {
+        const sample = std.math.sin((seconds_offset + @intToFloat(f32, frame) * seconds_per_frame) * radians_per_second);
+        for (areas) |area| {
+            area.write(sample, frame);
+        }
     }
+    seconds_offset = @mod(seconds_offset + seconds_per_frame * @intToFloat(f32, n_frame), 1.0);
 }

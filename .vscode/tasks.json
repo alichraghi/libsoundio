@@ -43,7 +43,7 @@
         {
             "label": "Build TC",
             "type": "shell",
-            "command": "zig2 build-exe z.zig src/pipewire/builder.c -ODebug -lc -lm -lpipewire-0.3 -I/usr/include/spa-0.2 -I/usr/include/pipewire-0.3",
+            "command": "zigo cc c.c -L/home/ali/dev/libsoundio/alsa-lib/src/.libs -lasound -lm",
             "problemMatcher": [],
             "group": {
                 "kind": "build",

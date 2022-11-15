@@ -114,7 +114,7 @@ pub fn deinit(self: *Alsa) void {
 }
 
 fn defaultShutdownFn(_: ?*anyopaque) void {
-    @panic("Unhandled Shutdown");
+    @panic("Unhandled Error");
 }
 
 fn wakeUpDevicePoll(self: *Alsa) !void {
@@ -266,24 +266,24 @@ pub fn wakeUp(self: *Alsa) void {
 
 pub const OutstreamData = struct {
     alsa: *const Alsa,
-    buffer_size_frames: c_ulong,
     period_size: c.snd_pcm_uframes_t,
     sample_buffer: []u8,
     thread: std.Thread,
     pcm: ?*c.snd_pcm_t,
     aborted: std.atomic.Atomic(bool),
+    clear_buffer: std.atomic.Atomic(bool),
 };
 
 pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
     outstream.backend_data = .{
         .Alsa = .{
             .alsa = self,
-            .buffer_size_frames = undefined,
             .period_size = undefined,
             .sample_buffer = undefined,
             .pcm = null,
             .thread = undefined,
             .aborted = std.atomic.Atomic(bool).init(false),
+            .clear_buffer = std.atomic.Atomic(bool).init(false),
         },
     };
     var bd = &outstream.backend_data.Alsa;
@@ -292,46 +292,24 @@ pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
     if (c.snd_pcm_open(&bd.pcm, device.id.ptr, snd_stream, 0) < 0)
         return error.OpeningDevice;
 
+    const format = alsa_util.toAlsaFormat(outstream.format) catch return error.IncompatibleBackend;
+
+    if ((c.snd_pcm_set_params(bd.pcm, format, c.SND_PCM_ACCESS_RW_INTERLEAVED, 2, outstream.sample_rate, 1, 500000)) < 0) {
+        @panic("Off");
+    }
+
     var hw_params: ?*c.snd_pcm_hw_params_t = null;
     _ = c.snd_pcm_hw_params_malloc(&hw_params);
     defer c.snd_pcm_hw_params_free(hw_params);
-    if (c.snd_pcm_hw_params_any(bd.pcm, hw_params) < 0)
+
+    if (c.snd_pcm_hw_params_current(bd.pcm, hw_params) < 0)
         return error.OpeningDevice;
-
-    if (c.snd_pcm_hw_params_set_rate_resample(bd.pcm, hw_params, @bitCast(u1, !device.is_raw)) < 0) // TODO: revert is_raw?
-        return error.OpeningDevice;
-
-    if (c.snd_pcm_hw_params_set_access(bd.pcm, hw_params, c.SND_PCM_ACCESS_RW_INTERLEAVED) < 0)
-        return error.OpeningDevice;
-
-    if (c.snd_pcm_hw_params_set_channels(bd.pcm, hw_params, @intCast(u6, outstream.layout.channels.len)) < 0)
-        return error.OpeningDevice;
-
-    if (c.snd_pcm_hw_params_set_rate(bd.pcm, hw_params, outstream.sample_rate, 0) < 0)
-        return error.OpeningDevice;
-
-    const format = alsa_util.toAlsaFormat(outstream.format) catch return error.IncompatibleBackend;
-    const phys_bits_per_sample = c.snd_pcm_format_physical_width(format);
-    if (phys_bits_per_sample <= 0 or @intCast(c_uint, phys_bits_per_sample) % 8 != 0)
-        return error.IncompatibleDevice;
-    const phys_bytes_per_sample = @intCast(c_uint, phys_bits_per_sample) / 8;
-
-    if (c.snd_pcm_hw_params_set_format(bd.pcm, hw_params, format) < 0)
-        return error.OpeningDevice;
-
-    bd.buffer_size_frames = @floatToInt(u32, outstream.latency) * outstream.sample_rate;
-    if (c.snd_pcm_hw_params_set_buffer_size_near(bd.pcm, hw_params, &bd.buffer_size_frames) < 0)
-        return error.OpeningDevice;
-
-    outstream.latency = @intToFloat(f64, bd.buffer_size_frames) / @intToFloat(f64, outstream.sample_rate);
-
-    switch (c.snd_pcm_hw_params(bd.pcm, hw_params)) {
-        0 => {},
-        -@intCast(i16, @enumToInt(linux.E.INVAL)) => return error.IncompatibleDevice,
-        else => return error.OpeningDevice,
-    }
 
     if (c.snd_pcm_hw_params_get_period_size(hw_params, &bd.period_size, null) < 0)
+        return error.OpeningDevice;
+
+    var buf_size: c.snd_pcm_uframes_t = 0;
+    if (c.snd_pcm_hw_params_get_buffer_size(hw_params, &buf_size) < 0)
         return error.OpeningDevice;
 
     var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(c_uint, outstream.layout.channels.len) };
@@ -341,29 +319,7 @@ pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
     if (c.snd_pcm_set_chmap(bd.pcm, &chmap) < 0)
         return error.IncompatibleDevice;
 
-    var sw_params: ?*c.snd_pcm_sw_params_t = undefined;
-    _ = c.snd_pcm_sw_params_malloc(&sw_params);
-    defer c.snd_pcm_sw_params_free(sw_params);
-
-    if (c.snd_pcm_sw_params_current(bd.pcm, sw_params) < 0)
-        return error.OpeningDevice;
-
-    if (c.snd_pcm_sw_params_set_start_threshold(bd.pcm, sw_params, 0) < 0)
-        return error.OpeningDevice;
-
-    if (c.snd_pcm_sw_params_set_avail_min(bd.pcm, sw_params, bd.period_size) < 0)
-        return error.OpeningDevice;
-
-    switch (c.snd_pcm_sw_params(bd.pcm, sw_params)) {
-        0 => {},
-        -@intCast(i16, @enumToInt(linux.E.INVAL)) => return error.IncompatibleDevice,
-        else => return error.OpeningDevice,
-    }
-
-    bd.sample_buffer = try self.allocator.alloc(
-        u8,
-        outstream.layout.channels.len * bd.period_size * phys_bytes_per_sample,
-    );
+    bd.sample_buffer = try self.allocator.alloc(u8, buf_size);
 }
 
 pub fn outstreamDeinit(self: *Outstream) void {
@@ -389,34 +345,64 @@ pub fn outstreamStart(self: *Outstream) !void {
 fn outstreamLoop(self: *Outstream) void {
     var bd = &self.backend_data.Alsa;
     var areas: [max_channels]ChannelArea = undefined;
+    for (self.layout.channels.slice()) |_, i| {
+        areas[i].ptr = bd.sample_buffer.ptr + i * self.bytes_per_sample;
+        areas[i].step = self.bytes_per_frame;
+    }
 
     while (true) {
-        for (self.layout.channels.slice()) |_, i| {
-            areas[i].ptr = bd.sample_buffer.ptr + i * self.bytes_per_sample;
-            areas[i].step = self.bytes_per_frame;
-        }
-        self.writeFn(self, areas[0..self.layout.channels.len], bd.period_size);
-        var ptr = bd.sample_buffer.ptr;
-        var cptr = bd.period_size;
-        while (cptr > 0) {
+        if (bd.aborted.load(.Acquire)) return;
+        var frames_left = bd.period_size;
+        while (frames_left > 0) {
+            self.writeFn(self, areas[0..self.layout.channels.len], frames_left);
             // var t = std.time.Timer.start() catch unreachable;
-            if (bd.aborted.load(.Acquire)) return;
-            const err = c.snd_pcm_writei(bd.pcm, ptr, cptr);
-            if (-err == @enumToInt(linux.E.AGAIN))
-                continue;
-            if (err < 0) {
-                xrunRecovery(bd, error.BrokenPipe) catch {
-                    bd.alsa.shutdownFn(bd.alsa.userdata);
-                    return;
-                };
+            const written = c.snd_pcm_writei(bd.pcm, bd.sample_buffer.ptr, frames_left);
+            if (written < 0) {
+                switch (@intToEnum(linux.E, -written)) {
+                    .AGAIN => continue,
+                    .PIPE => {
+                        _ = c.snd_pcm_prepare(bd.pcm);
+                    },
+                    .STRPIPE => {
+                        while (true) {
+                            const res = c.snd_pcm_resume(bd.pcm);
+                            if (-res != @enumToInt(linux.E.AGAIN)) {
+                                if (res >= 0) {
+                                    _ = c.snd_pcm_prepare(bd.pcm);
+                                }
+                                break;
+                            }
+                            _ = std.os.poll(&.{}, 1) catch {
+                                bd.alsa.shutdownFn(bd.alsa.userdata);
+                                return;
+                            };
+                        }
+                    },
+                    else => {
+                        std.debug.print("error: {d} {s}\n", .{ written, @tagName(std.os.errno(-written)) });
+                        bd.alsa.shutdownFn(bd.alsa.userdata);
+                        return;
+                    },
+                }
                 break;
             }
-            ptr += @intCast(c_uint, err) * self.layout.channels.len;
-            cptr -= @intCast(c_uint, err);
+            frames_left -= @intCast(c_uint, written);
             // std.debug.print("{d}\n", .{t.read()});
-        } else {
-            if (bd.aborted.load(.Acquire)) return;
         }
+    }
+}
+
+fn waitForPoll(self: *OutstreamData) !void {
+    var revents: u16 = undefined;
+    while (true) {
+        _ = try std.os.poll(self.poll_fds, -1);
+        if (self.aborted.load(.Acquire))
+            return error.Interrupted;
+        if (c.snd_pcm_poll_descriptors_revents(self.pcm, @ptrCast([*c]c.pollfd, self.poll_fds), @intCast(c_uint, self.poll_fds.len), &revents) < 0)
+            return error.Streaming;
+        if (util.hasFlag(revents, linux.POLL.ERR | linux.POLL.NVAL | linux.POLL.HUP) or
+            util.hasFlag(revents, linux.POLL.OUT))
+            return;
     }
 }
 
