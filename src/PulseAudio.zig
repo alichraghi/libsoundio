@@ -309,6 +309,11 @@ pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
     allocator.free(self.name);
 }
 
+pub fn playerErr(self: *Player) !void {
+    _ = self;
+    return;
+}
+
 fn sinkInputInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
     var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
     if (eol != 0) {
@@ -323,6 +328,7 @@ fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyo
     var bd = &self.backend_data.PulseAudio;
     var areas: [max_channels]ChannelArea = undefined;
     var frames_left = nbytes;
+    var err: error{WriteFailed}!void = {};
     while (frames_left > 0) {
         var chunk_size = frames_left;
         if (c.pa_stream_begin_write(
@@ -343,10 +349,10 @@ fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyo
         }
 
         const frames = chunk_size / self.bytes_per_frame;
-        self.writeFn(self, areas[0..self.layout.channels.len], frames);
+        self.writeFn(self, err, areas[0..self.layout.channels.len], frames);
 
         if (c.pa_stream_write(bd.stream, &bd.write_ptr.?[0], chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0)
-            unreachable;
+            err = error.WriteFailed;
         frames_left -= chunk_size;
     }
 }

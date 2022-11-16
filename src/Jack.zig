@@ -78,6 +78,11 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Jack {
     return self;
 }
 
+pub fn playerErr(self: *Player) !void {
+    _ = self;
+    return;
+}
+
 pub fn refreshDevices(self: *Jack) !void {
     self.devices_info.list.clearAndFree(self.allocator);
     self.devices_latency_range.clearAndFree(self.allocator);

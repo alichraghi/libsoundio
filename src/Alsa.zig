@@ -26,12 +26,11 @@ pending_files: std.ArrayListUnmanaged([]const u8),
 notify_fd: linux.fd_t,
 notify_wd: linux.fd_t,
 notify_pipe_fd: [2]linux.fd_t,
-shutdownFn: ShutdownFn,
-userdata: ?*anyopaque,
 aborted: std.atomic.Atomic(bool),
+err: error{ SystemResources, OutOfMemory }!void,
 device_scan_queued: std.atomic.Atomic(bool),
 
-pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
+pub fn connect(allocator: std.mem.Allocator) !*Alsa {
     var self = try allocator.create(Alsa);
     errdefer allocator.destroy(self);
     self.* = .{
@@ -44,9 +43,8 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
         .notify_fd = undefined,
         .notify_wd = undefined,
         .notify_pipe_fd = undefined,
-        .shutdownFn = options.shutdownFn orelse defaultShutdownFn,
-        .userdata = options.userdata,
         .aborted = std.atomic.Atomic(bool).init(false),
+        .err = {},
         .device_scan_queued = std.atomic.Atomic(bool).init(false),
     };
 
@@ -144,7 +142,8 @@ fn deviceEventLoop(self: *Alsa) !void {
             error.NetworkSubsystemFailed,
             error.SystemResources,
             => {
-                self.shutdownFn(self.userdata);
+                self.wakeUp();
+                self.err = error.SystemResources;
                 return;
             },
             error.Unexpected => unreachable,
@@ -154,7 +153,8 @@ fn deviceEventLoop(self: *Alsa) !void {
             while (true) {
                 const len = std.os.read(self.notify_fd, &buf) catch |err| {
                     if (err == error.WouldBlock) break;
-                    self.shutdownFn(self.userdata);
+                    self.wakeUp();
+                    self.err = error.SystemResources;
                     return;
                 };
                 if (len == 0) break;
@@ -175,11 +175,13 @@ fn deviceEventLoop(self: *Alsa) !void {
 
                     if (util.hasFlag(event.mask, linux.IN.CREATE)) {
                         const event_name = self.allocator.dupe(u8, eventName(buf[i..], event.len)) catch {
-                            self.shutdownFn(self.userdata);
+                            self.wakeUp();
+                            self.err = error.OutOfMemory;
                             return;
                         };
                         self.pending_files.append(self.allocator, event_name) catch {
-                            self.shutdownFn(self.userdata);
+                            self.wakeUp();
+                            self.err = error.OutOfMemory;
                             return;
                         };
                         continue;
@@ -208,7 +210,8 @@ fn deviceEventLoop(self: *Alsa) !void {
             while (true) {
                 const len = std.os.read(self.notify_pipe_fd[0], &buf) catch |err| {
                     if (err == error.WouldBlock) break;
-                    self.shutdownFn(self.userdata);
+                    self.wakeUp();
+                    self.err = error.SystemResources;
                     return;
                 };
                 if (len == 0) break;
@@ -231,6 +234,9 @@ fn eventName(self: []const u8, len: usize) []const u8 {
 pub fn flushEvents(self: *Alsa) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
+
+    try self.err;
+
     self.device_scan_queued.store(false, .Monotonic);
     try self.refreshDevices();
 }
@@ -241,6 +247,8 @@ pub fn waitEvents(self: *Alsa) !void {
 
     while (!self.device_scan_queued.load(.Acquire))
         self.cond.wait(&self.mutex);
+
+    try self.err;
 
     self.device_scan_queued.store(false, .Monotonic);
     try self.refreshDevices();
@@ -355,6 +363,7 @@ fn playerLoop(self: *Player) void {
         areas[i].step = self.bytes_per_frame;
     }
 
+    var err: error{WriteFailed}!void = {};
     while (true) {
         // while (bd.suspended.load(.Acquire) and !bd.aborted.load(.Acquire))
         //     bd.alsa.cond.wait();
@@ -362,11 +371,11 @@ fn playerLoop(self: *Player) void {
 
         var frames_left = bd.period_size;
         while (frames_left > 0) {
-            self.writeFn(self, areas[0..self.layout.channels.len], frames_left);
+            self.writeFn(self, err, areas[0..self.layout.channels.len], frames_left);
             const n = c.snd_pcm_writei(bd.pcm, bd.sample_buffer.ptr, frames_left);
             if (n < 0) {
                 if (c.snd_pcm_recover(bd.pcm, @intCast(c_int, n), 1) < 0)
-                    bd.alsa.shutdownFn(bd.alsa.userdata);
+                    err = error.WriteFailed;
                 return;
             }
             frames_left -= @intCast(c_uint, n);

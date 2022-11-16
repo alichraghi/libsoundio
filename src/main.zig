@@ -65,7 +65,7 @@ const SoundIO = union(Backend) {
                 SoundIO,
                 @tagName(b),
                 switch (b) {
-                    .Alsa => try Alsa.connect(allocator, options),
+                    .Alsa => try Alsa.connect(allocator),
                     .Jack => try Jack.connect(allocator, options),
                     .PulseAudio => try PulseAudio.connect(allocator),
                 },
@@ -190,7 +190,8 @@ pub const StartStreamError = error{ StreamDisconnected, OutOfMemory, SystemResou
 pub const Player = struct {
     // TODO: `*Player` instead `*anyopaque`
     // https://github.com/ziglang/zig/issues/12325
-    pub const WriteFn = *const fn (self: *anyopaque, areas: []const ChannelArea, frame_count_max: usize) void;
+    pub const WriteError = error{WriteFailed};
+    pub const WriteFn = *const fn (self: *anyopaque, err: WriteError!void, areas: []const ChannelArea, frame_count_max: usize) void;
 
     writeFn: WriteFn,
     userdata: ?*anyopaque,

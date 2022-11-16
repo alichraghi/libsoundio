@@ -53,11 +53,11 @@ test "Alsa SineWave" {
     defer a.deinit();
     try a.flushEvents();
     const device = a.getDevice(.playback, null) orelse return error.SkipZigTest;
-    var o = try a.createPlayer(device, .{ .writeFn = writeCallback });
-    defer o.deinit();
-    try o.start();
+    var p = try a.createPlayer(device, .{ .writeFn = writeCallback });
+    defer p.deinit();
+    try p.start();
 
-    try o.setVolume(1.0);
+    try p.setVolume(1.0);
     std.time.sleep(std.time.ns_per_ms * 3000);
     // var v: f64 = 0.7;
     // while (v > 0.15) : (v -= 0.0005) {
@@ -73,11 +73,11 @@ test "PulseAudio SineWave" {
     defer a.deinit();
     try a.flushEvents();
     const device = a.getDevice(.playback, null) orelse return error.SkipZigTest;
-    var o = try a.createPlayer(device, .{ .writeFn = writeCallback });
-    defer o.deinit();
-    try o.start();
+    var p = try a.createPlayer(device, .{ .writeFn = writeCallback });
+    defer p.deinit();
+    try p.start();
 
-    try o.setVolume(1.0);
+    try p.setVolume(1.0);
     std.time.sleep(std.time.ns_per_ms * 3000);
     // var v: f64 = 0.7;
     // while (v > 0.15) : (v -= 0.0005) {
@@ -91,7 +91,8 @@ test "PulseAudio SineWave" {
 const pitch = 440.0;
 const radians_per_second = pitch * 2.0 * std.math.pi;
 var seconds_offset: f32 = 0.0;
-fn writeCallback(self_opaque: *anyopaque, areas: []const soundio.ChannelArea, n_frame: usize) void {
+fn writeCallback(self_opaque: *anyopaque, err: soundio.Player.WriteError!void, areas: []const soundio.ChannelArea, n_frame: usize) void {
+    err catch unreachable;
     const self = @ptrCast(*const soundio.Player, @alignCast(@alignOf(soundio.Player), self_opaque));
     // _ = self_opaque;
     // var r = std.rand.DefaultPrng.init(@intCast(u64, std.time.timestamp()));
