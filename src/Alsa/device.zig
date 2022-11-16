@@ -20,6 +20,8 @@ pub fn queryCookedDevices(devices_info: *DevicesInfo, alloctaor: std.mem.Allocat
         defer std.heap.c_allocator.free(id); // TODO: require a c_allocator option
 
         if (std.mem.eql(u8, id, "null") or
+            // the worse device
+            std.mem.eql(u8, id, "default") or
             // skip jack backend because of noisy errors
             std.mem.eql(u8, id, "jack") or
             // all these surround devices are clutter
