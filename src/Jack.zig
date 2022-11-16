@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @cImport(@cInclude("jack/jack.h"));
 const Device = @import("main.zig").Device;
-const Outstream = @import("main.zig").Outstream;
+const Player = @import("main.zig").Player;
 const ChannelLayout = @import("main.zig").ChannelLayout;
 const ChannelArea = @import("main.zig").ChannelArea;
 const ConnectOptions = @import("main.zig").ConnectOptions;
@@ -104,7 +104,7 @@ pub fn refreshDevices(self: *Jack) !void {
             const port_name = cpniter.rest();
 
             const flags = c.jack_port_flags(port);
-            const aim: Device.Aim = if (flags & c.JackPortIsInput != 0) .input else .output;
+            const aim: Device.Aim = if (flags & c.JackPortIsInput != 0) .capture else .playback;
             const channel_name = std.mem.trimLeft(u8, std.mem.trimLeft(u8, std.mem.trimLeft(u8, std.mem.trimLeft(u8, port_name, "capture_"), "output_"), "playback_"), "monitor_");
 
             var found = false;
@@ -126,19 +126,19 @@ pub fn refreshDevices(self: *Jack) !void {
                 device.aim = aim;
                 device.is_raw = flags & c.JackPortIsPhysical != 0;
                 device.layout.channels.append(parseChannelId(channel_name) orelse continue) catch continue;
-                device.sample_rate = .{
+                device.rate_range = .{
                     .min = std.math.clamp(self.sample_rate, min_sample_rate, max_sample_rate),
                     .max = std.math.clamp(self.sample_rate, min_sample_rate, max_sample_rate),
                 };
-                device.latency = .{
+                device.latency_range = .{
                     .min = @intToFloat(f64, self.period_size) / @intToFloat(f64, self.sample_rate),
                     .max = @intToFloat(f64, self.period_size) / @intToFloat(f64, self.sample_rate),
                 };
 
-                var latency: c.jack_latency_range_t = undefined;
-                const latency_mode = @intCast(c_uint, if (device.aim == .output) c.JackPlaybackLatency else c.JackCaptureLatency);
-                c.jack_port_get_latency_range(port, latency_mode, &latency);
-                try self.devices_latency_range.append(self.allocator, .{ .min = latency.min, .max = latency.max });
+                var latency_range: c.jack_latency_range_t = undefined;
+                const latency_mode = @intCast(c_uint, if (device.aim == .playback) c.JackPlaybackLatency else c.JackCaptureLatency);
+                c.jack_port_get_latency_range(port, latency_mode, &latency_range);
+                try self.devices_latency_range.append(self.allocator, .{ .min = latency_range.min, .max = latency_range.max });
 
                 try self.devices_info.list.append(self.allocator, device);
                 errdefer _ = self.devices_latency_range.pop();
@@ -237,41 +237,37 @@ const OpenStreamError = error{
     OpeningDevice,
 };
 
-pub fn openOutstream(self: *Jack, outstream: *Outstream, device: Device) !void {
+pub fn openPlayer(self: *Jack, player: *Player, device: Device) !void {
     _ = self;
-    _ = outstream;
+    _ = player;
     _ = device;
     return undefined;
 }
 
-pub fn outstreamDeinit(self: *Outstream) void {
+pub fn playerDeinit(self: *Player) void {
     _ = self;
 }
 
-pub fn outstreamStart(self: *Outstream) !void {
+pub fn playerStart(self: *Player) !void {
     _ = self;
 }
 
-pub fn outstreamClearBuffer(self: *Outstream) void {
-    _ = self;
-}
-
-pub fn outstreamPausePlay(self: *Outstream, pause: bool) !void {
+pub fn playerPausePlay(self: *Player, pause: bool) !void {
     _ = self;
     _ = pause;
 }
 
-pub fn outstreamGetLatency(self: *Outstream) !f64 {
+pub fn playerGetLatency(self: *Player) !f64 {
     _ = self;
     return undefined;
 }
 
-pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
+pub fn playerSetVolume(self: *Player, volume: f64) !void {
     _ = self;
     _ = volume;
 }
 
-pub fn outstreamVolume(self: *Outstream) error{}!f64 {
+pub fn playerVolume(self: *Player) error{}!f64 {
     _ = self;
     return undefined;
 }

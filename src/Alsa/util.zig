@@ -26,8 +26,8 @@ pub const supported_formats = &[_]Format{
 
 pub fn aimToStream(aim: Device.Aim) c_uint {
     return switch (aim) {
-        .output => c.SND_PCM_STREAM_PLAYBACK,
-        .input => c.SND_PCM_STREAM_CAPTURE,
+        .playback => c.SND_PCM_STREAM_PLAYBACK,
+        .capture => c.SND_PCM_STREAM_CAPTURE,
     };
 }
 

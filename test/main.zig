@@ -28,19 +28,6 @@ fn shutdownFn(_: ?*anyopaque) void {
     std.os.exit(1);
 }
 
-test "Alsa start()" {
-    var a = try soundio.connect(.Alsa, std.testing.allocator, .{});
-    defer a.deinit();
-    try a.flushEvents();
-    const device = a.getDevice(.output, null) orelse return error.OOps;
-    var o = try a.createOutstream(device, .{ .writeFn = writeCallback, .format = .float32le });
-    defer o.deinit();
-    try o.start();
-
-    // try o.setVolume(1.0);
-    std.time.sleep(std.time.ns_per_ms * 10000);
-}
-
 test "PulseAudio waitEvents()" {
     var a = try soundio.connect(.PulseAudio, std.testing.allocator, .{});
     defer a.deinit();
@@ -61,17 +48,37 @@ test "Alsa waitEvents()" {
     }
 }
 
-test "PulseAudio SineWave" {
-    var a = try soundio.connect(.PulseAudio, std.testing.allocator, .{});
+test "Alsa SineWave" {
+    var a = try soundio.connect(.Alsa, std.testing.allocator, .{});
     defer a.deinit();
     try a.flushEvents();
-    const device = a.getDevice(.output, null) orelse return error.SkipZigTest;
-    var o = try a.createOutstream(device, .{ .writeFn = writeCallback });
+    const device = a.getDevice(.playback, null) orelse return error.SkipZigTest;
+    var o = try a.createPlayer(device, .{ .writeFn = writeCallback });
     defer o.deinit();
     try o.start();
 
     try o.setVolume(1.0);
-    std.time.sleep(std.time.ns_per_ms * 10000);
+    std.time.sleep(std.time.ns_per_ms * 3000);
+    // var v: f64 = 0.7;
+    // while (v > 0.15) : (v -= 0.0005) {
+    //     try o.setVolume(v);
+    //     std.time.sleep(std.time.ns_per_ms * 5);
+    // }
+    // const volume = try o.volume();
+    // try std.testing.expect(volume > 0.1499 and volume <= 0.15);
+}
+
+test "PulseAudio SineWave" {
+    var a = try soundio.connect(.PulseAudio, std.testing.allocator, .{});
+    defer a.deinit();
+    try a.flushEvents();
+    const device = a.getDevice(.playback, null) orelse return error.SkipZigTest;
+    var o = try a.createPlayer(device, .{ .writeFn = writeCallback });
+    defer o.deinit();
+    try o.start();
+
+    try o.setVolume(1.0);
+    std.time.sleep(std.time.ns_per_ms * 3000);
     // var v: f64 = 0.7;
     // while (v > 0.15) : (v -= 0.0005) {
     //     try o.setVolume(v);
@@ -85,7 +92,7 @@ const pitch = 440.0;
 const radians_per_second = pitch * 2.0 * std.math.pi;
 var seconds_offset: f32 = 0.0;
 fn writeCallback(self_opaque: *anyopaque, areas: []const soundio.ChannelArea, n_frame: usize) void {
-    const self = @ptrCast(*const soundio.Outstream, @alignCast(@alignOf(soundio.Outstream), self_opaque));
+    const self = @ptrCast(*const soundio.Player, @alignCast(@alignOf(soundio.Player), self_opaque));
     // _ = self_opaque;
     // var r = std.rand.DefaultPrng.init(@intCast(u64, std.time.timestamp()));
     // var frame: usize = 0;

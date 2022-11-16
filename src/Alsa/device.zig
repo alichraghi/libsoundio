@@ -41,13 +41,13 @@ pub fn queryCookedDevices(devices_info: *DevicesInfo, alloctaor: std.mem.Allocat
             const io_span = std.mem.span(io);
             defer std.heap.c_allocator.free(io_span);
             if (std.mem.eql(u8, io_span, "Output")) {
-                try appendCookedDevice(devices_info, alloctaor, id, name, .output);
+                try appendCookedDevice(devices_info, alloctaor, id, name, .playback);
             } else {
-                try appendCookedDevice(devices_info, alloctaor, id, name, .input);
+                try appendCookedDevice(devices_info, alloctaor, id, name, .capture);
             }
         } else {
-            try appendCookedDevice(devices_info, alloctaor, id, name, .output);
-            try appendCookedDevice(devices_info, alloctaor, id, name, .input);
+            try appendCookedDevice(devices_info, alloctaor, id, name, .playback);
+            try appendCookedDevice(devices_info, alloctaor, id, name, .capture);
         }
     }
 }
@@ -107,7 +107,7 @@ pub fn queryRawDevices(devices_info: *DevicesInfo, allocator: std.mem.Allocator)
 
             const device_name = c.snd_pcm_info_get_name(pcm_info);
 
-            for (&[_]Device.Aim{ .output, .input }) |aim| {
+            for (&[_]Device.Aim{ .playback, .capture }) |aim| {
                 const snd_stream = util.aimToStream(aim);
                 c.snd_pcm_info_set_stream(pcm_info, snd_stream);
 
@@ -209,7 +209,7 @@ fn probeDevice(devices_info: *DevicesInfo, allocator: std.mem.Allocator, id: [:0
             }
             break :blk fmt_arr.toOwnedSlice();
         },
-        .sample_rate = blk: {
+        .rate_range = blk: {
             if (c.snd_pcm_hw_params_get_rate_min(hw_params, &sr_min, null) < 0)
                 return error.OpeningDevice;
             if (c.snd_pcm_hw_params_set_rate_last(pcm, hw_params, &sr_max, null) < 0)
@@ -219,7 +219,7 @@ fn probeDevice(devices_info: *DevicesInfo, allocator: std.mem.Allocator, id: [:0
                 .max = sr_max,
             };
         },
-        .latency = blk: {
+        .latency_range = blk: {
             const one_over_actual_rate = 1.0 / @intToFloat(f32, sr_max);
 
             var min_frames: c.snd_pcm_uframes_t = 0;

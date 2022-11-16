@@ -4,7 +4,7 @@ const queryCookedDevices = @import("Alsa/device.zig").queryCookedDevices;
 const queryRawDevices = @import("Alsa/device.zig").queryRawDevices;
 const alsa_util = @import("Alsa/util.zig");
 const Device = @import("main.zig").Device;
-const Outstream = @import("main.zig").Outstream;
+const Player = @import("main.zig").Player;
 const ChannelArea = @import("main.zig").ChannelArea;
 const ConnectOptions = @import("main.zig").ConnectOptions;
 const ShutdownFn = @import("main.zig").ShutdownFn;
@@ -215,7 +215,7 @@ fn deviceEventLoop(self: *Alsa) !void {
             }
         }
         if (got_rescan_event) {
-            if (self.mutex.tryLock()) {
+            while (!self.mutex.tryLock()) {
                 defer self.mutex.unlock();
                 self.device_scan_queued.store(true, .Monotonic);
                 self.cond.signal();
@@ -264,7 +264,7 @@ pub fn wakeUp(self: *Alsa) void {
     self.cond.signal();
 }
 
-pub const OutstreamData = struct {
+pub const PlayerData = struct {
     alsa: *const Alsa,
     period_size: c.snd_pcm_uframes_t,
     sample_buffer: []u8,
@@ -274,8 +274,8 @@ pub const OutstreamData = struct {
     clear_buffer: std.atomic.Atomic(bool),
 };
 
-pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
-    outstream.backend_data = .{
+pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
+    player.backend_data = .{
         .Alsa = .{
             .alsa = self,
             .period_size = undefined,
@@ -286,21 +286,21 @@ pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
             .clear_buffer = std.atomic.Atomic(bool).init(false),
         },
     };
-    var bd = &outstream.backend_data.Alsa;
+    var bd = &player.backend_data.Alsa;
 
     const snd_stream = alsa_util.aimToStream(device.aim);
     if (c.snd_pcm_open(&bd.pcm, device.id.ptr, snd_stream, 0) < 0)
         return error.OpeningDevice;
 
-    const format = alsa_util.toAlsaFormat(outstream.format) catch return error.IncompatibleBackend;
+    const format = alsa_util.toAlsaFormat(player.format) catch return error.IncompatibleBackend;
     if ((c.snd_pcm_set_params(
         bd.pcm,
         format,
         c.SND_PCM_ACCESS_RW_INTERLEAVED,
-        @intCast(u6, outstream.layout.channels.len),
-        outstream.sample_rate,
+        @intCast(u6, player.layout.channels.len),
+        player.sample_rate,
         @bitCast(u1, !device.is_raw),
-        @floatToInt(c_uint, outstream.latency * std.time.us_per_s),
+        @floatToInt(c_uint, player.latency * std.time.us_per_s),
     )) < 0)
         return error.OpeningDevice;
 
@@ -317,8 +317,8 @@ pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
     if (c.snd_pcm_hw_params_get_buffer_size(hw_params, &buf_size) < 0)
         return error.OpeningDevice;
 
-    var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(c_uint, outstream.layout.channels.len) };
-    for (outstream.layout.channels.slice()) |ch, i| {
+    var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(c_uint, player.layout.channels.len) };
+    for (player.layout.channels.slice()) |ch, i| {
         chmap.pos()[i] = alsa_util.toAlsaChmapPos(ch);
     }
     if (c.snd_pcm_set_chmap(bd.pcm, &chmap) < 0)
@@ -327,7 +327,7 @@ pub fn openOutstream(self: *Alsa, outstream: *Outstream, device: Device) !void {
     bd.sample_buffer = try self.allocator.alloc(u8, buf_size);
 }
 
-pub fn outstreamDeinit(self: *Outstream) void {
+pub fn playerDeinit(self: *Player) void {
     var bd = &self.backend_data.Alsa;
     bd.aborted.store(true, .Monotonic);
     bd.thread.join();
@@ -335,9 +335,9 @@ pub fn outstreamDeinit(self: *Outstream) void {
     bd.alsa.allocator.free(bd.sample_buffer);
 }
 
-pub fn outstreamStart(self: *Outstream) !void {
+pub fn playerStart(self: *Player) !void {
     var bd = &self.backend_data.Alsa;
-    bd.thread = std.Thread.spawn(.{}, outstreamLoop, .{self}) catch |err| switch (err) {
+    bd.thread = std.Thread.spawn(.{}, playerLoop, .{self}) catch |err| switch (err) {
         error.ThreadQuotaExceeded,
         error.SystemResources,
         error.LockedMemoryLimitExceeded,
@@ -347,7 +347,7 @@ pub fn outstreamStart(self: *Outstream) !void {
     };
 }
 
-fn outstreamLoop(self: *Outstream) void {
+fn playerLoop(self: *Player) void {
     var bd = &self.backend_data.Alsa;
     var areas: [max_channels]ChannelArea = undefined;
     for (self.layout.channels.slice()) |_, i| {
@@ -356,65 +356,40 @@ fn outstreamLoop(self: *Outstream) void {
     }
 
     while (true) {
+        // while (bd.suspended.load(.Acquire) and !bd.aborted.load(.Acquire))
+        //     bd.alsa.cond.wait();
         if (bd.aborted.load(.Acquire)) return;
+
         var frames_left = bd.period_size;
         while (frames_left > 0) {
-            var t = std.time.Timer.start() catch unreachable;
             self.writeFn(self, areas[0..self.layout.channels.len], frames_left);
-            const written = c.snd_pcm_writei(bd.pcm, bd.sample_buffer.ptr, frames_left);
-            if (written < 0) {
-                switch (@intToEnum(linux.E, -written)) {
-                    .AGAIN => continue,
-                    .PIPE => {
-                        _ = c.snd_pcm_prepare(bd.pcm);
-                    },
-                    .STRPIPE => {
-                        while (true) {
-                            const res = c.snd_pcm_resume(bd.pcm);
-                            if (-res != @enumToInt(linux.E.AGAIN)) {
-                                if (res < 0)
-                                    _ = c.snd_pcm_prepare(bd.pcm);
-                                break;
-                            }
-                            _ = std.os.poll(&.{}, 1) catch {
-                                bd.alsa.shutdownFn(bd.alsa.userdata);
-                                return;
-                            };
-                        }
-                    },
-                    else => {
-                        bd.alsa.shutdownFn(bd.alsa.userdata);
-                        return;
-                    },
-                }
-                break;
+            const n = c.snd_pcm_writei(bd.pcm, bd.sample_buffer.ptr, frames_left);
+            if (n < 0) {
+                if (c.snd_pcm_recover(bd.pcm, @intCast(c_int, n), 1) < 0)
+                    bd.alsa.shutdownFn(bd.alsa.userdata);
+                return;
             }
-            frames_left -= @intCast(c_uint, written);
-            std.debug.print("{d}\n", .{t.read() / std.time.ns_per_ms});
+            frames_left -= @intCast(c_uint, n);
         }
     }
 }
 
-pub fn outstreamClearBuffer(self: *Outstream) void {
-    _ = self;
-}
-
-pub fn outstreamPausePlay(self: *Outstream, pause: bool) !void {
+pub fn playerPausePlay(self: *Player, pause: bool) !void {
     _ = self;
     _ = pause;
 }
 
-pub fn outstreamGetLatency(self: *Outstream) !f64 {
+pub fn playerGetLatency(self: *Player) !f64 {
     _ = self;
     return undefined;
 }
 
-pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
+pub fn playerSetVolume(self: *Player, volume: f64) !void {
     _ = self;
     _ = volume;
 }
 
-pub fn outstreamVolume(self: *Outstream) error{}!f64 {
+pub fn playerVolume(self: *Player) error{}!f64 {
     _ = self;
     return undefined;
 }

@@ -6,7 +6,7 @@ const Format = @import("main.zig").Format;
 const ChannelLayout = @import("main.zig").ChannelLayout;
 const ChannelId = @import("main.zig").ChannelId;
 const ChannelArea = @import("main.zig").ChannelArea;
-const Outstream = @import("main.zig").Outstream;
+const Player = @import("main.zig").Player;
 const max_channels = @import("main.zig").max_channels;
 const min_sample_rate = @import("main.zig").min_sample_rate;
 const max_sample_rate = @import("main.zig").max_sample_rate;
@@ -140,12 +140,11 @@ pub fn wakeUp(self: *PulseAudio) void {
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
-pub const OutstreamData = struct {
+pub const PlayerData = struct {
     pa: *const PulseAudio,
     stream: *c.pa_stream,
     buf_attr: c.pa_buffer_attr,
     stream_ready: std.atomic.Atomic(StreamStatus),
-    clear_buffer: std.atomic.Atomic(bool),
     write_byte_count: usize,
     write_ptr: ?[*]u8,
     volume: f64,
@@ -157,30 +156,29 @@ const StreamStatus = enum(u8) {
     failure,
 };
 
-pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) !void {
+pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
-    outstream.backend_data = .{
+    player.backend_data = .{
         .PulseAudio = .{
             .pa = self,
             .stream = undefined,
             .buf_attr = undefined,
             .stream_ready = std.atomic.Atomic(StreamStatus).init(.unknown),
-            .clear_buffer = std.atomic.Atomic(bool).init(false),
             .write_byte_count = undefined,
             .write_ptr = null,
             .volume = undefined,
         },
     };
-    var bd = &outstream.backend_data.PulseAudio;
+    var bd = &player.backend_data.PulseAudio;
 
     const sample_spec = c.pa_sample_spec{
-        .format = try toPAFormat(outstream.format),
-        .rate = outstream.sample_rate,
-        .channels = @intCast(u5, outstream.layout.channels.len),
+        .format = try toPAFormat(player.format),
+        .rate = player.sample_rate,
+        .channels = @intCast(u5, player.layout.channels.len),
     };
-    const channel_map = try toPAChannelMap(outstream.layout);
-    if (c.pa_stream_new(self.pulse_context, outstream.name.ptr, &sample_spec, &channel_map)) |s|
+    const channel_map = try toPAChannelMap(player.layout);
+    if (c.pa_stream_new(self.pulse_context, player.name.ptr, &sample_spec, &channel_map)) |s|
         bd.stream = s
     else
         return error.OutOfMemory;
@@ -192,12 +190,12 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) !
         .minreq = std.math.maxInt(u32),
         .fragsize = std.math.maxInt(u32),
     };
-    const bytes_per_second = outstream.bytes_per_frame * outstream.sample_rate;
-    if (outstream.latency > 0.0) {
-        const buf_len = outstream.bytes_per_frame *
+    const bytes_per_second = player.bytes_per_frame * player.sample_rate;
+    if (player.latency > 0.0) {
+        const buf_len = player.bytes_per_frame *
             @floatToInt(
             u32,
-            std.math.ceil(outstream.latency * @intToFloat(f64, bytes_per_second) / @intToFloat(f64, outstream.bytes_per_frame)),
+            std.math.ceil(player.latency * @intToFloat(f64, bytes_per_second) / @intToFloat(f64, player.bytes_per_frame)),
         );
         bd.buf_attr.maxlength = buf_len;
         bd.buf_attr.tlength = buf_len;
@@ -218,12 +216,12 @@ pub fn openOutstream(self: *PulseAudio, outstream: *Outstream, device: Device) !
     }
 
     const writable_size = c.pa_stream_writable_size(bd.stream);
-    outstream.latency = @intToFloat(f64, writable_size) / @intToFloat(f64, bytes_per_second);
+    player.latency = @intToFloat(f64, writable_size) / @intToFloat(f64, bytes_per_second);
 
     try performOperation(self.main_loop, c.pa_stream_update_timing_info(bd.stream, timingUpdateCallback, self));
 }
 
-pub fn outstreamDeinit(self: *Outstream) void {
+pub fn playerDeinit(self: *Player) void {
     var bd = &self.backend_data.PulseAudio;
     c.pa_threaded_mainloop_lock(bd.pa.main_loop);
     defer c.pa_threaded_mainloop_unlock(bd.pa.main_loop);
@@ -235,7 +233,7 @@ pub fn outstreamDeinit(self: *Outstream) void {
     c.pa_stream_unref(bd.stream);
 }
 
-pub fn outstreamStart(self: *Outstream) !void {
+pub fn playerStart(self: *Player) !void {
     var bd = &self.backend_data.PulseAudio;
     c.pa_threaded_mainloop_lock(bd.pa.main_loop);
     defer c.pa_threaded_mainloop_unlock(bd.pa.main_loop);
@@ -245,11 +243,7 @@ pub fn outstreamStart(self: *Outstream) !void {
     c.pa_stream_set_write_callback(bd.stream, playbackStreamWriteCallback, self);
 }
 
-pub fn outstreamClearBuffer(self: *Outstream) void {
-    self.backend_data.PulseAudio.clear_buffer.store(true, .Monotonic);
-}
-
-pub fn outstreamPausePlay(self: *Outstream, pause: bool) !void {
+pub fn playerPausePlay(self: *Player, pause: bool) !void {
     var bd = &self.backend_data.PulseAudio;
 
     if (c.pa_threaded_mainloop_in_thread(bd.pa.main_loop) == 0)
@@ -264,7 +258,7 @@ pub fn outstreamPausePlay(self: *Outstream, pause: bool) !void {
     }
 }
 
-pub fn outstreamGetLatency(self: *Outstream) !f64 {
+pub fn playerGetLatency(self: *Player) !f64 {
     var bd = &self.backend_data.PulseAudio;
     var r_usec: c.pa_usec_t = 0;
     var negative: c_int = 0;
@@ -277,7 +271,7 @@ pub fn outstreamGetLatency(self: *Outstream) !f64 {
     return @intToFloat(f64, r_usec) / std.time.us_per_s;
 }
 
-pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
+pub fn playerSetVolume(self: *Player, volume: f64) !void {
     var bd = &self.backend_data.PulseAudio;
     var v: c.pa_cvolume = undefined;
     _ = c.pa_cvolume_init(&v);
@@ -296,7 +290,7 @@ pub fn outstreamSetVolume(self: *Outstream, volume: f64) !void {
     c.pa_operation_unref(op);
 }
 
-pub fn outstreamVolume(self: *Outstream) !f64 {
+pub fn playerVolume(self: *Player) !f64 {
     var bd = &self.backend_data.PulseAudio;
     try performOperation(
         bd.pa.main_loop,
@@ -316,7 +310,7 @@ pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
 }
 
 fn sinkInputInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
-    var bd = @ptrCast(*OutstreamData, @alignCast(@alignOf(*OutstreamData), userdata.?));
+    var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
     if (eol != 0) {
         c.pa_threaded_mainloop_signal(bd.pa.main_loop, 0);
         return;
@@ -325,7 +319,7 @@ fn sinkInputInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info
 }
 
 fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
-    var self = @ptrCast(*Outstream, @alignCast(@alignOf(*Outstream), userdata.?));
+    var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
     var bd = &self.backend_data.PulseAudio;
     var areas: [max_channels]ChannelArea = undefined;
     var frames_left = nbytes;
@@ -351,15 +345,14 @@ fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyo
         const frames = chunk_size / self.bytes_per_frame;
         self.writeFn(self, areas[0..self.layout.channels.len], frames);
 
-        const seek_mode: c_uint = if (bd.clear_buffer.load(.Acquire)) c.PA_SEEK_RELATIVE_ON_READ else c.PA_SEEK_RELATIVE;
-        if (c.pa_stream_write(bd.stream, &bd.write_ptr.?[0], chunk_size, null, 0, seek_mode) != 0)
+        if (c.pa_stream_write(bd.stream, &bd.write_ptr.?[0], chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0)
             unreachable;
         frames_left -= chunk_size;
     }
 }
 
 fn playbackStreamStateCallback(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
-    var bd = @ptrCast(*OutstreamData, @alignCast(@alignOf(*OutstreamData), userdata.?));
+    var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
     switch (c.pa_stream_get_state(stream)) {
         c.PA_STREAM_UNCONNECTED, c.PA_STREAM_CREATING, c.PA_STREAM_TERMINATED => {},
         c.PA_STREAM_READY => {
@@ -397,8 +390,8 @@ fn refreshDevices(self: *PulseAudio) !void {
     }
 
     for (self.devices_info.list.items) |device, i| {
-        if ((device.aim == .output and std.mem.eql(u8, device.id, self.default_sink_id.?)) or
-            (device.aim == .input and std.mem.eql(u8, device.id, self.default_source_id.?)))
+        if ((device.aim == .playback and std.mem.eql(u8, device.id, self.default_sink_id.?)) or
+            (device.aim == .capture and std.mem.eql(u8, device.id, self.default_source_id.?)))
         {
             self.devices_info.setDefault(device.aim, i);
             break;
@@ -455,7 +448,7 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
     var device = Device{
         .id = id,
         .name = name,
-        .aim = .output,
+        .aim = .playback,
         .is_raw = false,
         .layout = fromPAChannelMap(info.*.channel_map) orelse {
             self.allocator.free(id);
@@ -463,11 +456,11 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
             return;
         }, // Incompatible device. skip it
         .formats = allDeviceFormats(),
-        .sample_rate = .{
+        .rate_range = .{
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
             .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
         },
-        .latency = .{ .min = c.PA_SINK_LATENCY, .max = c.PA_SINK_LATENCY },
+        .latency_range = .{ .min = c.PA_SINK_LATENCY, .max = c.PA_SINK_LATENCY },
     };
 
     self.devices_info.list.append(self.allocator, device) catch |err| {
@@ -500,7 +493,7 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
     var device = Device{
         .id = id,
         .name = name,
-        .aim = .input,
+        .aim = .capture,
         .is_raw = false,
         .layout = fromPAChannelMap(info.*.channel_map) orelse {
             self.allocator.free(id);
@@ -508,11 +501,11 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
             return;
         }, // Incompatible device. skip it
         .formats = allDeviceFormats(),
-        .sample_rate = .{
+        .rate_range = .{
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
             .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
         },
-        .latency = .{ .min = c.PA_SOURCE_LATENCY, .max = c.PA_SOURCE_LATENCY },
+        .latency_range = .{ .min = c.PA_SOURCE_LATENCY, .max = c.PA_SOURCE_LATENCY },
     };
 
     self.devices_info.list.append(self.allocator, device) catch |err| {
