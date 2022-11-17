@@ -145,8 +145,7 @@ pub const PlayerData = struct {
     stream: *c.pa_stream,
     buf_attr: c.pa_buffer_attr,
     stream_ready: std.atomic.Atomic(StreamStatus),
-    write_byte_count: usize,
-    write_ptr: ?[*]u8,
+    write_ptr: [*]u8,
     volume: f64,
 };
 
@@ -165,8 +164,7 @@ pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
             .stream = undefined,
             .buf_attr = undefined,
             .stream_ready = std.atomic.Atomic(StreamStatus).init(.unknown),
-            .write_byte_count = undefined,
-            .write_ptr = null,
+            .write_ptr = undefined,
             .volume = undefined,
         },
     };
@@ -344,14 +342,14 @@ fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyo
             };
 
         for (self.layout.channels.slice()) |_, i| {
-            areas[i].ptr = bd.write_ptr.? + self.bytes_per_sample * i;
+            areas[i].ptr = bd.write_ptr + self.bytes_per_sample * i;
             areas[i].step = self.bytes_per_frame;
         }
 
         const frames = chunk_size / self.bytes_per_frame;
         self.writeFn(self, err, areas[0..self.layout.channels.len], frames);
 
-        if (c.pa_stream_write(bd.stream, &bd.write_ptr.?[0], chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0)
+        if (c.pa_stream_write(bd.stream, bd.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0)
             err = error.WriteFailed;
         frames_left -= chunk_size;
     }

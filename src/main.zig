@@ -10,6 +10,10 @@ const This = @This();
 pub usingnamespace SoundIO;
 
 comptime {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(SoundIO);
+    std.testing.refAllDecls(Player);
+    std.testing.refAllDecls(Device);
     std.testing.refAllDeclsRecursive(channel_layout);
     std.testing.refAllDeclsRecursive(PulseAudio);
     std.testing.refAllDeclsRecursive(Alsa);
@@ -57,7 +61,7 @@ const SoundIO = union(Backend) {
     };
 
     /// must be called in the main thread
-    pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SoundIO {
+    pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator) ConnectError!SoundIO {
         std.debug.assert(current_backend == null);
         var data: SoundIO = undefined;
         if (backend) |b| {
@@ -66,7 +70,7 @@ const SoundIO = union(Backend) {
                 @tagName(b),
                 switch (b) {
                     .Alsa => try Alsa.connect(allocator),
-                    .Jack => try Jack.connect(allocator, options),
+                    .Jack => try Jack.connect(allocator, .{}),
                     .PulseAudio => try PulseAudio.connect(allocator),
                 },
             );
@@ -76,7 +80,7 @@ const SoundIO = union(Backend) {
                     if (PulseAudio.connect(allocator)) |res| {
                         data = .{ .pulseaudio = res };
                     } else |err| {
-                        data = .{ .alsa = Alsa.connect(allocator, options) catch return err };
+                        data = .{ .alsa = Alsa.connect(allocator) catch return err };
                     }
                 },
                 .macos, .ios, .watchos, .tvos => @panic("TODO: CoreAudio"),

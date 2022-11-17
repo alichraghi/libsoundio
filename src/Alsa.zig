@@ -22,13 +22,12 @@ mutex: std.Thread.Mutex,
 cond: std.Thread.Condition,
 thread: std.Thread,
 devices_info: DevicesInfo,
-pending_files: std.ArrayListUnmanaged([]const u8),
 notify_fd: linux.fd_t,
 notify_wd: linux.fd_t,
 notify_pipe_fd: [2]linux.fd_t,
 aborted: std.atomic.Atomic(bool),
-err: error{ SystemResources, OutOfMemory }!void,
 device_scan_queued: std.atomic.Atomic(bool),
+err: error{ SystemResources, OutOfMemory }!void,
 
 pub fn connect(allocator: std.mem.Allocator) !*Alsa {
     var self = try allocator.create(Alsa);
@@ -39,7 +38,6 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
         .cond = std.Thread.Condition{},
         .thread = undefined,
         .devices_info = DevicesInfo.init(),
-        .pending_files = .{},
         .notify_fd = undefined,
         .notify_wd = undefined,
         .notify_pipe_fd = undefined,
@@ -80,7 +78,12 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
         error.Unexpected => unreachable,
     };
 
-    _ = c.snd_lib_error_set_handler(@ptrCast(c.snd_lib_error_handler_t, &alsaErrorHandler));
+    _ = c.snd_lib_error_set_handler(@ptrCast(
+        c.snd_lib_error_handler_t,
+        &struct {
+            fn e() callconv(.C) void {}
+        }.e,
+    ));
 
     self.wakeUpDevicePoll() catch return error.SystemResources;
     self.thread = std.Thread.spawn(.{}, deviceEventLoop, .{self}) catch |err| switch (err) {
@@ -105,24 +108,15 @@ pub fn deinit(self: *Alsa) void {
     std.os.close(self.notify_fd);
 
     self.devices_info.deinit(self.allocator);
-    for (self.pending_files.items) |file|
-        self.allocator.free(file);
-    self.pending_files.deinit(self.allocator);
     self.allocator.destroy(self);
-}
-
-fn defaultShutdownFn(_: ?*anyopaque) void {
-    @panic("Unhandled Error");
 }
 
 fn wakeUpDevicePoll(self: *Alsa) !void {
     _ = try std.os.write(self.notify_pipe_fd[1], "a");
 }
 
-fn alsaErrorHandler() callconv(.C) void {}
-
 fn deviceEventLoop(self: *Alsa) !void {
-    var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
+    var buf: [4096]u8 = undefined;
     var fds = [2]std.os.pollfd{
         .{
             .fd = self.notify_fd,
@@ -135,6 +129,12 @@ fn deviceEventLoop(self: *Alsa) !void {
             .revents = 0,
         },
     };
+    var pending_files = std.ArrayList([]const u8).init(self.allocator);
+    defer {
+        for (pending_files.items) |file|
+            self.allocator.free(file);
+        pending_files.deinit();
+    }
 
     while (true) {
         if (self.aborted.load(.Monotonic)) break;
@@ -162,7 +162,7 @@ fn deviceEventLoop(self: *Alsa) !void {
                 var event: *linux.inotify_event = undefined;
                 var i: usize = 0;
                 while (i < buf.len) : (i += @sizeOf(linux.inotify_event) + event.len) {
-                    event = @ptrCast(*linux.inotify_event, @alignCast(@alignOf(linux.inotify_event), buf[i..]));
+                    event = @ptrCast(*linux.inotify_event, @alignCast(4, buf[i..]));
 
                     if (!(util.hasFlag(event.mask, linux.IN.CLOSE_WRITE) or
                         util.hasFlag(event.mask, linux.IN.DELETE) or
@@ -179,7 +179,7 @@ fn deviceEventLoop(self: *Alsa) !void {
                             self.err = error.OutOfMemory;
                             return;
                         };
-                        self.pending_files.append(self.allocator, event_name) catch {
+                        pending_files.append(event_name) catch {
                             self.wakeUp();
                             self.err = error.OutOfMemory;
                             return;
@@ -187,14 +187,14 @@ fn deviceEventLoop(self: *Alsa) !void {
                         continue;
                     }
 
-                    if (self.pending_files.items.len > 0) {
+                    if (pending_files.items.len > 0) {
                         if (!util.hasFlag(event.mask, linux.IN.CLOSE_WRITE))
                             continue;
 
-                        for (self.pending_files.items) |file, j| {
+                        for (pending_files.items) |file, j| {
                             if (std.mem.eql(u8, file, eventName(buf[i..], event.len))) {
-                                self.allocator.free(self.pending_files.swapRemove(j));
-                                if (self.pending_files.items.len == 0)
+                                self.allocator.free(pending_files.swapRemove(j));
+                                if (pending_files.items.len == 0)
                                     got_rescan_event = true;
                                 break;
                             }
@@ -218,10 +218,12 @@ fn deviceEventLoop(self: *Alsa) !void {
             }
         }
         if (got_rescan_event) {
-            while (!self.mutex.tryLock()) {
+            while (true) {
+                if (!self.mutex.tryLock()) continue;
                 defer self.mutex.unlock();
                 self.device_scan_queued.store(true, .Monotonic);
                 self.cond.signal();
+                break;
             }
         }
     }
@@ -279,7 +281,6 @@ pub const PlayerData = struct {
     thread: std.Thread,
     pcm: ?*c.snd_pcm_t,
     aborted: std.atomic.Atomic(bool),
-    clear_buffer: std.atomic.Atomic(bool),
 };
 
 pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
@@ -291,7 +292,6 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
             .pcm = null,
             .thread = undefined,
             .aborted = std.atomic.Atomic(bool).init(false),
-            .clear_buffer = std.atomic.Atomic(bool).init(false),
         },
     };
     var bd = &player.backend_data.Alsa;
@@ -325,7 +325,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     if (c.snd_pcm_hw_params_get_buffer_size(hw_params, &buf_size) < 0)
         return error.OpeningDevice;
 
-    var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(c_uint, player.layout.channels.len) };
+    var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(u6, player.layout.channels.len) };
     for (player.layout.channels.slice()) |ch, i| {
         chmap.pos()[i] = alsa_util.toAlsaChmapPos(ch);
     }
