@@ -198,18 +198,18 @@ const SoundIO = union(Backend) {
 pub const StreamError = error{StreamDisconnected};
 pub const StartStreamError = error{ StreamDisconnected, OutOfMemory, SystemResources };
 
+pub const ChannelsArray = std.BoundedArray(Channel, max_channels);
+
 pub const Player = struct {
     // TODO: `*Player` instead `*anyopaque`
     // https://github.com/ziglang/zig/issues/12325
     pub const WriteError = error{WriteFailed};
     pub const WriteFn = *const fn (self: *anyopaque, err: WriteError!void, frame_count_max: usize) void;
 
-    pub const ChannelArray = std.BoundedArray(Channel, max_channels);
-
     writeFn: WriteFn,
     userdata: ?*anyopaque,
     name: [:0]const u8,
-    channels: ChannelArray,
+    channels: ChannelsArray,
     latency: f64,
     sample_rate: u32,
     format: Format,
@@ -319,13 +319,11 @@ pub const Device = struct {
         capture,
     };
 
-    pub const ChannelArray = std.BoundedArray(Channel, max_channels);
-
     id: [:0]const u8,
     name: [:0]const u8,
     aim: Aim,
     is_raw: bool,
-    channels: ChannelArray,
+    channels: ChannelsArray,
     formats: []const Format,
     rate_range: Range(u32),
     latency_range: Range(f64),

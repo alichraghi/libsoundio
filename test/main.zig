@@ -37,10 +37,6 @@ test "Sine Wave (pause, play)" {
             std.debug.print(": No default device found (SKIPPING)\n", .{});
             break;
         };
-        for (a.devicesList()) |d|
-            std.debug.print("- {s}\n", .{d.id});
-        for (device.formats) |d|
-            std.debug.print("- {s}\n", .{@tagName(d)});
         var p = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .float32le });
         defer p.deinit();
         try p.start();

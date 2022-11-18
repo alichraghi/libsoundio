@@ -4,6 +4,7 @@ const DevicesInfo = @import("main.zig").DevicesInfo;
 const Device = @import("main.zig").Device;
 const Format = @import("main.zig").Format;
 const ChannelId = @import("main.zig").ChannelId;
+const ChannelsArray = @import("main.zig").ChannelsArray;
 const Player = @import("main.zig").Player;
 const max_channels = @import("main.zig").max_channels;
 const min_sample_rate = @import("main.zig").min_sample_rate;
@@ -529,8 +530,8 @@ fn serverInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_server_info, userd
     };
 }
 
-fn fromPAChannelMap(map: c.pa_channel_map) ?Device.ChannelArray {
-    var channels = Device.ChannelArray.init(map.channels) catch return null;
+fn fromPAChannelMap(map: c.pa_channel_map) ?ChannelsArray {
+    var channels = ChannelsArray.init(map.channels) catch return null;
     for (channels.slice()) |*ch, i|
         ch.*.id = fromPAChannelPos(map.map[i]);
     return channels;
@@ -689,7 +690,7 @@ fn toPAChannelPos(channel_id: ChannelId) !c.pa_channel_position_t {
     };
 }
 
-fn toPAChannelMap(channels: Device.ChannelArray) !c.pa_channel_map {
+fn toPAChannelMap(channels: ChannelsArray) !c.pa_channel_map {
     var channel_map: c.pa_channel_map = undefined;
     channel_map.channels = @intCast(u5, channels.len);
     for (channels.slice()) |ch, i|

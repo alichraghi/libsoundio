@@ -4,6 +4,7 @@ const util = @import("util.zig");
 const Device = @import("../main.zig").Device;
 const DevicesInfo = @import("../main.zig").DevicesInfo;
 const Format = @import("../main.zig").Format;
+const ChannelsArray = @import("../main.zig").ChannelsArray;
 const max_channels = @import("../main.zig").max_channels;
 
 pub fn queryCookedDevices(devices_info: *DevicesInfo, alloctaor: std.mem.Allocator) !void {
@@ -166,7 +167,7 @@ fn probeDevice(devices_info: *DevicesInfo, allocator: std.mem.Allocator, id: [:0
             if (chmap) |_| {
                 defer c.snd_pcm_free_chmaps(chmap);
                 if (chmap[0] == null or chmap[0][0].map.channels <= 0) return error.OpeningDevice;
-                var channels = Device.ChannelArray.init(std.math.min(max_channels, chmap[0][0].map.channels)) catch unreachable;
+                var channels = ChannelsArray.init(std.math.min(max_channels, chmap[0][0].map.channels)) catch unreachable;
                 for (channels.slice()) |*pos, i|
                     pos.*.id = util.fromAlsaChmapPos(chmap[0][0].map.pos()[i]);
                 break :blk channels;
