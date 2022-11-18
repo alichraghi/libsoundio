@@ -275,41 +275,61 @@ pub const Player = struct {
         };
     }
 
-    pub fn write(self: *Player, channel: usize, frame: usize, value: anytype) void {
-        // const bytes = std.mem.asBytes(&value);
-        switch (@TypeOf(value)) {
-            u8 => {
-                @compileError("TODO");
-            },
-            u16 => {
-                @compileError("TODO");
-            },
-            i32 => {
-                // int32_t *buf = (int32_t *)ptr;
-                // double range = (double)INT32_MAX - (double)INT32_MIN;
-                // double val = sample * range / 2.0;
-                // *buf = val;
-                // const range = @intToFloat(f32, std.math.maxInt(i32) + std.math.minInt(i32));
-                const sample = @intToFloat(f32, value) * 1.0 / 2.0;
-                @ptrCast(*i32, @alignCast(
-                    @alignOf(i32),
-                    &self.layout.channels.get(channel).ptr[self.bytes_per_frame * frame],
-                )).* = @floatToInt(i32, sample);
-            },
-            f32 => {
-                @ptrCast(
-                    *@TypeOf(value),
-                    @alignCast(@alignOf(@TypeOf(value)), &self.channels.get(channel).ptr[self.bytes_per_frame * frame]),
-                ).* = value;
-            },
-            f64 => {
-                @compileError("TODO");
-            },
-            else => {
-                @compileError("unsupported format");
-            },
+    pub fn writeAll(self: *Player, frame: usize, value: anytype) void {
+        for (self.channels.slice()) |_, i|
+            self.write(i, frame, value);
+    }
+
+    pub fn write(self: *Player, channel: usize, frame: usize, sample: anytype) void {
+        // var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        // const T = @TypeOf(sample);
+        // if (self.format.eqlType(T)) {
+        //     std.mem.bytesAsValue(T, ptr[0..@sizeOf(T)]).* = sample;
+        //     return;
+        // }
+        // if (T != f32)
+        //     @compileError("cannot convert " ++ @typeName(T) ++ " to specified format");
+        switch (@TypeOf(sample)) {
+            f32 => self.writeF32(channel, frame, sample),
+            else => @compileError("TODO"),
         }
-        // std.mem.copy(u8, self.ptr[self.step * frame_index .. self.step * frame_index + bytes.len], bytes);
+    }
+
+    pub fn writeF32(self: *Player, channel: usize, frame: usize, sample: f32) void {
+        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        switch (self.format) {
+            .s8 => @panic("TODO"),
+            .u8 => @panic("TODO"),
+            .s16le => @panic("TODO"),
+            .s16be => @panic("TODO"),
+            .u16le => @panic("TODO"),
+            .u16be => @panic("TODO"),
+            .s24le => @panic("TODO"),
+            .s24be => @panic("TODO"),
+            .u24le => @panic("TODO"),
+            .u24be => @panic("TODO"),
+            .u24_32le => @panic("TODO"),
+            .u24_32be => @panic("TODO"),
+            .s24_32le,
+            .s24_32be,
+            => {
+                const range = @intToFloat(f64, std.math.maxInt(i24) - std.math.minInt(i24));
+                const val = @floatToInt(i24, sample * range / 2.0);
+                std.mem.bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = val;
+            },
+            .s32le => {
+                const range = @intToFloat(f64, std.math.maxInt(i32) - std.math.minInt(i32));
+                const val = @floatToInt(i32, sample * range / 2.0);
+                std.mem.bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = val;
+            },
+            .s32be => @panic("TODO"),
+            .u32le => @panic("TODO"),
+            .u32be => @panic("TODO"),
+            .f32le => std.mem.bytesAsValue(f32, ptr[0..@sizeOf(f32)]).* = sample,
+            .f32be => @panic("TODO"),
+            .f64le => std.mem.bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = sample,
+            .f64be => @panic("TODO"),
+        }
     }
 };
 
@@ -489,11 +509,34 @@ pub const Format = enum {
     s32be,
     u32le,
     u32be,
-    /// -1.0<->1.0
-    float32le,
-    float32be,
-    float64le,
-    float64be,
+    f32le,
+    f32be,
+    f64le,
+    f64be,
+
+    // TODO: remove endian types
+    pub fn eqlType(format: Format, comptime T: type) bool {
+        for (typeFormats(T)) |fmt|
+            if (fmt == format) return true;
+        return false;
+    }
+
+    // TODO: remove endian types
+    pub fn typeFormats(comptime T: type) []const Format {
+        return switch (T) {
+            i8 => .s8,
+            u8 => .u8,
+            i16 => &.{ .s16le, .s16be },
+            u16 => &.{ .u16le, .u16be },
+            i24 => &.{ .s24le, .s24be },
+            u24 => &.{ .u24le, .u24be },
+            i32 => &.{ .s32le, .s32be, .s24_32le, .s24_32be },
+            u32 => &.{ .u32le, .u32be, .u24_32le, .u24_32be },
+            f32 => &.{ .f32le, .f32be },
+            f64 => &.{ .f64le, .f64be },
+            else => @compileError("invalid type given for sample format"),
+        };
+    }
 
     pub fn toNativeEndian(self: Format) Format {
         if (builtin.cpu.arch.endian() == .Little) {
@@ -506,8 +549,8 @@ pub const Format = enum {
                 .u24_32be => .u24_32le,
                 .s32be => .s32le,
                 .u32be => .u32le,
-                .float32be => .float32le,
-                .float64be => .float64le,
+                .f32be => .f32le,
+                .f64be => .f64le,
                 else => self,
             };
         } else {
@@ -520,8 +563,8 @@ pub const Format = enum {
                 .u24_32le => .u24_32be,
                 .s32le => .s32be,
                 .u32le => .u32be,
-                .float32le => .float32be,
-                .float64le => .float64be,
+                .f32le => .f32be,
+                .f64le => .f64be,
                 else => self,
             };
         }
@@ -540,10 +583,10 @@ pub const Format = enum {
             .s32be,
             .u32le,
             .u32be,
-            .float32le,
-            .float32be,
+            .f32le,
+            .f32be,
             => 4,
-            .float64le, .float64be => 8,
+            .f64le, .f64be => 8,
         };
     }
 

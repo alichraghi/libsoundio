@@ -18,10 +18,10 @@ pub const supported_formats = &[_]Format{
     .s32be,
     .u32le,
     .u32be,
-    .float32le,
-    .float32be,
-    .float64le,
-    .float64be,
+    .f32le,
+    .f32be,
+    .f64le,
+    .f64be,
 };
 
 pub fn aimToStream(aim: Device.Aim) c_uint {
@@ -48,10 +48,10 @@ pub fn toAlsaFormat(format: Format) !c.snd_pcm_format_t {
         .s32be => c.SND_PCM_FORMAT_S32_BE,
         .u32le => c.SND_PCM_FORMAT_U32_LE,
         .u32be => c.SND_PCM_FORMAT_U32_BE,
-        .float32le => c.SND_PCM_FORMAT_FLOAT_LE,
-        .float32be => c.SND_PCM_FORMAT_FLOAT_BE,
-        .float64le => c.SND_PCM_FORMAT_FLOAT64_LE,
-        .float64be => c.SND_PCM_FORMAT_FLOAT64_BE,
+        .f32le => c.SND_PCM_FORMAT_FLOAT_LE,
+        .f32be => c.SND_PCM_FORMAT_FLOAT_BE,
+        .f64le => c.SND_PCM_FORMAT_FLOAT64_LE,
+        .f64be => c.SND_PCM_FORMAT_FLOAT64_BE,
         else => error.UnsupportedFormat,
     };
 }

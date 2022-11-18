@@ -606,8 +606,8 @@ fn fromPAFormat(format: c.pa_sample_format_t) !Format {
         c.PA_SAMPLE_ALAW, c.PA_SAMPLE_ULAW => error.InvalidFormat,
         c.PA_SAMPLE_S16LE => .s16le,
         c.PA_SAMPLE_S16BE => .s16be,
-        c.PA_SAMPLE_FLOAT32LE => .float32le,
-        c.PA_SAMPLE_FLOAT32BE => .float32be,
+        c.PA_SAMPLE_FLOAT32LE => .f32le,
+        c.PA_SAMPLE_FLOAT32BE => .f32be,
         c.PA_SAMPLE_S32LE => .s32le,
         c.PA_SAMPLE_S32BE => .s32be,
         c.PA_SAMPLE_S24LE => .s32le,
@@ -630,8 +630,8 @@ pub fn toPAFormat(format: Format) !c.pa_sample_format_t {
         .s24_32be => c.PA_SAMPLE_S24_32BE,
         .s32le => c.PA_SAMPLE_S32LE,
         .s32be => c.PA_SAMPLE_S32BE,
-        .float32le => c.PA_SAMPLE_FLOAT32LE,
-        .float32be => c.PA_SAMPLE_FLOAT32BE,
+        .f32le => c.PA_SAMPLE_FLOAT32LE,
+        .f32be => c.PA_SAMPLE_FLOAT32BE,
 
         .s8,
         .u16le,
@@ -642,8 +642,8 @@ pub fn toPAFormat(format: Format) !c.pa_sample_format_t {
         .u24_32be,
         .u32le,
         .u32be,
-        .float64le,
-        .float64be,
+        .f64le,
+        .f64be,
         => error.IncompatibleBackend,
     };
 }
@@ -700,9 +700,9 @@ fn toPAChannelMap(channels: ChannelsArray) !c.pa_channel_map {
 
 fn allDeviceFormats() []const Format {
     return &[_]Format{
-        .u8,    .s16le,     .s16be,
-        .s24le, .s24be,     .s32le,
-        .s32be, .float32le, .float32be,
+        .u8,    .s16le, .s16be,
+        .s24le, .s24be, .s32le,
+        .s32be, .f32le, .f32be,
     };
 }
 

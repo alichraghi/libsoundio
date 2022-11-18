@@ -37,20 +37,27 @@ test "Sine Wave (pause, play)" {
             std.debug.print(": No default device found (SKIPPING)\n", .{});
             break;
         };
-        var p = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .float32le });
-        defer p.deinit();
+        var p = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s24_32le });
         try p.start();
+        std.time.sleep(std.time.ns_per_ms * 1000);
+        p.deinit();
 
-        try p.setVolume(1.0);
-        std.time.sleep(std.time.ns_per_ms * 500);
-        try p.pause();
-        std.time.sleep(std.time.ns_per_ms * 500);
-        try p.play();
-        std.time.sleep(std.time.ns_per_ms * 500);
-        try p.pause();
-        std.time.sleep(std.time.ns_per_ms * 500);
-        try p.play();
-        std.time.sleep(std.time.ns_per_ms * 500);
+        std.time.sleep(std.time.ns_per_ms * 200);
+
+        var p2 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .f32le });
+        try p2.start();
+        std.time.sleep(std.time.ns_per_ms * 1000);
+        p2.deinit();
+
+        // std.time.sleep(std.time.ns_per_ms * 500);
+        // try p.pause();
+        // std.time.sleep(std.time.ns_per_ms * 500);
+        // try p.play();
+        // std.time.sleep(std.time.ns_per_ms * 500);
+        // try p.pause();
+        // std.time.sleep(std.time.ns_per_ms * 500);
+        // try p.play();
+        // std.time.sleep(std.time.ns_per_ms * 500);
         // var v: f64 = 0.7;
         // while (v > 0.15) : (v -= 0.0005) {
         //     try o.setVolume(v);
@@ -83,9 +90,7 @@ fn writeCallback(self_opaque: *anyopaque, err: soundio.Player.WriteError!void, n
     var frame: usize = 0;
     while (frame < n_frame) : (frame += 1) {
         const sample = std.math.sin((seconds_offset + @intToFloat(f32, frame) * seconds_per_frame) * radians_per_second);
-        for (self.channels.slice()) |_, i| {
-            self.write(i, frame, sample);
-        }
+        self.writeAll(frame, sample);
     }
     seconds_offset = @mod(seconds_offset + seconds_per_frame * @intToFloat(f32, n_frame), 1.0);
 }
