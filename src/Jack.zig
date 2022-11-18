@@ -116,7 +116,7 @@ pub fn refreshDevices(self: *Jack) !void {
                 if (std.mem.eql(u8, d.id, client_name) and d.aim == aim) {
                     found = true;
                     // we hit the channel limit, skip the leftovers
-                    d.layout.channels.append(.{
+                    d.channels.append(.{
                         .ptr = undefined,
                         .id = parseChannelId(channel_name) orelse break,
                     }) catch break;
@@ -132,7 +132,7 @@ pub fn refreshDevices(self: *Jack) !void {
 
                 device.aim = aim;
                 device.is_raw = flags & c.JackPortIsPhysical != 0;
-                device.layout.channels.append(.{
+                device.channels.append(.{
                     .ptr = undefined,
                     .id = parseChannelId(channel_name) orelse continue,
                 }) catch continue;
@@ -157,7 +157,7 @@ pub fn refreshDevices(self: *Jack) !void {
         std.debug.assert(i > 0);
 
         for (self.devices_info.list.items) |*device| {
-            device.layout = .{ .channels = device.layout.channels, .step = undefined };
+            device.channels = device.channels;
         }
 
         return;

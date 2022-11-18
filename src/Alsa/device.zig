@@ -3,7 +3,6 @@ const c = @import("c.zig");
 const util = @import("util.zig");
 const Device = @import("../main.zig").Device;
 const DevicesInfo = @import("../main.zig").DevicesInfo;
-const ChannelLayout = @import("../main.zig").ChannelLayout;
 const Format = @import("../main.zig").Format;
 const max_channels = @import("../main.zig").max_channels;
 
@@ -162,18 +161,15 @@ fn probeDevice(devices_info: *DevicesInfo, allocator: std.mem.Allocator, id: [:0
         .name = name,
         .aim = aim,
         .is_raw = is_raw,
-        .layout = blk: {
+        .channels = blk: {
             const chmap = c.snd_pcm_query_chmaps(pcm);
             if (chmap) |_| {
                 defer c.snd_pcm_free_chmaps(chmap);
                 if (chmap[0] == null or chmap[0][0].map.channels <= 0) return error.OpeningDevice;
-                var channels = ChannelLayout.Array.init(std.math.min(max_channels, chmap[0][0].map.channels)) catch unreachable;
+                var channels = Device.ChannelArray.init(std.math.min(max_channels, chmap[0][0].map.channels)) catch unreachable;
                 for (channels.slice()) |*pos, i|
                     pos.*.id = util.fromAlsaChmapPos(chmap[0][0].map.pos()[i]);
-                break :blk .{
-                    .channels = channels,
-                    .step = 0,
-                };
+                break :blk channels;
             } else {
                 return error.OpeningDevice;
             }

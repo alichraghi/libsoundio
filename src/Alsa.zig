@@ -307,7 +307,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
         bd.pcm,
         format,
         c.SND_PCM_ACCESS_RW_INTERLEAVED,
-        @intCast(u6, player.layout.channels.len),
+        @intCast(u6, player.channels.len),
         player.sample_rate,
         @bitCast(u1, !device.is_raw),
         @floatToInt(c_uint, player.latency * std.time.us_per_s),
@@ -329,8 +329,8 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     if (c.snd_pcm_hw_params_get_buffer_size(hw_params, &buf_size) < 0)
         return error.OpeningDevice;
 
-    var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(u6, player.layout.channels.len) };
-    for (player.layout.channels.slice()) |ch, i| {
+    var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(u6, player.channels.len) };
+    for (player.channels.slice()) |ch, i| {
         chmap.pos()[i] = alsa_util.toAlsaChmapPos(ch.id);
     }
     if (c.snd_pcm_set_chmap(bd.pcm, &chmap) < 0)
@@ -362,8 +362,7 @@ pub fn playerStart(self: *Player) !void {
 
 fn playerLoop(self: *Player) void {
     var bd = &self.backend_data.Alsa;
-    self.layout.step = self.bytes_per_frame;
-    for (self.layout.channels.slice()) |*ch, i| {
+    for (self.channels.slice()) |*ch, i| {
         ch.*.ptr = bd.sample_buffer.ptr + i * self.bytes_per_sample;
     }
 

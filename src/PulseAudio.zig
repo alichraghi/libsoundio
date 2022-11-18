@@ -3,7 +3,6 @@ const c = @cImport(@cInclude("pulse/pulseaudio.h"));
 const DevicesInfo = @import("main.zig").DevicesInfo;
 const Device = @import("main.zig").Device;
 const Format = @import("main.zig").Format;
-const ChannelLayout = @import("main.zig").ChannelLayout;
 const ChannelId = @import("main.zig").ChannelId;
 const Player = @import("main.zig").Player;
 const max_channels = @import("main.zig").max_channels;
@@ -172,9 +171,9 @@ pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
     const sample_spec = c.pa_sample_spec{
         .format = try toPAFormat(player.format),
         .rate = player.sample_rate,
-        .channels = @intCast(u5, player.layout.channels.len),
+        .channels = @intCast(u5, player.channels.len),
     };
-    const channel_map = try toPAChannelMap(player.layout);
+    const channel_map = try toPAChannelMap(player.channels);
     if (c.pa_stream_new(self.pulse_context, player.name.ptr, &sample_spec, &channel_map)) |s|
         bd.stream = s
     else
@@ -272,9 +271,9 @@ pub fn playerSetVolume(self: *Player, volume: f64) !void {
     var bd = &self.backend_data.PulseAudio;
     var v: c.pa_cvolume = undefined;
     _ = c.pa_cvolume_init(&v);
-    v.channels = @intCast(u5, self.layout.channels.len);
+    v.channels = @intCast(u5, self.channels.len);
     const vol = @floatToInt(u32, @intToFloat(f64, c.PA_VOLUME_NORM) * volume);
-    for (self.layout.channels.slice()) |_, i|
+    for (self.channels.slice()) |_, i|
         v.values[i] = vol;
     const op = c.pa_context_set_sink_input_volume(
         bd.pa.pulse_context,
@@ -323,7 +322,6 @@ fn sinkInputInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info
 fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
     var bd = &self.backend_data.PulseAudio;
-    self.layout.step = self.bytes_per_frame;
     var frames_left = nbytes;
     var err: error{WriteFailed}!void = {};
     while (frames_left > 0) {
@@ -340,7 +338,7 @@ fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyo
                 else => unreachable,
             };
 
-        for (self.layout.channels.slice()) |*ch, i| {
+        for (self.channels.slice()) |*ch, i| {
             ch.*.ptr = bd.write_ptr + self.bytes_per_sample * i;
         }
 
@@ -452,7 +450,7 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
         .name = name,
         .aim = .playback,
         .is_raw = false,
-        .layout = fromPAChannelMap(info.*.channel_map) orelse {
+        .channels = fromPAChannelMap(info.*.channel_map) orelse {
             self.allocator.free(id);
             self.allocator.free(name);
             return;
@@ -497,7 +495,7 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
         .name = name,
         .aim = .capture,
         .is_raw = false,
-        .layout = fromPAChannelMap(info.*.channel_map) orelse {
+        .channels = fromPAChannelMap(info.*.channel_map) orelse {
             self.allocator.free(id);
             self.allocator.free(name);
             return;
@@ -531,14 +529,11 @@ fn serverInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_server_info, userd
     };
 }
 
-fn fromPAChannelMap(map: c.pa_channel_map) ?ChannelLayout {
-    var channels = ChannelLayout.Array.init(map.channels) catch return null;
+fn fromPAChannelMap(map: c.pa_channel_map) ?Device.ChannelArray {
+    var channels = Device.ChannelArray.init(map.channels) catch return null;
     for (channels.slice()) |*ch, i|
         ch.*.id = fromPAChannelPos(map.map[i]);
-    return .{
-        .channels = channels,
-        .step = undefined,
-    };
+    return channels;
 }
 
 fn fromPAChannelPos(pos: c.pa_channel_position_t) ChannelId {
@@ -694,10 +689,10 @@ fn toPAChannelPos(channel_id: ChannelId) !c.pa_channel_position_t {
     };
 }
 
-fn toPAChannelMap(layout: ChannelLayout) !c.pa_channel_map {
+fn toPAChannelMap(channels: Device.ChannelArray) !c.pa_channel_map {
     var channel_map: c.pa_channel_map = undefined;
-    channel_map.channels = @intCast(u5, layout.channels.len);
-    for (layout.channels.slice()) |ch, i|
+    channel_map.channels = @intCast(u5, channels.len);
+    for (channels.slice()) |ch, i|
         channel_map.map[i] = try toPAChannelPos(ch.id);
     return channel_map;
 }

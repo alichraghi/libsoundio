@@ -87,7 +87,7 @@ fn writeCallback(self_opaque: *anyopaque, err: soundio.Player.WriteError!void, n
     var frame: usize = 0;
     while (frame < n_frame) : (frame += 1) {
         const sample = std.math.sin((seconds_offset + @intToFloat(f32, frame) * seconds_per_frame) * radians_per_second);
-        for (self.layout.channels.slice()) |_, i| {
+        for (self.channels.slice()) |_, i| {
             self.write(i, frame, sample);
         }
     }

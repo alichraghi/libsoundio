@@ -180,11 +180,11 @@ const SoundIO = union(Backend) {
             .writeFn = options.writeFn,
             .userdata = options.userdata,
             .name = options.name,
-            .layout = device.layout,
+            .channels = device.channels,
             .latency = options.latency,
             .sample_rate = device.nearestSampleRate(options.sample_rate),
             .format = final_fmt,
-            .bytes_per_frame = final_fmt.bytesPerFrame(@intCast(u5, device.layout.channels.len)),
+            .bytes_per_frame = final_fmt.bytesPerFrame(@intCast(u5, device.channels.len)),
             .bytes_per_sample = final_fmt.bytesPerSample(),
             .paused = false,
         };
@@ -204,10 +204,12 @@ pub const Player = struct {
     pub const WriteError = error{WriteFailed};
     pub const WriteFn = *const fn (self: *anyopaque, err: WriteError!void, frame_count_max: usize) void;
 
+    pub const ChannelArray = std.BoundedArray(Channel, max_channels);
+
     writeFn: WriteFn,
     userdata: ?*anyopaque,
     name: [:0]const u8,
-    channels: Channel,
+    channels: ChannelArray,
     latency: f64,
     sample_rate: u32,
     format: Format,
@@ -291,13 +293,13 @@ pub const Player = struct {
                 const sample = @intToFloat(f32, value) * 1.0 / 2.0;
                 @ptrCast(*i32, @alignCast(
                     @alignOf(i32),
-                    &self.layout.channels.get(channel).ptr[self.layout.step * frame],
+                    &self.layout.channels.get(channel).ptr[self.bytes_per_frame * frame],
                 )).* = @floatToInt(i32, sample);
             },
             f32 => {
                 @ptrCast(
                     *@TypeOf(value),
-                    @alignCast(@alignOf(@TypeOf(value)), &self.layout.channels.get(channel).ptr[self.layout.step * frame]),
+                    @alignCast(@alignOf(@TypeOf(value)), &self.channels.get(channel).ptr[self.bytes_per_frame * frame]),
                 ).* = value;
             },
             f64 => {
