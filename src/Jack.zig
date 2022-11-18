@@ -11,7 +11,6 @@ const Range = @import("main.zig").Range;
 const Format = @import("main.zig").Format;
 const min_sample_rate = @import("main.zig").min_sample_rate;
 const max_sample_rate = @import("main.zig").max_sample_rate;
-const getLayoutByChannels = @import("channel_layout.zig").getLayoutByChannels;
 const parseChannelId = @import("channel_layout.zig").parseChannelId;
 
 const Jack = @This();
@@ -117,7 +116,10 @@ pub fn refreshDevices(self: *Jack) !void {
                 if (std.mem.eql(u8, d.id, client_name) and d.aim == aim) {
                     found = true;
                     // we hit the channel limit, skip the leftovers
-                    d.layout.channels.append(parseChannelId(channel_name) orelse break) catch break;
+                    d.layout.channels.append(.{
+                        .ptr = undefined,
+                        .id = parseChannelId(channel_name) orelse break,
+                    }) catch break;
                     break;
                 }
             }
@@ -130,7 +132,10 @@ pub fn refreshDevices(self: *Jack) !void {
 
                 device.aim = aim;
                 device.is_raw = flags & c.JackPortIsPhysical != 0;
-                device.layout.channels.append(parseChannelId(channel_name) orelse continue) catch continue;
+                device.layout.channels.append(.{
+                    .ptr = undefined,
+                    .id = parseChannelId(channel_name) orelse continue,
+                }) catch continue;
                 device.rate_range = .{
                     .min = std.math.clamp(self.sample_rate, min_sample_rate, max_sample_rate),
                     .max = std.math.clamp(self.sample_rate, min_sample_rate, max_sample_rate),
@@ -152,10 +157,7 @@ pub fn refreshDevices(self: *Jack) !void {
         std.debug.assert(i > 0);
 
         for (self.devices_info.list.items) |*device| {
-            device.layout = getLayoutByChannels(device.layout.channels.slice()) orelse {
-                device.layout.name = "unknown"; // TODO: fallback to getLayoutByChannelCount
-                continue;
-            };
+            device.layout = .{ .channels = device.layout.channels, .step = undefined };
         }
 
         return;

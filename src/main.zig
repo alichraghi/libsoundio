@@ -156,18 +156,25 @@ const SoundIO = union(Backend) {
         name: [:0]const u8 = "SoundIoPlayer",
         latency: f64 = 0.5,
         sample_rate: u32 = 44100,
-        format: Format = Format.toNativeEndian(.float32le),
+        format: ?Format = null,
         userdata: ?*anyopaque = null,
     };
 
     pub fn createPlayer(self: SoundIO, device: Device, options: PlayerOptions) CreateStreamError!Player {
-        var fmt_found = false;
-        for (device.formats) |fmt| {
-            if (options.format == fmt) {
-                fmt_found = true;
+        var final_fmt: Format = undefined;
+        if (options.format) |format| {
+            var fmt_found = false;
+            for (device.formats) |fmt| {
+                if (format == fmt) {
+                    fmt_found = true;
+                    final_fmt = fmt;
+                    break;
+                }
             }
+            if (!fmt_found) return error.IncompatibleDevice;
+        } else {
+            final_fmt = device.formats[0];
         }
-        if (!fmt_found) return error.IncompatibleDevice;
         var player = Player{
             .backend_data = undefined,
             .writeFn = options.writeFn,
@@ -176,9 +183,9 @@ const SoundIO = union(Backend) {
             .layout = device.layout,
             .latency = options.latency,
             .sample_rate = device.nearestSampleRate(options.sample_rate),
-            .format = options.format,
-            .bytes_per_frame = options.format.bytesPerFrame(@intCast(u5, device.layout.channels.len)),
-            .bytes_per_sample = options.format.bytesPerSample(),
+            .format = final_fmt,
+            .bytes_per_frame = final_fmt.bytesPerFrame(@intCast(u5, device.layout.channels.len)),
+            .bytes_per_sample = final_fmt.bytesPerSample(),
             .paused = false,
         };
         switch (self) {
@@ -195,12 +202,12 @@ pub const Player = struct {
     // TODO: `*Player` instead `*anyopaque`
     // https://github.com/ziglang/zig/issues/12325
     pub const WriteError = error{WriteFailed};
-    pub const WriteFn = *const fn (self: *anyopaque, err: WriteError!void, areas: []const ChannelArea, frame_count_max: usize) void;
+    pub const WriteFn = *const fn (self: *anyopaque, err: WriteError!void, frame_count_max: usize) void;
 
     writeFn: WriteFn,
     userdata: ?*anyopaque,
     name: [:0]const u8,
-    layout: ChannelLayout,
+    channels: Channel,
     latency: f64,
     sample_rate: u32,
     format: Format,
@@ -265,6 +272,43 @@ pub const Player = struct {
             inline else => |b| @field(This, @tagName(b)).playerVolume(self),
         };
     }
+
+    pub fn write(self: *Player, channel: usize, frame: usize, value: anytype) void {
+        // const bytes = std.mem.asBytes(&value);
+        switch (@TypeOf(value)) {
+            u8 => {
+                @compileError("TODO");
+            },
+            u16 => {
+                @compileError("TODO");
+            },
+            i32 => {
+                // int32_t *buf = (int32_t *)ptr;
+                // double range = (double)INT32_MAX - (double)INT32_MIN;
+                // double val = sample * range / 2.0;
+                // *buf = val;
+                // const range = @intToFloat(f32, std.math.maxInt(i32) + std.math.minInt(i32));
+                const sample = @intToFloat(f32, value) * 1.0 / 2.0;
+                @ptrCast(*i32, @alignCast(
+                    @alignOf(i32),
+                    &self.layout.channels.get(channel).ptr[self.layout.step * frame],
+                )).* = @floatToInt(i32, sample);
+            },
+            f32 => {
+                @ptrCast(
+                    *@TypeOf(value),
+                    @alignCast(@alignOf(@TypeOf(value)), &self.layout.channels.get(channel).ptr[self.layout.step * frame]),
+                ).* = value;
+            },
+            f64 => {
+                @compileError("TODO");
+            },
+            else => {
+                @compileError("unsupported format");
+            },
+        }
+        // std.mem.copy(u8, self.ptr[self.step * frame_index .. self.step * frame_index + bytes.len], bytes);
+    }
 };
 
 pub const Device = struct {
@@ -273,11 +317,13 @@ pub const Device = struct {
         capture,
     };
 
+    pub const ChannelArray = std.BoundedArray(Channel, max_channels);
+
     id: [:0]const u8,
     name: [:0]const u8,
     aim: Aim,
     is_raw: bool,
-    layout: ChannelLayout,
+    channels: ChannelArray,
     formats: []const Format,
     rate_range: Range(u32),
     latency_range: Range(f64),
@@ -343,36 +389,9 @@ pub const DevicesInfo = struct {
     }
 };
 
-pub const ChannelLayout = struct {
-    pub const Array = std.BoundedArray(ChannelId, max_channels);
-
-    name: []const u8,
-    channels: Array,
-
-    pub fn eql(a: ChannelLayout, b_channels: []const ChannelId) bool {
-        if (a.channels.len != b_channels.len) return false;
-        for (a.channels.slice()) |_, i| {
-            if (a.channels.get(i) != b_channels[i])
-                return false;
-        }
-        return true;
-    }
-};
-
-pub const ChannelArea = struct {
+pub const Channel = struct {
     ptr: [*]u8,
-    step: u32,
-
-    pub fn write(self: ChannelArea, value: anytype, frame_index: usize) void {
-        @ptrCast(
-            *@TypeOf(value),
-            @alignCast(@alignOf(@TypeOf(value)), &self.ptr[self.step * frame_index]),
-        ).* = value;
-    }
-
-    pub fn read(self: ChannelArea, comptime T: type, frame_index: usize) T {
-        return @ptrCast(*T, @alignCast(@alignOf(T), &self.ptr[self.step * frame_index])).*;
-    }
+    id: ChannelId,
 };
 
 pub const ChannelId = enum {

@@ -5,7 +5,6 @@ const queryRawDevices = @import("Alsa/device.zig").queryRawDevices;
 const alsa_util = @import("Alsa/util.zig");
 const Device = @import("main.zig").Device;
 const Player = @import("main.zig").Player;
-const ChannelArea = @import("main.zig").ChannelArea;
 const ConnectOptions = @import("main.zig").ConnectOptions;
 const ShutdownFn = @import("main.zig").ShutdownFn;
 const DevicesInfo = @import("main.zig").DevicesInfo;
@@ -41,9 +40,9 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
         .notify_fd = undefined,
         .notify_wd = undefined,
         .notify_pipe_fd = undefined,
-        .aborted = std.atomic.Atomic(bool).init(false),
+        .aborted = .{ .value = false },
         .err = {},
-        .device_scan_queued = std.atomic.Atomic(bool).init(false),
+        .device_scan_queued = .{ .value = false },
     };
 
     self.notify_fd = std.os.inotify_init1(linux.IN.NONBLOCK) catch |err| switch (err) {
@@ -218,13 +217,10 @@ fn deviceEventLoop(self: *Alsa) !void {
             }
         }
         if (got_rescan_event) {
-            while (true) {
-                if (!self.mutex.tryLock()) continue;
-                defer self.mutex.unlock();
-                self.device_scan_queued.store(true, .Monotonic);
-                self.cond.signal();
-                break;
-            }
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.device_scan_queued.store(true, .Monotonic);
+            self.cond.signal();
         }
     }
 }
@@ -276,10 +272,13 @@ pub fn wakeUp(self: *Alsa) void {
 
 pub const PlayerData = struct {
     alsa: *const Alsa,
+    pcm: ?*c.snd_pcm_t,
     period_size: c.snd_pcm_uframes_t,
     sample_buffer: []u8,
     thread: std.Thread,
-    pcm: ?*c.snd_pcm_t,
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
+    suspended: std.atomic.Atomic(bool),
     aborted: std.atomic.Atomic(bool),
 };
 
@@ -287,11 +286,14 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     player.backend_data = .{
         .Alsa = .{
             .alsa = self,
+            .mutex = std.Thread.Mutex{},
+            .cond = std.Thread.Condition{},
+            .suspended = .{ .value = false },
+            .aborted = .{ .value = false },
+            .pcm = null,
             .period_size = undefined,
             .sample_buffer = undefined,
-            .pcm = null,
             .thread = undefined,
-            .aborted = std.atomic.Atomic(bool).init(false),
         },
     };
     var bd = &player.backend_data.Alsa;
@@ -312,6 +314,8 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     )) < 0)
         return error.OpeningDevice;
 
+    // TODO: get real latency
+
     var hw_params: ?*c.snd_pcm_hw_params_t = null;
     _ = c.snd_pcm_hw_params_malloc(&hw_params);
     defer c.snd_pcm_hw_params_free(hw_params);
@@ -327,7 +331,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
 
     var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(u6, player.layout.channels.len) };
     for (player.layout.channels.slice()) |ch, i| {
-        chmap.pos()[i] = alsa_util.toAlsaChmapPos(ch);
+        chmap.pos()[i] = alsa_util.toAlsaChmapPos(ch.id);
     }
     if (c.snd_pcm_set_chmap(bd.pcm, &chmap) < 0)
         return error.IncompatibleDevice;
@@ -338,6 +342,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
 pub fn playerDeinit(self: *Player) void {
     var bd = &self.backend_data.Alsa;
     bd.aborted.store(true, .Monotonic);
+    bd.cond.signal();
     bd.thread.join();
     _ = c.snd_pcm_close(bd.pcm);
     bd.alsa.allocator.free(bd.sample_buffer);
@@ -357,21 +362,24 @@ pub fn playerStart(self: *Player) !void {
 
 fn playerLoop(self: *Player) void {
     var bd = &self.backend_data.Alsa;
-    var areas: [max_channels]ChannelArea = undefined;
-    for (self.layout.channels.slice()) |_, i| {
-        areas[i].ptr = bd.sample_buffer.ptr + i * self.bytes_per_sample;
-        areas[i].step = self.bytes_per_frame;
+    self.layout.step = self.bytes_per_frame;
+    for (self.layout.channels.slice()) |*ch, i| {
+        ch.*.ptr = bd.sample_buffer.ptr + i * self.bytes_per_sample;
     }
 
     var err: error{WriteFailed}!void = {};
     while (true) {
-        // while (bd.suspended.load(.Acquire) and !bd.aborted.load(.Acquire))
-        //     bd.alsa.cond.wait();
-        if (bd.aborted.load(.Acquire)) return;
+        // if (!bd.mutex.tryLock()) continue;
+        // defer bd.mutex.unlock();
+        // while (bd.suspended.load(.Acquire) and !bd.aborted.load(.Acquire)) {
+        //     bd.cond.wait(&bd.mutex);
+        // }
+        if (bd.aborted.load(.Acquire))
+            return;
 
         var frames_left = bd.period_size;
         while (frames_left > 0) {
-            self.writeFn(self, err, areas[0..self.layout.channels.len], frames_left);
+            self.writeFn(self, err, frames_left);
             const n = c.snd_pcm_writei(bd.pcm, bd.sample_buffer.ptr, frames_left);
             if (n < 0) {
                 if (c.snd_pcm_recover(bd.pcm, @intCast(c_int, n), 1) < 0)
@@ -384,8 +392,16 @@ fn playerLoop(self: *Player) void {
 }
 
 pub fn playerPausePlay(self: *Player, pause: bool) !void {
-    _ = self;
-    _ = pause;
+    var bd = &self.backend_data.Alsa;
+    // if (c.snd_pcm_pause(bd.pcm, @bitCast(u1, pause)) < 0) unreachable;
+    while (true) {
+        if (!bd.mutex.tryLock()) continue;
+        defer bd.mutex.unlock();
+        bd.suspended.store(pause, .Release);
+        if (pause)
+            bd.cond.signal();
+        break;
+    }
 }
 
 pub fn playerGetLatency(self: *Player) !f64 {

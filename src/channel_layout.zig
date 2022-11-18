@@ -1,277 +1,200 @@
 const std = @import("std");
 const ChannelLayout = @import("main.zig").ChannelLayout;
 const ChannelId = @import("main.zig").ChannelId;
+const Channel = @import("main.zig").Channel;
 
-pub const builtin_channel_layouts = &[_]ChannelLayout{
-    .{
-        .name = "Mono",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_center,
-        }) catch unreachable,
+pub const builtin_channel_layouts = &[_][]const ChannelId{
+    &.{
+        .front_center,
     },
-    .{
-        .name = "Stereo",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
     },
-    .{
-        .name = "2.1",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .lfe,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .lfe,
     },
-    .{
-        .name = "3.0",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
     },
-    .{
-        .name = "3.0 (back)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .back_center,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .back_center,
     },
-    .{
-        .name = "3.1",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .lfe,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .lfe,
     },
-    .{
-        .name = "4.0",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .back_center,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .back_center,
     },
-    .{
-        .name = "Quad",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .back_left,
-            .back_right,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .back_left,
+        .back_right,
     },
-    .{
-        .name = "Quad (side)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .side_left,
-            .side_right,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .side_left,
+        .side_right,
     },
-    .{
-        .name = "4.1",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .back_center,
-            .lfe,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .back_center,
+        .lfe,
     },
-    .{
-        .name = "5.0 (back)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .back_left,
-            .back_right,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .back_left,
+        .back_right,
     },
-    .{
-        .name = "5.0 (side)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .side_left,
-            .side_right,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .side_left,
+        .side_right,
     },
-    .{
-        .name = "5.1",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .side_left,
-            .side_right,
-            .lfe,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .side_left,
+        .side_right,
+        .lfe,
     },
-    .{
-        .name = "5.1 (back)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .back_left,
-            .back_right,
-            .lfe,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .back_left,
+        .back_right,
+        .lfe,
     },
-    .{
-        .name = "6.0 (side)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .side_left,
-            .side_right,
-            .back_center,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .side_left,
+        .side_right,
+        .back_center,
     },
-    .{
-        .name = "6.0 (front)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .side_left,
-            .side_right,
-            .front_left_center,
-            .front_right_center,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .side_left,
+        .side_right,
+        .front_left_center,
+        .front_right_center,
     },
-    .{
-        .name = "Hexagonal",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .back_left,
-            .back_right,
-            .back_center,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .back_left,
+        .back_right,
+        .back_center,
     },
-    .{
-        .name = "6.1",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .side_left,
-            .side_right,
-            .back_center,
-            .lfe,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .side_left,
+        .side_right,
+        .back_center,
+        .lfe,
     },
-    .{
-        .name = "6.1 (back)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .back_left,
-            .back_right,
-            .back_center,
-            .lfe,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .back_left,
+        .back_right,
+        .back_center,
+        .lfe,
     },
-    .{
-        .name = "6.1 (front)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .side_left,
-            .side_right,
-            .front_left_center,
-            .front_right_center,
-            .lfe,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .side_left,
+        .side_right,
+        .front_left_center,
+        .front_right_center,
+        .lfe,
     },
-    .{
-        .name = "7.0",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .side_left,
-            .side_right,
-            .back_left,
-            .back_right,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .side_left,
+        .side_right,
+        .back_left,
+        .back_right,
     },
-    .{
-        .name = "7.0 (front)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .side_left,
-            .side_right,
-            .front_left_center,
-            .front_right_center,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .side_left,
+        .side_right,
+        .front_left_center,
+        .front_right_center,
     },
-    .{
-        .name = "7.1",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .side_left,
-            .side_right,
-            .back_left,
-            .back_right,
-            .lfe,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .side_left,
+        .side_right,
+        .back_left,
+        .back_right,
+        .lfe,
     },
-    .{
-        .name = "7.1 (wide)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .side_left,
-            .side_right,
-            .front_left_center,
-            .front_right_center,
-            .lfe,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .side_left,
+        .side_right,
+        .front_left_center,
+        .front_right_center,
+        .lfe,
     },
-    .{
-        .name = "7.1 (wide) (back)",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .back_left,
-            .back_right,
-            .front_left_center,
-            .front_right_center,
-            .lfe,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .back_left,
+        .back_right,
+        .front_left_center,
+        .front_right_center,
+        .lfe,
     },
-    .{
-        .name = "Octagonal",
-        .channels = ChannelLayout.Array.fromSlice(&.{
-            .front_left,
-            .front_right,
-            .front_center,
-            .side_left,
-            .side_right,
-            .back_left,
-            .back_right,
-            .back_center,
-        }) catch unreachable,
+    &.{
+        .front_left,
+        .front_right,
+        .front_center,
+        .side_left,
+        .side_right,
+        .back_left,
+        .back_right,
+        .back_center,
     },
 };
 
@@ -375,46 +298,9 @@ const channel_names: []const struct { tag: ChannelId, names: []const []const u8 
     .{ .tag = .aux15, .names = &.{"Aux 15"} },
 };
 
-pub fn getLayout(id: ChannelLayoutId) ChannelLayout {
-    return builtin_channel_layouts[@enumToInt(id)];
-}
-
-pub fn getLayoutByChannels(channels: []const ChannelId) ?ChannelLayout {
-    outer: for (builtin_channel_layouts) |bl| {
-        if (channels.len != bl.channels.len) continue;
-        inner: for (bl.channels.slice()) |bl_ch| {
-            for (channels) |ch|
-                if (bl_ch == ch) continue :inner;
-            continue :outer;
-        }
-        return bl;
-    }
-    return null;
-}
-
-test "getLayoutByChannels" {
-    const stereo = &.{
-        .front_left,
-        .front_right,
-    };
-    const stereo_inverted = &.{
-        .front_right,
-        .front_left,
-    };
-    const stereo_dup = &.{
-        .front_left,
-        .front_left,
-        .front_right,
-    };
-    try std.testing.expectEqual(builtin_channel_layouts[1], getLayoutByChannels(stereo).?);
-    try std.testing.expectEqual(builtin_channel_layouts[1], getLayoutByChannels(stereo_inverted).?);
-    try std.testing.expect(getLayoutByChannels(stereo_dup) == null);
-    try std.testing.expect(getLayoutByChannels(&.{}) == null);
-}
-
-pub fn getLayoutByChannelCount(count: u6) ?ChannelLayout {
+pub fn getLayoutByChannelCount(count: u6) ?[]const ChannelId {
     for (builtin_channel_layouts) |bl| {
-        if (count == bl.channels.len)
+        if (count == bl.len)
             return bl;
     }
     return null;

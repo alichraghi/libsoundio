@@ -5,7 +5,6 @@ const Device = @import("../main.zig").Device;
 const DevicesInfo = @import("../main.zig").DevicesInfo;
 const ChannelLayout = @import("../main.zig").ChannelLayout;
 const Format = @import("../main.zig").Format;
-const getLayoutByChannels = @import("../channel_layout.zig").getLayoutByChannels;
 const max_channels = @import("../main.zig").max_channels;
 
 pub fn queryCookedDevices(devices_info: *DevicesInfo, alloctaor: std.mem.Allocator) !void {
@@ -170,8 +169,11 @@ fn probeDevice(devices_info: *DevicesInfo, allocator: std.mem.Allocator, id: [:0
                 if (chmap[0] == null or chmap[0][0].map.channels <= 0) return error.OpeningDevice;
                 var channels = ChannelLayout.Array.init(std.math.min(max_channels, chmap[0][0].map.channels)) catch unreachable;
                 for (channels.slice()) |*pos, i|
-                    pos.* = util.fromAlsaChmapPos(chmap[0][0].map.pos()[i]);
-                break :blk getLayoutByChannels(channels.slice()) orelse return error.OpeningDevice;
+                    pos.*.id = util.fromAlsaChmapPos(chmap[0][0].map.pos()[i]);
+                break :blk .{
+                    .channels = channels,
+                    .step = 0,
+                };
             } else {
                 return error.OpeningDevice;
             }
