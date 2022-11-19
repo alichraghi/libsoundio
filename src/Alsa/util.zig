@@ -1,3 +1,4 @@
+const is_little = @import("builtin").cpu.arch.endian() == .Little;
 const c = @import("c.zig");
 const Device = @import("../main.zig").Device;
 const ChannelId = @import("../main.zig").ChannelId;
@@ -6,22 +7,16 @@ const Format = @import("../main.zig").Format;
 pub const supported_formats = &[_]Format{
     .s8,
     .u8,
-    .s16le,
-    .s16be,
-    .u16le,
-    .u16be,
-    .s24_32le,
-    .s24_32be,
-    .u24_32le,
-    .u24_32be,
-    .s32le,
-    .s32be,
-    .u32le,
-    .u32be,
-    .f32le,
-    .f32be,
-    .f64le,
-    .f64be,
+    .s16,
+    .u16,
+    .s24,
+    .u24,
+    .s24_32,
+    .u24_32,
+    .s32,
+    .u32,
+    .f32,
+    .f64,
 };
 
 pub fn aimToStream(aim: Device.Aim) c_uint {
@@ -31,28 +26,20 @@ pub fn aimToStream(aim: Device.Aim) c_uint {
     };
 }
 
-// TODO: a test to make sure this is exact same as `supported_alsa_formats`
 pub fn toAlsaFormat(format: Format) !c.snd_pcm_format_t {
     return switch (format) {
         .s8 => c.SND_PCM_FORMAT_S8,
         .u8 => c.SND_PCM_FORMAT_U8,
-        .s16le => c.SND_PCM_FORMAT_S16_LE,
-        .s16be => c.SND_PCM_FORMAT_S16_BE,
-        .u16le => c.SND_PCM_FORMAT_U16_LE,
-        .u16be => c.SND_PCM_FORMAT_U16_BE,
-        .s24_32le => c.SND_PCM_FORMAT_S24_LE,
-        .s24_32be => c.SND_PCM_FORMAT_S24_BE,
-        .u24_32le => c.SND_PCM_FORMAT_U24_LE,
-        .u24_32be => c.SND_PCM_FORMAT_U24_BE,
-        .s32le => c.SND_PCM_FORMAT_S32_LE,
-        .s32be => c.SND_PCM_FORMAT_S32_BE,
-        .u32le => c.SND_PCM_FORMAT_U32_LE,
-        .u32be => c.SND_PCM_FORMAT_U32_BE,
-        .f32le => c.SND_PCM_FORMAT_FLOAT_LE,
-        .f32be => c.SND_PCM_FORMAT_FLOAT_BE,
-        .f64le => c.SND_PCM_FORMAT_FLOAT64_LE,
-        .f64be => c.SND_PCM_FORMAT_FLOAT64_BE,
-        else => error.UnsupportedFormat,
+        .s16 => if (is_little) c.SND_PCM_FORMAT_S16_LE else c.SND_PCM_FORMAT_S16_BE,
+        .u16 => if (is_little) c.SND_PCM_FORMAT_U16_LE else c.SND_PCM_FORMAT_U16_BE,
+        .s24 => if (is_little) c.SND_PCM_FORMAT_S24_3LE else c.SND_PCM_FORMAT_S24_3BE,
+        .u24 => if (is_little) c.SND_PCM_FORMAT_U24_3LE else c.SND_PCM_FORMAT_U24_3BE,
+        .s24_32 => if (is_little) c.SND_PCM_FORMAT_S24_LE else c.SND_PCM_FORMAT_S24_BE,
+        .u24_32 => if (is_little) c.SND_PCM_FORMAT_U24_LE else c.SND_PCM_FORMAT_U24_BE,
+        .s32 => if (is_little) c.SND_PCM_FORMAT_S32_LE else c.SND_PCM_FORMAT_S32_BE,
+        .u32 => if (is_little) c.SND_PCM_FORMAT_U32_LE else c.SND_PCM_FORMAT_U32_BE,
+        .f32 => if (is_little) c.SND_PCM_FORMAT_FLOAT_LE else c.SND_PCM_FORMAT_FLOAT_BE,
+        .f64 => if (is_little) c.SND_PCM_FORMAT_FLOAT64_LE else c.SND_PCM_FORMAT_FLOAT64_BE,
     };
 }
 

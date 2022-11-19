@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const channel_layout = @import("channel_layout.zig");
+const bytesAsValue = std.mem.bytesAsValue;
 
 const PulseAudio = @import("PulseAudio.zig");
 const Alsa = @import("Alsa.zig");
@@ -281,55 +282,204 @@ pub const Player = struct {
     }
 
     pub fn write(self: *Player, channel: usize, frame: usize, sample: anytype) void {
-        // var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
-        // const T = @TypeOf(sample);
-        // if (self.format.eqlType(T)) {
-        //     std.mem.bytesAsValue(T, ptr[0..@sizeOf(T)]).* = sample;
-        //     return;
-        // }
-        // if (T != f32)
-        //     @compileError("cannot convert " ++ @typeName(T) ++ " to specified format");
         switch (@TypeOf(sample)) {
-            f32 => self.writeF32(channel, frame, sample),
-            else => @compileError("TODO"),
+            i8 => self.writei8(channel, frame, sample),
+            u8 => self.writeu8(channel, frame, sample),
+            i16 => self.writei16(channel, frame, sample),
+            u16 => self.writeu16(channel, frame, sample),
+            i24 => self.writei24(channel, frame, sample),
+            u24 => self.writeu24(channel, frame, sample),
+            i32 => self.writei32(channel, frame, sample),
+            u32 => self.writeu32(channel, frame, sample),
+            f32 => self.writef32(channel, frame, sample),
+            f64 => self.writef32(channel, frame, sample),
+            else => @compileError("invalid sample type"),
         }
     }
 
-    pub fn writeF32(self: *Player, channel: usize, frame: usize, sample: f32) void {
+    pub fn writei8(self: *Player, channel: usize, frame: usize, sample: i8) void {
+        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        switch (self.format) {
+            .s8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = sample,
+            .u8 => @panic("TODO"),
+            .s16 => @panic("TODO"),
+            .u16 => @panic("TODO"),
+            .s24 => @panic("TODO"),
+            .u24 => @panic("TODO"),
+            .s24_32 => @panic("TODO"),
+            .u24_32 => @panic("TODO"),
+            .s32 => @panic("TODO"),
+            .u32 => @panic("TODO"),
+            .f32 => @panic("TODO"),
+            .f64 => @panic("TODO"),
+        }
+    }
+
+    pub fn writeu8(self: *Player, channel: usize, frame: usize, sample: u8) void {
+        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        switch (self.format) {
+            .s8 => @panic("TODO"),
+            .u8 => bytesAsValue(u8, ptr[0..@sizeOf(u8)]).* = sample,
+            .s16 => @panic("TODO"),
+            .u16 => @panic("TODO"),
+            .s24 => @panic("TODO"),
+            .u24 => @panic("TODO"),
+            .s24_32 => @panic("TODO"),
+            .u24_32 => @panic("TODO"),
+            .s32 => @panic("TODO"),
+            .u32 => @panic("TODO"),
+            .f32 => @panic("TODO"),
+            .f64 => @panic("TODO"),
+        }
+    }
+
+    pub fn writei16(self: *Player, channel: usize, frame: usize, sample: i16) void {
         var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
         switch (self.format) {
             .s8 => @panic("TODO"),
             .u8 => @panic("TODO"),
-            .s16le => @panic("TODO"),
-            .s16be => @panic("TODO"),
-            .u16le => @panic("TODO"),
-            .u16be => @panic("TODO"),
-            .s24le => @panic("TODO"),
-            .s24be => @panic("TODO"),
-            .u24le => @panic("TODO"),
-            .u24be => @panic("TODO"),
-            .u24_32le => @panic("TODO"),
-            .u24_32be => @panic("TODO"),
-            .s24_32le,
-            .s24_32be,
-            => {
-                const range = @intToFloat(f64, std.math.maxInt(i24) - std.math.minInt(i24));
-                const val = @floatToInt(i24, sample * range / 2.0);
-                std.mem.bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = val;
-            },
-            .s32le => {
-                const range = @intToFloat(f64, std.math.maxInt(i32) - std.math.minInt(i32));
-                const val = @floatToInt(i32, sample * range / 2.0);
-                std.mem.bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = val;
-            },
-            .s32be => @panic("TODO"),
-            .u32le => @panic("TODO"),
-            .u32be => @panic("TODO"),
-            .f32le => std.mem.bytesAsValue(f32, ptr[0..@sizeOf(f32)]).* = sample,
-            .f32be => @panic("TODO"),
-            .f64le => std.mem.bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = sample,
-            .f64be => @panic("TODO"),
+            .s16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = sample,
+            .u16 => @panic("TODO"),
+            .s24 => @panic("TODO"),
+            .u24 => @panic("TODO"),
+            .s24_32 => @panic("TODO"),
+            .u24_32 => @panic("TODO"),
+            .s32 => @panic("TODO"),
+            .u32 => @panic("TODO"),
+            .f32 => @panic("TODO"),
+            .f64 => @panic("TODO"),
         }
+    }
+
+    pub fn writeu16(self: *Player, channel: usize, frame: usize, sample: u16) void {
+        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        switch (self.format) {
+            .s8 => @panic("TODO"),
+            .u8 => @panic("TODO"),
+            .s16 => @panic("TODO"),
+            .u16 => bytesAsValue(u16, ptr[0..@sizeOf(u16)]).* = sample,
+            .s24 => @panic("TODO"),
+            .u24 => @panic("TODO"),
+            .s24_32 => @panic("TODO"),
+            .u24_32 => @panic("TODO"),
+            .s32 => @panic("TODO"),
+            .u32 => @panic("TODO"),
+            .f32 => @panic("TODO"),
+            .f64 => @panic("TODO"),
+        }
+    }
+
+    pub fn writei24(self: *Player, channel: usize, frame: usize, sample: i24) void {
+        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        switch (self.format) {
+            .s8 => @panic("TODO"),
+            .u8 => @panic("TODO"),
+            .s16 => @panic("TODO"),
+            .u16 => @panic("TODO"),
+            .s24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = sample,
+            .u24 => @panic("TODO"),
+            .s24_32 => @panic("TODO"),
+            .u24_32 => @panic("TODO"),
+            .s32 => @panic("TODO"),
+            .u32 => @panic("TODO"),
+            .f32 => @panic("TODO"),
+            .f64 => @panic("TODO"),
+        }
+    }
+
+    pub fn writeu24(self: *Player, channel: usize, frame: usize, sample: u24) void {
+        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        switch (self.format) {
+            .s8 => @panic("TODO"),
+            .u8 => @panic("TODO"),
+            .s16 => @panic("TODO"),
+            .u16 => @panic("TODO"),
+            .s24 => @panic("TODO"),
+            .u24 => bytesAsValue(u24, ptr[0..@sizeOf(u24)]).* = sample,
+            .s24_32 => @panic("TODO"),
+            .u24_32 => @panic("TODO"),
+            .s32 => @panic("TODO"),
+            .u32 => @panic("TODO"),
+            .f32 => @panic("TODO"),
+            .f64 => @panic("TODO"),
+        }
+    }
+
+    pub fn writei32(self: *Player, channel: usize, frame: usize, sample: i32) void {
+        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        switch (self.format) {
+            .s8 => @panic("TODO"),
+            .u8 => @panic("TODO"),
+            .s16 => @panic("TODO"),
+            .u16 => @panic("TODO"),
+            .s24 => @panic("TODO"),
+            .u24 => @panic("TODO"),
+            .s24_32 => @panic("TODO"),
+            .u24_32 => @panic("TODO"),
+            .s32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
+            .u32 => @panic("TODO"),
+            .f32 => @panic("TODO"),
+            .f64 => @panic("TODO"),
+        }
+    }
+
+    pub fn writeu32(self: *Player, channel: usize, frame: usize, sample: u32) void {
+        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        switch (self.format) {
+            .s8 => @panic("TODO"),
+            .u8 => @panic("TODO"),
+            .s16 => @panic("TODO"),
+            .u16 => @panic("TODO"),
+            .s24 => @panic("TODO"),
+            .u24 => @panic("TODO"),
+            .s24_32 => @panic("TODO"),
+            .u24_32 => @panic("TODO"),
+            .s32 => @panic("TODO"),
+            .u32 => bytesAsValue(u32, ptr[0..@sizeOf(u32)]).* = sample,
+            .f32 => @panic("TODO"),
+            .f64 => @panic("TODO"),
+        }
+    }
+
+    pub fn writef32(self: *Player, channel: usize, frame: usize, sample: f32) void {
+        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        switch (self.format) {
+            .s8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = f32ToSigned(i8, sample),
+            .u8 => @panic("TODO"),
+            .s16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = f32ToSigned(i16, sample),
+            .u16 => @panic("TODO"),
+            .s24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = f32ToSigned(i24, sample),
+            .u24 => @panic("TODO"),
+            .s24_32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = f32ToSigned(i24, sample),
+            .u24_32 => @panic("TODO"),
+            .s32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = f32ToSigned(i32, sample),
+            .u32 => @panic("TODO"),
+            .f32 => bytesAsValue(f32, ptr[0..@sizeOf(f32)]).* = sample,
+            .f64 => bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = sample,
+        }
+    }
+
+    pub fn writef64(self: *Player, channel: usize, frame: usize, sample: f64) void {
+        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        switch (self.format) {
+            .s8 => @panic("TODO"),
+            .u8 => @panic("TODO"),
+            .s16 => @panic("TODO"),
+            .u16 => @panic("TODO"),
+            .s24 => @panic("TODO"),
+            .u24 => @panic("TODO"),
+            .s24_32 => @panic("TODO"),
+            .u24_32 => @panic("TODO"),
+            .s32 => @panic("TODO"),
+            .u32 => @panic("TODO"),
+            .f32 => @panic("TODO"),
+            .f64 => bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = sample,
+        }
+    }
+
+    fn f32ToSigned(comptime T: type, sample: f32) T {
+        const range = @intToFloat(f64, std.math.maxInt(T) - std.math.minInt(T));
+        return @floatToInt(T, sample * range / 2.0);
     }
 };
 
@@ -493,100 +643,53 @@ pub const ChannelId = enum {
 pub const Format = enum {
     s8,
     u8,
-    s16le,
-    s16be,
-    u16le,
-    u16be,
-    s24le,
-    s24be,
-    u24le,
-    u24be,
-    s24_32le,
-    s24_32be,
-    u24_32le,
-    u24_32be,
-    s32le,
-    s32be,
-    u32le,
-    u32be,
-    f32le,
-    f32be,
-    f64le,
-    f64be,
+    s16,
+    u16,
+    s24,
+    u24,
+    s24_32,
+    u24_32,
+    s32,
+    u32,
+    f32,
+    f64,
 
     // TODO: remove endian types
-    pub fn eqlType(format: Format, comptime T: type) bool {
-        for (typeFormats(T)) |fmt|
-            if (fmt == format) return true;
-        return false;
-    }
+    // pub fn eqlType(format: Format, comptime T: type) bool {
+    //     for (typeFormats(T)) |fmt|
+    //         if (fmt == format) return true;
+    //     return false;
+    // }
 
     // TODO: remove endian types
-    pub fn typeFormats(comptime T: type) []const Format {
-        return switch (T) {
-            i8 => .s8,
-            u8 => .u8,
-            i16 => &.{ .s16le, .s16be },
-            u16 => &.{ .u16le, .u16be },
-            i24 => &.{ .s24le, .s24be },
-            u24 => &.{ .u24le, .u24be },
-            i32 => &.{ .s32le, .s32be, .s24_32le, .s24_32be },
-            u32 => &.{ .u32le, .u32be, .u24_32le, .u24_32be },
-            f32 => &.{ .f32le, .f32be },
-            f64 => &.{ .f64le, .f64be },
-            else => @compileError("invalid type given for sample format"),
-        };
-    }
-
-    pub fn toNativeEndian(self: Format) Format {
-        if (builtin.cpu.arch.endian() == .Little) {
-            return switch (self) {
-                .s16be => .s16le,
-                .u16be => .u16le,
-                .s24be => .s24le,
-                .u24be => .u24le,
-                .s24_32be => .s24_32le,
-                .u24_32be => .u24_32le,
-                .s32be => .s32le,
-                .u32be => .u32le,
-                .f32be => .f32le,
-                .f64be => .f64le,
-                else => self,
-            };
-        } else {
-            return switch (self) {
-                .s16le => .s16be,
-                .u16le => .u16be,
-                .s24le => .s24be,
-                .u24le => .u24be,
-                .s24_32le => .s24_32be,
-                .u24_32le => .u24_32be,
-                .s32le => .s32be,
-                .u32le => .u32be,
-                .f32le => .f32be,
-                .f64le => .f64be,
-                else => self,
-            };
-        }
-    }
+    // pub fn typeFormats(comptime T: type) []const Format {
+    //     return switch (T) {
+    //         i8 => .s8,
+    //         u8 => .u8,
+    //         i16 => &.{ .s16le, .s16be },
+    //         u16 => &.{ .u16le, .u16be },
+    //         i24 => &.{ .s24le, .s24be },
+    //         u24 => &.{ .u24le, .u24be },
+    //         i32 => &.{ .s32le, .s32be, .s24_32le, .s24_32be },
+    //         u32 => &.{ .u32le, .u32be, .u24_32le, .u24_32be },
+    //         f32 => &.{ .f32le, .f32be },
+    //         f64 => &.{ .f64le, .f64be },
+    //         else => @compileError("invalid type given for sample format"),
+    //     };
+    // }
 
     pub fn bytesPerSample(self: Format) u5 {
         return switch (self) {
             .s8, .u8 => 1,
-            .s16le, .s16be, .u16le, .u16be => 2,
-            .s24le, .s24be, .u24le, .u24be => 3,
-            .s24_32le,
-            .s24_32be,
-            .u24_32le,
-            .u24_32be,
-            .s32le,
-            .s32be,
-            .u32le,
-            .u32be,
-            .f32le,
-            .f32be,
+            .s16, .u16 => 2,
+            .s24, .u24 => 3,
+            .s24_32,
+            .u24_32,
+            .s32,
+            .u32,
+            .f32,
             => 4,
-            .f64le, .f64be => 8,
+            .f64 => 8,
         };
     }
 

@@ -37,17 +37,48 @@ test "Sine Wave (pause, play)" {
             std.debug.print(": No default device found (SKIPPING)\n", .{});
             break;
         };
-        var p = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s24_32le });
-        try p.start();
+
+        if (backend != .PulseAudio) {
+            var p = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s8 });
+            try p.start();
+            std.time.sleep(std.time.ns_per_ms * 1000);
+            p.deinit();
+
+            std.time.sleep(std.time.ns_per_ms * 300);
+        }
+
+        var p1 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s16 });
+        try p1.start();
         std.time.sleep(std.time.ns_per_ms * 1000);
-        p.deinit();
+        p1.deinit();
 
-        std.time.sleep(std.time.ns_per_ms * 200);
+        std.time.sleep(std.time.ns_per_ms * 300);
 
-        var p2 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .f32le });
+        var p2 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s24 });
         try p2.start();
         std.time.sleep(std.time.ns_per_ms * 1000);
         p2.deinit();
+
+        std.time.sleep(std.time.ns_per_ms * 300);
+
+        var p3 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s24_32 });
+        try p3.start();
+        std.time.sleep(std.time.ns_per_ms * 1000);
+        p3.deinit();
+
+        std.time.sleep(std.time.ns_per_ms * 300);
+
+        var p4 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s32 });
+        try p4.start();
+        std.time.sleep(std.time.ns_per_ms * 1000);
+        p4.deinit();
+
+        std.time.sleep(std.time.ns_per_ms * 300);
+
+        var p5 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .f32 });
+        try p5.start();
+        std.time.sleep(std.time.ns_per_ms * 1000);
+        p5.deinit();
 
         // std.time.sleep(std.time.ns_per_ms * 500);
         // try p.pause();

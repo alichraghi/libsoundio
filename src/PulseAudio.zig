@@ -600,21 +600,22 @@ fn fromPAChannelPos(pos: c.pa_channel_position_t) ChannelId {
     };
 }
 
+const is_little = @import("builtin").cpu.arch.endian() == .Little;
 fn fromPAFormat(format: c.pa_sample_format_t) !Format {
     return switch (format) {
-        c.PA_SAMPLE_U8 => .u8,
         c.PA_SAMPLE_ALAW, c.PA_SAMPLE_ULAW => error.InvalidFormat,
-        c.PA_SAMPLE_S16LE => .s16le,
-        c.PA_SAMPLE_S16BE => .s16be,
-        c.PA_SAMPLE_FLOAT32LE => .f32le,
-        c.PA_SAMPLE_FLOAT32BE => .f32be,
-        c.PA_SAMPLE_S32LE => .s32le,
-        c.PA_SAMPLE_S32BE => .s32be,
-        c.PA_SAMPLE_S24LE => .s32le,
-        c.PA_SAMPLE_S24BE => .s32be,
-        c.PA_SAMPLE_S24_32LE => .s24le,
-        c.PA_SAMPLE_S24_32BE => .s24be,
         c.PA_SAMPLE_INVALID => unreachable,
+        c.PA_SAMPLE_U8 => .u8,
+        c.PA_SAMPLE_S16LE => if (is_little) .s16 else error.InvalidFormat,
+        c.PA_SAMPLE_FLOAT32LE => if (is_little) .f32 else error.InvalidFormat,
+        c.PA_SAMPLE_S32LE => if (is_little) .s32 else error.InvalidFormat,
+        c.PA_SAMPLE_S24LE => if (is_little) .s24 else error.InvalidFormat,
+        c.PA_SAMPLE_S24_32LE => if (is_little) .s32 else error.InvalidFormat,
+        c.PA_SAMPLE_S16BE => if (!is_little) .s16 else error.InvalidFormat,
+        c.PA_SAMPLE_FLOAT32BE => if (!is_little) .f32 else error.InvalidFormat,
+        c.PA_SAMPLE_S32BE => if (!is_little) .s32 else error.InvalidFormat,
+        c.PA_SAMPLE_S24BE => if (!is_little) .s24 else error.InvalidFormat,
+        c.PA_SAMPLE_S24_32BE => if (!is_little) .s32 else error.InvalidFormat,
         else => unreachable,
     };
 }
@@ -622,28 +623,18 @@ fn fromPAFormat(format: c.pa_sample_format_t) !Format {
 pub fn toPAFormat(format: Format) !c.pa_sample_format_t {
     return switch (format) {
         .u8 => c.PA_SAMPLE_U8,
-        .s16le => c.PA_SAMPLE_S16LE,
-        .s16be => c.PA_SAMPLE_S16BE,
-        .s24le => c.PA_SAMPLE_S24LE,
-        .s24be => c.PA_SAMPLE_S24LE,
-        .s24_32le => c.PA_SAMPLE_S24_32LE,
-        .s24_32be => c.PA_SAMPLE_S24_32BE,
-        .s32le => c.PA_SAMPLE_S32LE,
-        .s32be => c.PA_SAMPLE_S32BE,
-        .f32le => c.PA_SAMPLE_FLOAT32LE,
-        .f32be => c.PA_SAMPLE_FLOAT32BE,
+        .s16 => if (is_little) c.PA_SAMPLE_S16LE else c.PA_SAMPLE_S16BE,
+        .s24 => if (is_little) c.PA_SAMPLE_S24LE else c.PA_SAMPLE_S24LE,
+        .s24_32 => if (is_little) c.PA_SAMPLE_S24_32LE else c.PA_SAMPLE_S24_32BE,
+        .s32 => if (is_little) c.PA_SAMPLE_S32LE else c.PA_SAMPLE_S32BE,
+        .f32 => if (is_little) c.PA_SAMPLE_FLOAT32LE else c.PA_SAMPLE_FLOAT32BE,
 
         .s8,
-        .u16le,
-        .u16be,
-        .u24le,
-        .u24be,
-        .u24_32le,
-        .u24_32be,
-        .u32le,
-        .u32be,
-        .f64le,
-        .f64be,
+        .u16,
+        .u24,
+        .u24_32,
+        .u32,
+        .f64,
         => error.IncompatibleBackend,
     };
 }
@@ -700,9 +691,9 @@ fn toPAChannelMap(channels: ChannelsArray) !c.pa_channel_map {
 
 fn allDeviceFormats() []const Format {
     return &[_]Format{
-        .u8,    .s16le, .s16be,
-        .s24le, .s24be, .s32le,
-        .s32be, .f32le, .f32be,
+        .u8,  .s16,
+        .s24, .s24_32,
+        .s32, .f32,
     };
 }
 
