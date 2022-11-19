@@ -39,7 +39,7 @@ test "Sine Wave (pause, play)" {
         };
 
         if (backend != .PulseAudio) {
-            var p = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s8 });
+            var p = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i8 });
             try p.start();
             std.time.sleep(std.time.ns_per_ms * 1000);
             p.deinit();
@@ -47,28 +47,28 @@ test "Sine Wave (pause, play)" {
             std.time.sleep(std.time.ns_per_ms * 300);
         }
 
-        var p1 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s16 });
+        var p1 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i16 });
         try p1.start();
         std.time.sleep(std.time.ns_per_ms * 1000);
         p1.deinit();
 
         std.time.sleep(std.time.ns_per_ms * 300);
 
-        var p2 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s24 });
+        var p2 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i24 });
         try p2.start();
         std.time.sleep(std.time.ns_per_ms * 1000);
         p2.deinit();
 
         std.time.sleep(std.time.ns_per_ms * 300);
 
-        var p3 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s24_32 });
+        var p3 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i24_3b });
         try p3.start();
         std.time.sleep(std.time.ns_per_ms * 1000);
         p3.deinit();
 
         std.time.sleep(std.time.ns_per_ms * 300);
 
-        var p4 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .s32 });
+        var p4 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i32 });
         try p4.start();
         std.time.sleep(std.time.ns_per_ms * 1000);
         p4.deinit();

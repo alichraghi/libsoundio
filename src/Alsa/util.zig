@@ -5,15 +5,15 @@ const ChannelId = @import("../main.zig").ChannelId;
 const Format = @import("../main.zig").Format;
 
 pub const supported_formats = &[_]Format{
-    .s8,
+    .i8,
     .u8,
-    .s16,
+    .i16,
     .u16,
-    .s24,
+    .i24,
     .u24,
-    .s24_32,
-    .u24_32,
-    .s32,
+    .i24_3b,
+    .u24_3b,
+    .i32,
     .u32,
     .f32,
     .f64,
@@ -28,15 +28,15 @@ pub fn aimToStream(aim: Device.Aim) c_uint {
 
 pub fn toAlsaFormat(format: Format) !c.snd_pcm_format_t {
     return switch (format) {
-        .s8 => c.SND_PCM_FORMAT_S8,
+        .i8 => c.SND_PCM_FORMAT_S8,
         .u8 => c.SND_PCM_FORMAT_U8,
-        .s16 => if (is_little) c.SND_PCM_FORMAT_S16_LE else c.SND_PCM_FORMAT_S16_BE,
+        .i16 => if (is_little) c.SND_PCM_FORMAT_S16_LE else c.SND_PCM_FORMAT_S16_BE,
         .u16 => if (is_little) c.SND_PCM_FORMAT_U16_LE else c.SND_PCM_FORMAT_U16_BE,
-        .s24 => if (is_little) c.SND_PCM_FORMAT_S24_3LE else c.SND_PCM_FORMAT_S24_3BE,
+        .i24 => if (is_little) c.SND_PCM_FORMAT_S24_3LE else c.SND_PCM_FORMAT_S24_3BE,
         .u24 => if (is_little) c.SND_PCM_FORMAT_U24_3LE else c.SND_PCM_FORMAT_U24_3BE,
-        .s24_32 => if (is_little) c.SND_PCM_FORMAT_S24_LE else c.SND_PCM_FORMAT_S24_BE,
-        .u24_32 => if (is_little) c.SND_PCM_FORMAT_U24_LE else c.SND_PCM_FORMAT_U24_BE,
-        .s32 => if (is_little) c.SND_PCM_FORMAT_S32_LE else c.SND_PCM_FORMAT_S32_BE,
+        .i24_3b => if (is_little) c.SND_PCM_FORMAT_S24_LE else c.SND_PCM_FORMAT_S24_BE,
+        .u24_3b => if (is_little) c.SND_PCM_FORMAT_U24_LE else c.SND_PCM_FORMAT_U24_BE,
+        .i32 => if (is_little) c.SND_PCM_FORMAT_S32_LE else c.SND_PCM_FORMAT_S32_BE,
         .u32 => if (is_little) c.SND_PCM_FORMAT_U32_LE else c.SND_PCM_FORMAT_U32_BE,
         .f32 => if (is_little) c.SND_PCM_FORMAT_FLOAT_LE else c.SND_PCM_FORMAT_FLOAT_BE,
         .f64 => if (is_little) c.SND_PCM_FORMAT_FLOAT64_LE else c.SND_PCM_FORMAT_FLOAT64_BE,
