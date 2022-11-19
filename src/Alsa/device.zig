@@ -66,8 +66,7 @@ fn appendCookedDevice(devices_info: *DevicesInfo, allocator: std.mem.Allocator, 
         }
     };
 
-    if (devices_info.default(aim) == null and
-        std.mem.startsWith(u8, id, "default") or std.mem.startsWith(u8, id, "sysdefault"))
+    if (devices_info.default(aim) == null and std.mem.startsWith(u8, id, "sysdefault"))
         devices_info.setDefault(aim, devices_info.list.items.len - 1);
 }
 
@@ -128,8 +127,7 @@ pub fn queryRawDevices(devices_info: *DevicesInfo, allocator: std.mem.Allocator)
                     continue;
                 };
 
-                if (devices_info.default(aim) == null and
-                    std.mem.startsWith(u8, id, "hw:") and std.mem.endsWith(u8, id, ",0"))
+                if (devices_info.default(aim) == null and device_index == 0)
                     devices_info.setDefault(aim, devices_info.list.items.len - 1);
             }
         }

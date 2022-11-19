@@ -1,3 +1,4 @@
 # TODO
 
--   [ ] Pulseaudio use getError correctly
+-   [ ] Pulseaudio: use getError correctly
+-   [ ] Alsa: SELECT BEST DEFAULT DEVICE

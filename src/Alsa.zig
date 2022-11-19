@@ -271,17 +271,18 @@ pub const PlayerData = struct {
     thread: std.Thread,
     mutex: std.Thread.Mutex,
     cond: std.Thread.Condition,
-    suspended: std.atomic.Atomic(bool),
+    suspended: bool,
     aborted: std.atomic.Atomic(bool),
 };
 
 pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
+    std.debug.print("{s}\n", .{self.devices_info.default(.playback).?.id});
     player.backend_data = .{
         .Alsa = .{
             .allocator = self.allocator,
             .mutex = std.Thread.Mutex{},
             .cond = std.Thread.Condition{},
-            .suspended = .{ .value = false },
+            .suspended = false,
             .aborted = .{ .value = false },
             .pcm = null,
             .period_size = undefined,
@@ -370,9 +371,6 @@ fn playerLoop(self: *Player) void {
     while (true) {
         // if (!bd.mutex.tryLock()) continue;
         // defer bd.mutex.unlock();
-        // while (bd.suspended.load(.Acquire) and !bd.aborted.load(.Acquire)) {
-        //     bd.cond.wait(&bd.mutex);
-        // }
         if (bd.aborted.load(.Acquire))
             return;
 
@@ -392,15 +390,7 @@ fn playerLoop(self: *Player) void {
 
 pub fn playerPausePlay(self: *Player, pause: bool) !void {
     var bd = &self.backend_data.Alsa;
-    // if (c.snd_pcm_pause(bd.pcm, @bitCast(u1, pause)) < 0) unreachable;
-    while (true) {
-        if (!bd.mutex.tryLock()) continue;
-        defer bd.mutex.unlock();
-        bd.suspended.store(pause, .Release);
-        if (pause)
-            bd.cond.signal();
-        break;
-    }
+    _ = c.snd_pcm_pause(bd.pcm, @boolToInt(pause));
 }
 
 pub fn playerSetVolume(self: *Player, volume: f64) !void {
