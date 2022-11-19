@@ -276,15 +276,15 @@ pub fn playerSetVolume(self: *Player, volume: f64) !void {
     const vol = @floatToInt(u32, @intToFloat(f64, c.PA_VOLUME_NORM) * volume);
     for (self.channels.slice()) |_, i|
         v.values[i] = vol;
-    const op = c.pa_context_set_sink_input_volume(
-        bd.pa.pulse_context,
-        c.pa_stream_get_index(bd.stream),
-        &v,
-        null,
-        null,
-    ) orelse
-        return error.StreamDisconnected;
-    c.pa_operation_unref(op);
+    try performOperation(
+        c.pa_context_set_sink_input_volume(
+            bd.pa.pulse_context,
+            c.pa_stream_get_index(bd.stream),
+            &v,
+            null,
+            null,
+        ),
+    );
 }
 
 pub fn playerVolume(self: *Player) !f64 {
@@ -408,7 +408,7 @@ fn performOperation(main_loop: *c.pa_threaded_mainloop, op: ?*c.pa_operation) !v
             c.PA_OPERATION_DONE => return c.pa_operation_unref(op),
             c.PA_OPERATION_CANCELLED => {
                 c.pa_operation_unref(op);
-                return error.Interrupted;
+                return error.OperationCanceled;
             },
             else => unreachable,
         }

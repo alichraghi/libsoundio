@@ -5,20 +5,18 @@ const bytesAsValue = std.mem.bytesAsValue;
 
 const PulseAudio = @import("PulseAudio.zig");
 const Alsa = @import("Alsa.zig");
-const Jack = @import("Jack.zig");
 
 const This = @This();
 pub usingnamespace SoundIO;
 
 comptime {
     std.testing.refAllDecls(@This());
-    std.testing.refAllDecls(SoundIO);
-    std.testing.refAllDecls(Player);
-    std.testing.refAllDecls(Device);
+    std.testing.refAllDeclsRecursive(SoundIO);
+    std.testing.refAllDeclsRecursive(Player);
+    std.testing.refAllDeclsRecursive(Device);
     std.testing.refAllDeclsRecursive(channel_layout);
     std.testing.refAllDeclsRecursive(PulseAudio);
     std.testing.refAllDeclsRecursive(Alsa);
-    std.testing.refAllDeclsRecursive(Jack);
     std.testing.refAllDeclsRecursive(@import("util.zig"));
 }
 
@@ -31,12 +29,10 @@ var current_backend: ?Backend = null;
 pub const Backend = enum {
     PulseAudio,
     Alsa,
-    Jack,
 };
 const SoundIO = union(Backend) {
     PulseAudio: *PulseAudio,
     Alsa: *Alsa,
-    Jack: *Jack,
 
     pub const ConnectError = error{
         OutOfMemory,
@@ -44,12 +40,7 @@ const SoundIO = union(Backend) {
         InvalidServer,
         ConnectionRefused,
         ConnectionTerminated,
-        InitAudioBackend,
         SystemResources,
-        NoSuchClient,
-        IncompatibleBackend,
-        InvalidFormat,
-        Interrupted,
         AccessDenied,
     };
 
@@ -71,7 +62,6 @@ const SoundIO = union(Backend) {
                 @tagName(b),
                 switch (b) {
                     .Alsa => try Alsa.connect(allocator),
-                    .Jack => try Jack.connect(allocator, .{}),
                     .PulseAudio => try PulseAudio.connect(allocator),
                 },
             );
@@ -102,8 +92,8 @@ const SoundIO = union(Backend) {
 
     pub const FlushEventsError = error{
         OutOfMemory,
-        Interrupted,
         Disconnected,
+        OperationCanceled,
         IncompatibleBackend,
         InvalidFormat,
         OpeningDevice,
@@ -144,7 +134,7 @@ const SoundIO = union(Backend) {
 
     pub const CreateStreamError = error{
         OutOfMemory,
-        Interrupted,
+        OperationCanceled,
         IncompatibleBackend,
         IncompatibleDevice,
         StreamDisconnected,
@@ -196,8 +186,14 @@ const SoundIO = union(Backend) {
     }
 };
 
-pub const StreamError = error{StreamDisconnected};
-pub const StartStreamError = error{ StreamDisconnected, OutOfMemory, SystemResources };
+pub const StreamError = error{
+    StreamDisconnected,
+};
+pub const StartStreamError = error{
+    StreamDisconnected,
+    OutOfMemory,
+    SystemResources,
+};
 
 pub const ChannelsArray = std.BoundedArray(Channel, max_channels);
 
@@ -222,7 +218,6 @@ pub const Player = struct {
     const PlayerBackendData = union(Backend) {
         PulseAudio: PulseAudio.PlayerData,
         Alsa: Alsa.PlayerData,
-        Jack: void,
     };
 
     pub fn deinit(self: *Player) void {
@@ -266,8 +261,8 @@ pub const Player = struct {
     }
 
     pub const GetVolumeError = error{
-        Interrupted,
         OutOfMemory,
+        OperationCanceled,
     };
 
     pub fn volume(self: *Player) GetVolumeError!f64 {
