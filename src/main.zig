@@ -145,7 +145,7 @@ const SoundIO = union(Backend) {
     pub const PlayerOptions = struct {
         writeFn: Player.WriteFn,
         name: [:0]const u8 = "SoundIoPlayer",
-        latency: f64 = 0.5,
+        latency: u64 = 500000,
         sample_rate: u32 = 44100,
         format: ?Format = null,
         userdata: ?*anyopaque = null,
@@ -207,7 +207,7 @@ pub const Player = struct {
     userdata: ?*anyopaque,
     name: [:0]const u8,
     channels: ChannelsArray,
-    latency: f64,
+    latency: u64,
     sample_rate: u32,
     format: Format,
     bytes_per_frame: u32,
@@ -232,12 +232,6 @@ pub const Player = struct {
         };
     }
 
-    pub fn getLatency(self: *Player) StreamError!f64 {
-        return switch (current_backend.?) {
-            inline else => |b| @field(This, @tagName(b)).playerGetLatency(self),
-        };
-    }
-
     pub fn pause(self: *Player) StreamError!void {
         switch (current_backend.?) {
             inline else => |b| try @field(This, @tagName(b)).playerPausePlay(self, true),
@@ -253,17 +247,17 @@ pub const Player = struct {
         self.paused = false;
     }
 
-    pub fn setVolume(self: *Player, vol: f64) StreamError!void {
+    pub const GetVolumeError = error{
+        OutOfMemory,
+        OperationCanceled,
+    };
+
+    pub fn setVolume(self: *Player, vol: f64) GetVolumeError!void {
         std.debug.assert(vol <= 1.0);
         return switch (current_backend.?) {
             inline else => |b| @field(This, @tagName(b)).playerSetVolume(self, vol),
         };
     }
-
-    pub const GetVolumeError = error{
-        OutOfMemory,
-        OperationCanceled,
-    };
 
     pub fn volume(self: *Player) GetVolumeError!f64 {
         return switch (current_backend.?) {
@@ -491,7 +485,6 @@ pub const Device = struct {
     channels: ChannelsArray,
     formats: []const Format,
     rate_range: Range(u32),
-    latency_range: Range(f64),
 
     pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
         return switch (current_backend.?) {

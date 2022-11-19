@@ -6,10 +6,8 @@ const Format = @import("main.zig").Format;
 const ChannelId = @import("main.zig").ChannelId;
 const ChannelsArray = @import("main.zig").ChannelsArray;
 const Player = @import("main.zig").Player;
-const max_channels = @import("main.zig").max_channels;
 const min_sample_rate = @import("main.zig").min_sample_rate;
 const max_sample_rate = @import("main.zig").max_sample_rate;
-const getLayoutByChannels = @import("channel_layout.zig").getLayoutByChannels;
 
 const PulseAudio = @This();
 
@@ -21,11 +19,10 @@ const DeviceQueryError = error{
 
 allocator: std.mem.Allocator,
 main_loop: *c.pa_threaded_mainloop,
-props: *c.pa_proplist,
 pulse_context: *c.pa_context,
 context_state: c.pa_context_state_t,
-device_scan_queued: std.atomic.Atomic(bool),
 devices_info: DevicesInfo,
+device_scan_queued: std.atomic.Atomic(bool),
 device_query_err: ?DeviceQueryError,
 default_sink_id: ?[:0]const u8,
 default_source_id: ?[:0]const u8,
@@ -36,11 +33,7 @@ pub fn connect(allocator: std.mem.Allocator) !*PulseAudio {
     errdefer c.pa_threaded_mainloop_free(main_loop);
     var main_loop_api = c.pa_threaded_mainloop_get_api(main_loop);
 
-    const props = c.pa_proplist_new() orelse
-        return error.OutOfMemory;
-    errdefer c.pa_proplist_free(props);
-
-    const pulse_context = c.pa_context_new_with_proplist(main_loop_api, "SoundIO", props) orelse
+    const pulse_context = c.pa_context_new_with_proplist(main_loop_api, "SoundIO", null) orelse
         return error.OutOfMemory;
     errdefer c.pa_context_unref(pulse_context);
 
@@ -49,12 +42,16 @@ pub fn connect(allocator: std.mem.Allocator) !*PulseAudio {
             error.InvalidServer => error.InvalidServer,
             error.ConnectionRefused => error.ConnectionRefused,
             error.ConnectionTerminated => error.ConnectionTerminated,
-            else => unreachable,
+            else => error.ConnectionRefused,
         };
     errdefer c.pa_context_disconnect(pulse_context);
 
     if (c.pa_threaded_mainloop_start(main_loop) != 0)
         return error.OutOfMemory;
+    errdefer {
+        c.pa_threaded_mainloop_stop(main_loop);
+        c.pa_threaded_mainloop_free(main_loop);
+    }
 
     c.pa_threaded_mainloop_lock(main_loop);
     defer c.pa_threaded_mainloop_unlock(main_loop);
@@ -64,17 +61,16 @@ pub fn connect(allocator: std.mem.Allocator) !*PulseAudio {
     self.* = PulseAudio{
         .allocator = allocator,
         .main_loop = main_loop,
-        .props = props,
         .pulse_context = pulse_context,
         .context_state = c.PA_CONTEXT_UNCONNECTED,
-        .device_scan_queued = std.atomic.Atomic(bool).init(false),
         .devices_info = DevicesInfo.init(),
+        .device_scan_queued = std.atomic.Atomic(bool).init(false),
         .device_query_err = null,
         .default_sink_id = null,
         .default_source_id = null,
     };
-    c.pa_context_set_subscribe_callback(pulse_context, subscribeCallback, self);
-    c.pa_context_set_state_callback(pulse_context, contextStateCallback, self);
+    c.pa_context_set_subscribe_callback(pulse_context, subscribeCb, self);
+    c.pa_context_set_state_callback(pulse_context, contextStateCb, self);
 
     while (true) {
         switch (self.context_state) {
@@ -108,11 +104,10 @@ pub fn connect(allocator: std.mem.Allocator) !*PulseAudio {
 }
 
 pub fn deinit(self: *PulseAudio) void {
-    c.pa_threaded_mainloop_stop(self.main_loop);
     c.pa_context_disconnect(self.pulse_context);
     c.pa_context_unref(self.pulse_context);
+    c.pa_threaded_mainloop_stop(self.main_loop);
     c.pa_threaded_mainloop_free(self.main_loop);
-    c.pa_proplist_free(self.props);
     self.devices_info.deinit(self.allocator);
     self.allocator.destroy(self);
 }
@@ -126,7 +121,7 @@ pub fn flushEvents(self: *PulseAudio) !void {
 pub fn waitEvents(self: *PulseAudio) !void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
-    if (!self.device_scan_queued.load(.Acquire))
+    while (!self.device_scan_queued.load(.Acquire))
         c.pa_threaded_mainloop_wait(self.main_loop);
     self.device_scan_queued.store(false, .Release);
     try self.refreshDevices();
@@ -135,7 +130,7 @@ pub fn waitEvents(self: *PulseAudio) !void {
 pub fn wakeUp(self: *PulseAudio) void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
-    self.device_scan_queued.store(true, .Monotonic);
+    self.device_scan_queued.storeUnchecked(true);
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
@@ -179,24 +174,14 @@ pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
         bd.stream = s
     else
         return error.OutOfMemory;
-    c.pa_stream_set_state_callback(bd.stream, playbackStreamStateCallback, bd);
+    c.pa_stream_set_state_callback(bd.stream, playbackStreamStateCb, bd);
     bd.buf_attr = .{
         .maxlength = std.math.maxInt(u32),
-        .tlength = std.math.maxInt(u32),
+        .tlength = @intCast(u32, c.pa_usec_to_bytes(player.latency, &sample_spec)),
         .prebuf = 0,
         .minreq = std.math.maxInt(u32),
         .fragsize = std.math.maxInt(u32),
     };
-    const bytes_per_second = player.bytes_per_frame * player.sample_rate;
-    if (player.latency > 0.0) {
-        const buf_len = player.bytes_per_frame *
-            @floatToInt(
-            u32,
-            std.math.ceil(player.latency * @intToFloat(f64, bytes_per_second) / @intToFloat(f64, player.bytes_per_frame)),
-        );
-        bd.buf_attr.maxlength = buf_len;
-        bd.buf_attr.tlength = buf_len;
-    }
 
     const flags = c.PA_STREAM_START_CORKED | c.PA_STREAM_AUTO_TIMING_UPDATE | c.PA_STREAM_INTERPOLATE_TIMING | c.PA_STREAM_ADJUST_LATENCY;
     if (c.pa_stream_connect_playback(bd.stream, device.id.ptr, &bd.buf_attr, flags, null, null) != 0)
@@ -205,17 +190,21 @@ pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
         };
 
     while (true) {
-        switch (bd.stream_ready.load(.Acquire)) {
+        switch (bd.stream_ready.loadUnchecked()) {
             .unknown => c.pa_threaded_mainloop_wait(self.main_loop),
             .ready => break,
             .failure => return error.StreamDisconnected,
         }
     }
 
-    const writable_size = c.pa_stream_writable_size(bd.stream);
-    player.latency = @intToFloat(f64, writable_size) / @intToFloat(f64, bytes_per_second);
+    try performOperation(self.main_loop, c.pa_stream_update_timing_info(bd.stream, timingUpdateCb, self));
 
-    try performOperation(self.main_loop, c.pa_stream_update_timing_info(bd.stream, timingUpdateCallback, self));
+    // get real latency
+    if (c.pa_stream_get_timing_info(bd.stream)) |timing_info| {
+        if (timing_info.*.sink_usec > 0) {
+            player.latency = timing_info.*.sink_usec;
+        }
+    }
 }
 
 pub fn playerDeinit(self: *Player) void {
@@ -237,7 +226,7 @@ pub fn playerStart(self: *Player) !void {
     const op = c.pa_stream_cork(bd.stream, 0, null, null) orelse
         return error.StreamDisconnected;
     c.pa_operation_unref(op);
-    c.pa_stream_set_write_callback(bd.stream, playbackStreamWriteCallback, self);
+    c.pa_stream_set_write_callback(bd.stream, playbackStreamWriteCb, self);
 }
 
 pub fn playerPausePlay(self: *Player, pause: bool) !void {
@@ -255,19 +244,6 @@ pub fn playerPausePlay(self: *Player, pause: bool) !void {
     }
 }
 
-pub fn playerGetLatency(self: *Player) !f64 {
-    var bd = &self.backend_data.PulseAudio;
-    var r_usec: c.pa_usec_t = 0;
-    var negative: c_int = 0;
-    if (c.pa_stream_get_latency(bd.stream, &r_usec, &negative) != 0)
-        return switch (getError(bd.pa.pulse_context)) {
-            // Timing info is automatically updated
-            error.NoData => unreachable,
-            else => unreachable,
-        };
-    return @intToFloat(f64, r_usec) / std.time.us_per_s;
-}
-
 pub fn playerSetVolume(self: *Player, volume: f64) !void {
     var bd = &self.backend_data.PulseAudio;
     var v: c.pa_cvolume = undefined;
@@ -277,6 +253,7 @@ pub fn playerSetVolume(self: *Player, volume: f64) !void {
     for (self.channels.slice()) |_, i|
         v.values[i] = vol;
     try performOperation(
+        bd.pa.main_loop,
         c.pa_context_set_sink_input_volume(
             bd.pa.pulse_context,
             c.pa_stream_get_index(bd.stream),
@@ -294,7 +271,7 @@ pub fn playerVolume(self: *Player) !f64 {
         c.pa_context_get_sink_input_info(
             bd.pa.pulse_context,
             c.pa_stream_get_index(bd.stream),
-            sinkInputInfoCallback,
+            sinkInputInfoCb,
             bd,
         ),
     );
@@ -311,7 +288,7 @@ pub fn playerErr(self: *Player) !void {
     return;
 }
 
-fn sinkInputInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
+fn sinkInputInfoCb(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
     var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
     if (eol != 0) {
         c.pa_threaded_mainloop_signal(bd.pa.main_loop, 0);
@@ -320,7 +297,7 @@ fn sinkInputInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info
     bd.volume = @intToFloat(f64, info.*.volume.values[0]) / @intToFloat(f64, c.PA_VOLUME_NORM);
 }
 
-fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
+fn playbackStreamWriteCb(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
     var bd = &self.backend_data.PulseAudio;
     var frames_left = nbytes;
@@ -352,23 +329,23 @@ fn playbackStreamWriteCallback(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyo
     }
 }
 
-fn playbackStreamStateCallback(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
+fn playbackStreamStateCb(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
     var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
     switch (c.pa_stream_get_state(stream)) {
         c.PA_STREAM_UNCONNECTED, c.PA_STREAM_CREATING, c.PA_STREAM_TERMINATED => {},
         c.PA_STREAM_READY => {
-            bd.stream_ready.store(.ready, .Monotonic);
+            bd.stream_ready.storeUnchecked(.ready);
             c.pa_threaded_mainloop_signal(bd.pa.main_loop, 0);
         },
         c.PA_STREAM_FAILED => {
-            bd.stream_ready.store(.failure, .Monotonic);
+            bd.stream_ready.storeUnchecked(.failure);
             c.pa_threaded_mainloop_signal(bd.pa.main_loop, 0);
         },
         else => unreachable,
     }
 }
 
-fn timingUpdateCallback(_: ?*c.pa_stream, _: c_int, userdata: ?*anyopaque) callconv(.C) void {
+fn timingUpdateCb(_: ?*c.pa_stream, _: c_int, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
@@ -376,9 +353,9 @@ fn timingUpdateCallback(_: ?*c.pa_stream, _: c_int, userdata: ?*anyopaque) callc
 fn refreshDevices(self: *PulseAudio) !void {
     self.devices_info.clear(self.allocator);
 
-    const list_sink_op = c.pa_context_get_sink_info_list(self.pulse_context, sinkInfoCallback, self);
-    const list_source_op = c.pa_context_get_source_info_list(self.pulse_context, sourceInfoCallback, self);
-    const server_info_op = c.pa_context_get_server_info(self.pulse_context, serverInfoCallback, self);
+    const list_sink_op = c.pa_context_get_sink_info_list(self.pulse_context, sinkInfoCb, self);
+    const list_source_op = c.pa_context_get_source_info_list(self.pulse_context, sourceInfoCb, self);
+    const server_info_op = c.pa_context_get_server_info(self.pulse_context, serverInfoCb, self);
 
     errdefer self.devices_info.list.clearAndFree(self.allocator);
     try performOperation(self.main_loop, list_sink_op);
@@ -415,19 +392,19 @@ fn performOperation(main_loop: *c.pa_threaded_mainloop, op: ?*c.pa_operation) !v
     }
 }
 
-fn subscribeCallback(_: ?*c.pa_context, _: c.pa_subscription_event_type_t, _: u32, userdata: ?*anyopaque) callconv(.C) void {
+fn subscribeCb(_: ?*c.pa_context, _: c.pa_subscription_event_type_t, _: u32, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
-    self.device_scan_queued.store(true, .Monotonic);
+    self.device_scan_queued.storeUnchecked(true);
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
-fn contextStateCallback(ctx: ?*c.pa_context, userdata: ?*anyopaque) callconv(.C) void {
+fn contextStateCb(ctx: ?*c.pa_context, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
     self.context_state = c.pa_context_get_state(ctx);
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
-fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
+fn sinkInfoCb(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
     if (eol != 0) {
         c.pa_threaded_mainloop_signal(self.main_loop, 0);
@@ -461,7 +438,6 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
             .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
         },
-        .latency_range = .{ .min = c.PA_SINK_LATENCY, .max = c.PA_SINK_LATENCY },
     };
 
     self.devices_info.list.append(self.allocator, device) catch |err| {
@@ -472,7 +448,7 @@ fn sinkInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_in
     };
 }
 
-fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
+fn sourceInfoCb(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
     if (eol != 0) {
         c.pa_threaded_mainloop_signal(self.main_loop, 0);
@@ -506,7 +482,6 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
             .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
         },
-        .latency_range = .{ .min = c.PA_SOURCE_LATENCY, .max = c.PA_SOURCE_LATENCY },
     };
 
     self.devices_info.list.append(self.allocator, device) catch |err| {
@@ -517,7 +492,7 @@ fn sourceInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: 
     };
 }
 
-fn serverInfoCallback(_: ?*c.pa_context, info: [*c]const c.pa_server_info, userdata: ?*anyopaque) callconv(.C) void {
+fn serverInfoCb(_: ?*c.pa_context, info: [*c]const c.pa_server_info, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
     defer c.pa_threaded_mainloop_signal(self.main_loop, 0);
     self.default_sink_id = self.allocator.dupeZ(u8, std.mem.span(info.*.default_sink_name)) catch |err| {

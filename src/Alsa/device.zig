@@ -16,7 +16,7 @@ pub fn queryCookedDevices(devices_info: *DevicesInfo, alloctaor: std.mem.Allocat
     var i: usize = 0;
     while (hints[i] != null) : (i += 1) {
         const id = std.mem.span(c.snd_device_name_get_hint(hints[i], "NAME") orelse continue);
-        defer std.heap.c_allocator.free(id); // TODO: require a c_allocator option
+        defer std.heap.c_allocator.free(id);
 
         if (std.mem.eql(u8, id, "null") or
             // the worse device
@@ -37,6 +37,7 @@ pub fn queryCookedDevices(devices_info: *DevicesInfo, alloctaor: std.mem.Allocat
             std.mem.span(d)
         else
             id;
+        defer std.heap.c_allocator.free(name);
 
         if (c.snd_device_name_get_hint(hints[i], "IOID")) |io| {
             const io_span = std.mem.span(io);
@@ -53,7 +54,7 @@ pub fn queryCookedDevices(devices_info: *DevicesInfo, alloctaor: std.mem.Allocat
     }
 }
 
-fn appendCookedDevice(devices_info: *DevicesInfo, allocator: std.mem.Allocator, id: []const u8, name: []const u8, aim: Device.Aim) !void {
+fn appendCookedDevice(devices_info: *DevicesInfo, allocator: std.mem.Allocator, id: [:0]const u8, name: [:0]const u8, aim: Device.Aim) !void {
     const id_alloc = try allocator.dupeZ(u8, id);
     const name_alloc = try allocator.dupeZ(u8, name);
     probeDevice(devices_info, allocator, id_alloc, name_alloc, aim, false) catch |err| {
@@ -82,10 +83,12 @@ pub fn queryRawDevices(devices_info: *DevicesInfo, allocator: std.mem.Allocator)
     var card_index: c_int = -1;
     if (c.snd_card_next(&card_index) < 0)
         return error.SystemResources;
+
     while (card_index >= 0) {
-        var ctl: ?*c.snd_ctl_t = undefined;
         var card_id_buf: [8]u8 = undefined;
         const card_id = std.fmt.bufPrintZ(&card_id_buf, "hw:{d}", .{card_index}) catch break;
+
+        var ctl: ?*c.snd_ctl_t = undefined;
         _ = switch (c.snd_ctl_open(&ctl, card_id.ptr, 0)) {
             0 => {},
             -@intCast(i16, @enumToInt(std.os.linux.E.NOENT)) => break,
@@ -105,13 +108,11 @@ pub fn queryRawDevices(devices_info: *DevicesInfo, allocator: std.mem.Allocator)
 
             c.snd_pcm_info_set_device(pcm_info, @intCast(c_uint, device_index));
             c.snd_pcm_info_set_subdevice(pcm_info, 0);
-
             const device_name = c.snd_pcm_info_get_name(pcm_info);
 
             for (&[_]Device.Aim{ .playback, .capture }) |aim| {
                 const snd_stream = util.aimToStream(aim);
                 c.snd_pcm_info_set_stream(pcm_info, snd_stream);
-
                 _ = switch (c.snd_ctl_pcm_info(ctl, pcm_info)) {
                     0 => {},
                     -@intCast(i16, @enumToInt(std.os.linux.E.NOENT)) => break,
@@ -152,11 +153,6 @@ fn probeDevice(devices_info: *DevicesInfo, allocator: std.mem.Allocator, id: [:0
     if (c.snd_pcm_hw_params_any(pcm, hw_params) < 0)
         return error.OpeningDevice;
 
-    if (c.snd_pcm_hw_params_set_rate_resample(pcm, hw_params, @bitCast(u1, !is_raw)) < 0)
-        return error.OpeningDevice;
-
-    var sr_min: c_uint = 0;
-    var sr_max: c_uint = 0;
     const device = Device{
         .id = id,
         .name = name,
@@ -203,8 +199,6 @@ fn probeDevice(devices_info: *DevicesInfo, allocator: std.mem.Allocator, id: [:0
             c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT64_LE);
             c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT64_BE);
 
-            if (c.snd_pcm_hw_params_set_format_mask(pcm, hw_params, fmt_mask) < 0)
-                return error.OpeningDevice;
             c.snd_pcm_hw_params_get_format_mask(hw_params, fmt_mask);
 
             var fmt_arr = std.ArrayList(Format).init(allocator);
@@ -215,30 +209,15 @@ fn probeDevice(devices_info: *DevicesInfo, allocator: std.mem.Allocator, id: [:0
             break :blk fmt_arr.toOwnedSlice();
         },
         .rate_range = blk: {
-            if (c.snd_pcm_hw_params_get_rate_min(hw_params, &sr_min, null) < 0)
+            var rate_min: c_uint = 0;
+            var rate_max: c_uint = 0;
+            if (c.snd_pcm_hw_params_get_rate_min(hw_params, &rate_min, null) < 0)
                 return error.OpeningDevice;
-            if (c.snd_pcm_hw_params_set_rate_last(pcm, hw_params, &sr_max, null) < 0)
+            if (c.snd_pcm_hw_params_get_rate_max(hw_params, &rate_max, null) < 0)
                 return error.OpeningDevice;
             break :blk .{
-                .min = sr_min,
-                .max = sr_max,
-            };
-        },
-        .latency_range = blk: {
-            const one_over_actual_rate = 1.0 / @intToFloat(f32, sr_max);
-
-            var min_frames: c.snd_pcm_uframes_t = 0;
-            var max_frames: c.snd_pcm_uframes_t = 0;
-            if (c.snd_pcm_hw_params_get_buffer_size_min(hw_params, &min_frames) < 0)
-                return error.OpeningDevice;
-            if (c.snd_pcm_hw_params_get_buffer_size_max(hw_params, &max_frames) < 0)
-                return error.OpeningDevice;
-            if (c.snd_pcm_hw_params_set_buffer_size_first(pcm, hw_params, &min_frames) < 0)
-                return error.OpeningDevice;
-
-            break :blk .{
-                .min = @intToFloat(f32, min_frames) * one_over_actual_rate,
-                .max = @intToFloat(f32, max_frames) * one_over_actual_rate,
+                .min = rate_min,
+                .max = rate_max,
             };
         },
     };

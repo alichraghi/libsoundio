@@ -5,10 +5,7 @@ const queryRawDevices = @import("Alsa/device.zig").queryRawDevices;
 const alsa_util = @import("Alsa/util.zig");
 const Device = @import("main.zig").Device;
 const Player = @import("main.zig").Player;
-const ConnectOptions = @import("main.zig").ConnectOptions;
-const ShutdownFn = @import("main.zig").ShutdownFn;
 const DevicesInfo = @import("main.zig").DevicesInfo;
-const max_channels = @import("main.zig").max_channels;
 const util = @import("util.zig");
 const linux = std.os.linux;
 
@@ -69,6 +66,7 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
         error.Unexpected,
         => unreachable,
     };
+    errdefer std.os.inotify_rm_watch(self.notify_fd, self.notify_wd);
 
     self.notify_pipe_fd = std.os.pipe2(linux.O.NONBLOCK) catch |err| switch (err) {
         error.ProcessFdQuotaExceeded,
@@ -105,7 +103,6 @@ pub fn deinit(self: *Alsa) void {
     std.os.close(self.notify_pipe_fd[1]);
     std.os.inotify_rm_watch(self.notify_fd, self.notify_wd);
     std.os.close(self.notify_fd);
-
     self.devices_info.deinit(self.allocator);
     self.allocator.destroy(self);
 }
@@ -255,10 +252,6 @@ pub fn waitEvents(self: *Alsa) !void {
 fn refreshDevices(self: *Alsa) !void {
     self.devices_info.clear(self.allocator);
 
-    if (c.snd_config_update() < 0)
-        return error.SystemResources;
-    defer _ = c.snd_config_update_free_global();
-
     try queryCookedDevices(&self.devices_info, self.allocator);
     try queryRawDevices(&self.devices_info, self.allocator);
 }
@@ -271,7 +264,7 @@ pub fn wakeUp(self: *Alsa) void {
 }
 
 pub const PlayerData = struct {
-    alsa: *const Alsa,
+    allocator: std.mem.Allocator,
     pcm: ?*c.snd_pcm_t,
     period_size: c.snd_pcm_uframes_t,
     sample_buffer: []u8,
@@ -285,7 +278,7 @@ pub const PlayerData = struct {
 pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     player.backend_data = .{
         .Alsa = .{
-            .alsa = self,
+            .allocator = self.allocator,
             .mutex = std.Thread.Mutex{},
             .cond = std.Thread.Condition{},
             .suspended = .{ .value = false },
@@ -301,6 +294,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     const snd_stream = alsa_util.aimToStream(device.aim);
     if (c.snd_pcm_open(&bd.pcm, device.id.ptr, snd_stream, 0) < 0)
         return error.OpeningDevice;
+    errdefer _ = c.snd_pcm_close(bd.pcm);
 
     const format = alsa_util.toAlsaFormat(player.format) catch return error.IncompatibleBackend;
     if ((c.snd_pcm_set_params(
@@ -310,14 +304,14 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
         @intCast(u6, player.channels.len),
         player.sample_rate,
         @bitCast(u1, !device.is_raw),
-        @floatToInt(c_uint, player.latency * std.time.us_per_s),
+        @intCast(c_uint, player.latency),
     )) < 0)
         return error.OpeningDevice;
-
-    // TODO: get real latency
+    errdefer _ = c.snd_pcm_hw_free(bd.pcm);
 
     var hw_params: ?*c.snd_pcm_hw_params_t = null;
-    _ = c.snd_pcm_hw_params_malloc(&hw_params);
+    if (c.snd_pcm_hw_params_malloc(&hw_params) < 0)
+        return error.OpeningDevice;
     defer c.snd_pcm_hw_params_free(hw_params);
     if (c.snd_pcm_hw_params_current(bd.pcm, hw_params) < 0)
         return error.OpeningDevice;
@@ -329,6 +323,11 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     if (c.snd_pcm_hw_params_get_buffer_size(hw_params, &buf_size) < 0)
         return error.OpeningDevice;
 
+    var latency: c_uint = 0;
+    if (c.snd_pcm_hw_params_get_buffer_time(hw_params, &latency, null) < 0)
+        return error.OpeningDevice;
+    player.latency = latency;
+
     var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(u6, player.channels.len) };
     for (player.channels.slice()) |ch, i| {
         chmap.pos()[i] = alsa_util.toAlsaChmapPos(ch.id);
@@ -336,7 +335,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     if (c.snd_pcm_set_chmap(bd.pcm, &chmap) < 0)
         return error.IncompatibleDevice;
 
-    bd.sample_buffer = try self.allocator.alloc(u8, buf_size);
+    bd.sample_buffer = try bd.allocator.alloc(u8, buf_size);
 }
 
 pub fn playerDeinit(self: *Player) void {
@@ -344,8 +343,9 @@ pub fn playerDeinit(self: *Player) void {
     bd.aborted.store(true, .Monotonic);
     bd.cond.signal();
     bd.thread.join();
+    _ = c.snd_pcm_hw_free(bd.pcm);
     _ = c.snd_pcm_close(bd.pcm);
-    bd.alsa.allocator.free(bd.sample_buffer);
+    bd.allocator.free(bd.sample_buffer);
 }
 
 pub fn playerStart(self: *Player) !void {
@@ -401,11 +401,6 @@ pub fn playerPausePlay(self: *Player, pause: bool) !void {
             bd.cond.signal();
         break;
     }
-}
-
-pub fn playerGetLatency(self: *Player) !f64 {
-    _ = self;
-    return undefined;
 }
 
 pub fn playerSetVolume(self: *Player, volume: f64) !void {

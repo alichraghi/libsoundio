@@ -52,33 +52,33 @@ test "Sine Wave (pause, play)" {
         std.time.sleep(std.time.ns_per_ms * 1000);
         p1.deinit();
 
-        std.time.sleep(std.time.ns_per_ms * 300);
+        // std.time.sleep(std.time.ns_per_ms * 300);
 
-        var p2 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i24 });
-        try p2.start();
-        std.time.sleep(std.time.ns_per_ms * 1000);
-        p2.deinit();
+        // var p2 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i24 });
+        // try p2.start();
+        // std.time.sleep(std.time.ns_per_ms * 1000);
+        // p2.deinit();
 
-        std.time.sleep(std.time.ns_per_ms * 300);
+        // std.time.sleep(std.time.ns_per_ms * 300);
 
-        var p3 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i24_3b });
-        try p3.start();
-        std.time.sleep(std.time.ns_per_ms * 1000);
-        p3.deinit();
+        // var p3 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i24_3b });
+        // try p3.start();
+        // std.time.sleep(std.time.ns_per_ms * 1000);
+        // p3.deinit();
 
-        std.time.sleep(std.time.ns_per_ms * 300);
+        // std.time.sleep(std.time.ns_per_ms * 300);
 
-        var p4 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i32 });
-        try p4.start();
-        std.time.sleep(std.time.ns_per_ms * 1000);
-        p4.deinit();
+        // var p4 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i32 });
+        // try p4.start();
+        // std.time.sleep(std.time.ns_per_ms * 1000);
+        // p4.deinit();
 
-        std.time.sleep(std.time.ns_per_ms * 300);
+        // std.time.sleep(std.time.ns_per_ms * 300);
 
-        var p5 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .f32 });
-        try p5.start();
-        std.time.sleep(std.time.ns_per_ms * 1000);
-        p5.deinit();
+        // var p5 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .f32 });
+        // try p5.start();
+        // std.time.sleep(std.time.ns_per_ms * 1000);
+        // p5.deinit();
 
         // std.time.sleep(std.time.ns_per_ms * 500);
         // try p.pause();
