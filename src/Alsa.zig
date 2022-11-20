@@ -1,7 +1,6 @@
 const std = @import("std");
 const c = @import("Alsa/c.zig");
-const queryCookedDevices = @import("Alsa/device.zig").queryCookedDevices;
-const queryRawDevices = @import("Alsa/device.zig").queryRawDevices;
+const queryDevices = @import("Alsa/device.zig").queryDevices;
 const alsa_util = @import("Alsa/util.zig");
 const Device = @import("main.zig").Device;
 const Player = @import("main.zig").Player;
@@ -252,8 +251,7 @@ pub fn waitEvents(self: *Alsa) !void {
 fn refreshDevices(self: *Alsa) !void {
     self.devices_info.clear(self.allocator);
 
-    try queryCookedDevices(&self.devices_info, self.allocator);
-    try queryRawDevices(&self.devices_info, self.allocator);
+    try queryDevices(&self.devices_info, self.allocator);
 }
 
 pub fn wakeUp(self: *Alsa) void {
@@ -293,7 +291,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     var bd = &player.backend_data.Alsa;
 
     const snd_stream = alsa_util.aimToStream(device.aim);
-    if (c.snd_pcm_open(&bd.pcm, device.id.ptr, snd_stream, 0) < 0)
+    if (c.snd_pcm_open(&bd.pcm, device.id.ptr, snd_stream, c.SND_PCM_ASYNC) < 0)
         return error.OpeningDevice;
     errdefer _ = c.snd_pcm_close(bd.pcm);
 

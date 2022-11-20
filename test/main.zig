@@ -5,9 +5,11 @@ test "connect()" {
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} connect()\n", .{@tagName(backend)});
-        var a = try soundio.connect(.Alsa, std.testing.allocator);
+        var a = try soundio.connect(backend, std.testing.allocator);
         defer a.deinit();
         try a.flushEvents();
+        for (a.devicesList()) |d|
+            std.debug.print("{s} + {s}\n", .{ d.id, @tagName(d.aim) });
         try std.testing.expect(a.devicesList().len > 0);
     }
 }
@@ -16,7 +18,7 @@ test "waitEvents()" {
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} waitEvents()\n", .{@tagName(backend)});
-        var a = try soundio.connect(.Alsa, std.testing.allocator);
+        var a = try soundio.connect(backend, std.testing.allocator);
         defer a.deinit();
         var wait: u4 = 0;
         while (wait < 4) : (wait += 1) {
