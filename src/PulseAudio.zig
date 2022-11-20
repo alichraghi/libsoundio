@@ -130,7 +130,7 @@ pub fn waitEvents(self: *PulseAudio) !void {
 pub fn wakeUp(self: *PulseAudio) void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
-    self.device_scan_queued.storeUnchecked(true);
+    self.device_scan_queued.store(true, .Release);
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
@@ -334,11 +334,11 @@ fn playbackStreamStateCb(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(
     switch (c.pa_stream_get_state(stream)) {
         c.PA_STREAM_UNCONNECTED, c.PA_STREAM_CREATING, c.PA_STREAM_TERMINATED => {},
         c.PA_STREAM_READY => {
-            bd.stream_ready.storeUnchecked(.ready);
+            bd.stream_ready.store(.ready, .Unordered);
             c.pa_threaded_mainloop_signal(bd.pa.main_loop, 0);
         },
         c.PA_STREAM_FAILED => {
-            bd.stream_ready.storeUnchecked(.failure);
+            bd.stream_ready.store(.failure, .Unordered);
             c.pa_threaded_mainloop_signal(bd.pa.main_loop, 0);
         },
         else => unreachable,
@@ -394,7 +394,7 @@ fn performOperation(main_loop: *c.pa_threaded_mainloop, op: ?*c.pa_operation) !v
 
 fn subscribeCb(_: ?*c.pa_context, _: c.pa_subscription_event_type_t, _: u32, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
-    self.device_scan_queued.storeUnchecked(true);
+    self.device_scan_queued.store(true, .Unordered);
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 

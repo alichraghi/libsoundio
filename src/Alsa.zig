@@ -95,7 +95,7 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
 }
 
 pub fn deinit(self: *Alsa) void {
-    self.aborted.store(true, .Monotonic);
+    self.aborted.store(true, .Unordered);
     self.wakeUpDevicePoll() catch {};
     self.thread.join();
     std.os.close(self.notify_pipe_fd[0]);
@@ -215,7 +215,7 @@ fn deviceEventLoop(self: *Alsa) !void {
         if (got_rescan_event) {
             self.mutex.lock();
             defer self.mutex.unlock();
-            self.device_scan_queued.store(true, .Monotonic);
+            self.device_scan_queued.store(true, .Release);
             self.cond.signal();
         }
     }
@@ -231,7 +231,7 @@ pub fn flushEvents(self: *Alsa) !void {
 
     try self.err;
 
-    self.device_scan_queued.store(false, .Monotonic);
+    self.device_scan_queued.store(false, .Release);
     try self.refreshDevices();
 }
 
@@ -244,7 +244,7 @@ pub fn waitEvents(self: *Alsa) !void {
 
     try self.err;
 
-    self.device_scan_queued.store(false, .Monotonic);
+    self.device_scan_queued.store(false, .Release);
     try self.refreshDevices();
 }
 
@@ -257,7 +257,7 @@ fn refreshDevices(self: *Alsa) !void {
 pub fn wakeUp(self: *Alsa) void {
     self.mutex.lock();
     defer self.mutex.unlock();
-    self.device_scan_queued.store(true, .Monotonic);
+    self.device_scan_queued.store(true, .Release);
     self.cond.signal();
 }
 
@@ -267,9 +267,6 @@ pub const PlayerData = struct {
     period_size: c.snd_pcm_uframes_t,
     sample_buffer: []u8,
     thread: std.Thread,
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
-    suspended: bool,
     aborted: std.atomic.Atomic(bool),
 };
 
@@ -278,9 +275,6 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     player.backend_data = .{
         .Alsa = .{
             .allocator = self.allocator,
-            .mutex = std.Thread.Mutex{},
-            .cond = std.Thread.Condition{},
-            .suspended = false,
             .aborted = .{ .value = false },
             .pcm = null,
             .period_size = undefined,
@@ -339,8 +333,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
 
 pub fn playerDeinit(self: *Player) void {
     var bd = &self.backend_data.Alsa;
-    bd.aborted.store(true, .Monotonic);
-    bd.cond.signal();
+    bd.aborted.store(true, .Unordered);
     bd.thread.join();
     _ = c.snd_pcm_hw_free(bd.pcm);
     _ = c.snd_pcm_close(bd.pcm);
@@ -367,8 +360,6 @@ fn playerLoop(self: *Player) void {
 
     var err: error{WriteFailed}!void = {};
     while (true) {
-        // if (!bd.mutex.tryLock()) continue;
-        // defer bd.mutex.unlock();
         if (bd.aborted.load(.Acquire))
             return;
 
