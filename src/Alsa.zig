@@ -4,6 +4,7 @@ const queryDevices = @import("Alsa/device.zig").queryDevices;
 const alsa_util = @import("Alsa/util.zig");
 const Device = @import("main.zig").Device;
 const Player = @import("main.zig").Player;
+const Range = @import("main.zig").Range;
 const DevicesInfo = @import("main.zig").DevicesInfo;
 const util = @import("util.zig");
 const linux = std.os.linux;
@@ -16,41 +17,26 @@ allocator: std.mem.Allocator,
 mutex: std.Thread.Mutex,
 cond: std.Thread.Condition,
 thread: std.Thread,
+aborted: std.atomic.Atomic(bool),
+device_scan_queued: std.atomic.Atomic(bool),
+err: error{ SystemResources, OutOfMemory }!void,
 devices_info: DevicesInfo,
 notify_fd: linux.fd_t,
 notify_wd: linux.fd_t,
 notify_pipe_fd: [2]linux.fd_t,
-aborted: std.atomic.Atomic(bool),
-device_scan_queued: std.atomic.Atomic(bool),
-err: error{ SystemResources, OutOfMemory }!void,
 
 pub fn connect(allocator: std.mem.Allocator) !*Alsa {
-    var self = try allocator.create(Alsa);
-    errdefer allocator.destroy(self);
-    self.* = .{
-        .allocator = allocator,
-        .mutex = std.Thread.Mutex{},
-        .cond = std.Thread.Condition{},
-        .thread = undefined,
-        .devices_info = DevicesInfo.init(),
-        .notify_fd = undefined,
-        .notify_wd = undefined,
-        .notify_pipe_fd = undefined,
-        .aborted = .{ .value = false },
-        .err = {},
-        .device_scan_queued = .{ .value = false },
-    };
-
-    self.notify_fd = std.os.inotify_init1(linux.IN.NONBLOCK) catch |err| switch (err) {
+    const notify_fd = std.os.inotify_init1(linux.IN.NONBLOCK) catch |err| switch (err) {
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
         error.SystemResources,
         => return error.SystemResources,
         error.Unexpected => unreachable,
     };
+    errdefer std.os.close(notify_fd);
 
-    self.notify_wd = std.os.inotify_add_watch(
-        self.notify_fd,
+    const notify_wd = std.os.inotify_add_watch(
+        notify_fd,
         "/dev/snd",
         linux.IN.CREATE | linux.IN.CLOSE_WRITE | linux.IN.DELETE,
     ) catch |err| switch (err) {
@@ -65,38 +51,57 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
         error.Unexpected,
         => unreachable,
     };
-    errdefer std.os.inotify_rm_watch(self.notify_fd, self.notify_wd);
+    errdefer std.os.inotify_rm_watch(notify_fd, notify_wd);
 
-    self.notify_pipe_fd = std.os.pipe2(linux.O.NONBLOCK) catch |err| switch (err) {
+    const notify_pipe_fd = std.os.pipe2(linux.O.NONBLOCK) catch |err| switch (err) {
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
         => return error.SystemResources,
         error.Unexpected => unreachable,
     };
+    errdefer {
+        std.os.close(notify_pipe_fd[0]);
+        std.os.close(notify_pipe_fd[1]);
+    }
 
+    // zig fmt: off
     _ = c.snd_lib_error_set_handler(@ptrCast(
-        c.snd_lib_error_handler_t,
-        &struct {
-            fn e() callconv(.C) void {}
-        }.e,
-    ));
+            c.snd_lib_error_handler_t,
+            &struct { fn e() callconv(.C) void {} }.e,
+        ));
+    // zig fmt: on
 
-    self.wakeUpDevicePoll() catch return error.SystemResources;
-    self.thread = std.Thread.spawn(.{}, deviceEventLoop, .{self}) catch |err| switch (err) {
-        error.ThreadQuotaExceeded,
-        error.SystemResources,
-        error.LockedMemoryLimitExceeded,
-        => return error.SystemResources,
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Unexpected => unreachable,
+    wakeUpPoll(notify_pipe_fd[1]) catch
+        return error.SystemResources;
+
+    var self = try allocator.create(Alsa);
+    errdefer allocator.destroy(self);
+    self.* = .{
+        .allocator = allocator,
+        .mutex = std.Thread.Mutex{},
+        .cond = std.Thread.Condition{},
+        .thread = std.Thread.spawn(.{}, deviceEventsLoop, .{self}) catch |err| switch (err) {
+            error.ThreadQuotaExceeded,
+            error.SystemResources,
+            error.LockedMemoryLimitExceeded,
+            => return error.SystemResources,
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Unexpected => unreachable,
+        },
+        .aborted = .{ .value = false },
+        .device_scan_queued = .{ .value = false },
+        .err = {},
+        .devices_info = DevicesInfo.init(),
+        .notify_fd = notify_fd,
+        .notify_wd = notify_wd,
+        .notify_pipe_fd = notify_pipe_fd,
     };
-
     return self;
 }
 
 pub fn deinit(self: *Alsa) void {
     self.aborted.store(true, .Unordered);
-    self.wakeUpDevicePoll() catch {};
+    wakeUpPoll(self.notify_pipe_fd[1]) catch {};
     self.thread.join();
     std.os.close(self.notify_pipe_fd[0]);
     std.os.close(self.notify_pipe_fd[1]);
@@ -106,11 +111,11 @@ pub fn deinit(self: *Alsa) void {
     self.allocator.destroy(self);
 }
 
-fn wakeUpDevicePoll(self: *Alsa) !void {
-    _ = try std.os.write(self.notify_pipe_fd[1], "a");
+fn wakeUpPoll(fd: linux.fd_t) !void {
+    _ = try std.os.write(fd, "a");
 }
 
-fn deviceEventLoop(self: *Alsa) !void {
+fn deviceEventsLoop(self: *Alsa) !void {
     var buf: [4096]u8 = undefined;
     var fds = [2]std.os.pollfd{
         .{
@@ -132,7 +137,10 @@ fn deviceEventLoop(self: *Alsa) !void {
     }
 
     while (true) {
-        if (self.aborted.load(.Monotonic)) break;
+        var scan = false;
+
+        if (self.aborted.load(.Unordered)) break;
+
         _ = std.os.poll(&fds, -1) catch |err| switch (err) {
             error.NetworkSubsystemFailed,
             error.SystemResources,
@@ -143,7 +151,7 @@ fn deviceEventLoop(self: *Alsa) !void {
             },
             error.Unexpected => unreachable,
         };
-        var got_rescan_event = false;
+
         if (util.hasFlag(fds[0].revents, linux.POLL.IN)) {
             while (true) {
                 const len = std.os.read(self.notify_fd, &buf) catch |err| {
@@ -154,27 +162,27 @@ fn deviceEventLoop(self: *Alsa) !void {
                 };
                 if (len == 0) break;
 
-                var event: *linux.inotify_event = undefined;
                 var i: usize = 0;
-                while (i < buf.len) : (i += @sizeOf(linux.inotify_event) + event.len) {
-                    event = @ptrCast(*linux.inotify_event, @alignCast(4, buf[i..]));
+                var evt: *linux.inotify_event = undefined;
+                while (i < buf.len) : (i += @sizeOf(linux.inotify_event) + evt.len) {
+                    evt = @ptrCast(*linux.inotify_event, @alignCast(4, buf[i..]));
 
-                    if (!(util.hasFlag(event.mask, linux.IN.CLOSE_WRITE) or
-                        util.hasFlag(event.mask, linux.IN.DELETE) or
-                        util.hasFlag(event.mask, linux.IN.CREATE)))
+                    if (!(util.hasFlag(evt.mask, linux.IN.CLOSE_WRITE) or
+                        util.hasFlag(evt.mask, linux.IN.DELETE) or
+                        util.hasFlag(evt.mask, linux.IN.CREATE)))
                         continue;
-                    if (util.hasFlag(event.mask, linux.IN.ISDIR))
+                    if (util.hasFlag(evt.mask, linux.IN.ISDIR))
                         continue;
-                    if (event.len < 8 or std.mem.eql(u8, eventName(buf[i..], 8), "controlC"))
+                    if (evt.len < 8 or std.mem.startsWith(u8, eventName(evt), "controlC"))
                         continue;
 
-                    if (util.hasFlag(event.mask, linux.IN.CREATE)) {
-                        const event_name = self.allocator.dupe(u8, eventName(buf[i..], event.len)) catch {
+                    if (util.hasFlag(evt.mask, linux.IN.CREATE)) {
+                        const evt_name = self.allocator.dupe(u8, eventName(evt)) catch {
                             self.wakeUp();
                             self.err = error.OutOfMemory;
                             return;
                         };
-                        pending_files.append(event_name) catch {
+                        pending_files.append(evt_name) catch {
                             self.wakeUp();
                             self.err = error.OutOfMemory;
                             return;
@@ -183,25 +191,25 @@ fn deviceEventLoop(self: *Alsa) !void {
                     }
 
                     if (pending_files.items.len > 0) {
-                        if (!util.hasFlag(event.mask, linux.IN.CLOSE_WRITE))
+                        if (!util.hasFlag(evt.mask, linux.IN.CLOSE_WRITE))
                             continue;
 
                         for (pending_files.items) |file, j| {
-                            if (std.mem.eql(u8, file, eventName(buf[i..], event.len))) {
+                            if (std.mem.eql(u8, file, eventName(evt))) {
                                 self.allocator.free(pending_files.swapRemove(j));
                                 if (pending_files.items.len == 0)
-                                    got_rescan_event = true;
+                                    scan = true;
                                 break;
                             }
                         }
-                    } else if (util.hasFlag(event.mask, linux.IN.DELETE)) {
-                        got_rescan_event = true;
+                    } else if (util.hasFlag(evt.mask, linux.IN.DELETE)) {
+                        scan = true;
                     }
                 }
             }
         }
         if (util.hasFlag(fds[1].revents, linux.POLL.IN)) {
-            got_rescan_event = true;
+            scan = true;
             while (true) {
                 const len = std.os.read(self.notify_pipe_fd[0], &buf) catch |err| {
                     if (err == error.WouldBlock) break;
@@ -212,7 +220,7 @@ fn deviceEventLoop(self: *Alsa) !void {
                 if (len == 0) break;
             }
         }
-        if (got_rescan_event) {
+        if (scan) {
             self.mutex.lock();
             defer self.mutex.unlock();
             self.device_scan_queued.store(true, .Release);
@@ -221,8 +229,10 @@ fn deviceEventLoop(self: *Alsa) !void {
     }
 }
 
-fn eventName(self: []const u8, len: usize) []const u8 {
-    return self.ptr[@sizeOf(linux.inotify_event) .. @sizeOf(linux.inotify_event) + std.math.min(max_snd_file_len, len)];
+fn eventName(evt: *const linux.inotify_event) []const u8 {
+    const size = @sizeOf(linux.inotify_event);
+    const bytes = @ptrCast([*]const u8, std.mem.asBytes(evt));
+    return bytes[size .. size + evt.len];
 }
 
 pub fn flushEvents(self: *Alsa) !void {
@@ -263,11 +273,15 @@ pub fn wakeUp(self: *Alsa) void {
 
 pub const PlayerData = struct {
     allocator: std.mem.Allocator,
+    thread: std.Thread,
+    aborted: std.atomic.Atomic(bool),
     pcm: ?*c.snd_pcm_t,
     period_size: c.snd_pcm_uframes_t,
     sample_buffer: []u8,
-    thread: std.Thread,
-    aborted: std.atomic.Atomic(bool),
+    mixer: ?*c.snd_mixer_t,
+    selem: ?*c.snd_mixer_selem_id_t,
+    mixer_elm: ?*c.snd_mixer_elem_t,
+    volume_range: Range(c_long),
 };
 
 pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
@@ -275,11 +289,15 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     player.backend_data = .{
         .Alsa = .{
             .allocator = self.allocator,
+            .thread = undefined,
             .aborted = .{ .value = false },
             .pcm = null,
             .period_size = undefined,
             .sample_buffer = undefined,
-            .thread = undefined,
+            .mixer = undefined,
+            .selem = undefined,
+            .mixer_elm = undefined,
+            .volume_range = .{ .min = 0, .max = 0 },
         },
     };
     var bd = &player.backend_data.Alsa;
@@ -329,14 +347,35 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
         return error.IncompatibleDevice;
 
     bd.sample_buffer = try bd.allocator.alloc(u8, buf_size);
+
+    if (c.snd_mixer_open(&bd.mixer, 0) < 0)
+        return error.OpeningDevice;
+    const card_id = try self.allocator.dupeZ(u8, std.mem.sliceTo(device.id, ','));
+    defer self.allocator.free(card_id);
+    if (c.snd_mixer_attach(bd.mixer, card_id.ptr) < 0)
+        return error.OpeningDevice;
+    if (c.snd_mixer_selem_register(bd.mixer, null, null) < 0)
+        return error.OpeningDevice;
+    if (c.snd_mixer_load(bd.mixer) < 0)
+        return error.OpeningDevice;
+
+    if (c.snd_mixer_selem_id_malloc(&bd.selem) < 0)
+        return error.OutOfMemory;
+    c.snd_mixer_selem_id_set_index(bd.selem, 0);
+    c.snd_mixer_selem_id_set_name(bd.selem, "Master"); // current device
+    bd.mixer_elm = c.snd_mixer_find_selem(bd.mixer, bd.selem);
+    if (c.snd_mixer_selem_get_playback_volume_range(bd.mixer_elm, &bd.volume_range.min, &bd.volume_range.max) < 0)
+        return error.OpeningDevice;
 }
 
 pub fn playerDeinit(self: *Player) void {
     var bd = &self.backend_data.Alsa;
     bd.aborted.store(true, .Unordered);
     bd.thread.join();
-    _ = c.snd_pcm_hw_free(bd.pcm);
+    _ = c.snd_mixer_close(bd.mixer);
+    c.snd_mixer_selem_id_free(bd.selem);
     _ = c.snd_pcm_close(bd.pcm);
+    _ = c.snd_pcm_hw_free(bd.pcm);
     bd.allocator.free(bd.sample_buffer);
 }
 
@@ -360,8 +399,7 @@ fn playerLoop(self: *Player) void {
 
     var err: error{WriteFailed}!void = {};
     while (true) {
-        if (bd.aborted.load(.Acquire))
-            return;
+        if (bd.aborted.load(.Unordered)) return;
 
         var frames_left = bd.period_size;
         while (frames_left > 0) {
@@ -379,17 +417,42 @@ fn playerLoop(self: *Player) void {
 
 pub fn playerPausePlay(self: *Player, pause: bool) !void {
     var bd = &self.backend_data.Alsa;
-    _ = c.snd_pcm_pause(bd.pcm, @boolToInt(pause));
+    if (c.snd_pcm_pause(bd.pcm, @boolToInt(pause)) < 0) {
+        return if (pause)
+            error.CannotPause
+        else
+            error.CannotPlay;
+    }
 }
 
 pub fn playerSetVolume(self: *Player, volume: f64) !void {
-    _ = self;
-    _ = volume;
+    var bd = &self.backend_data.Alsa;
+
+    if (c.snd_mixer_selem_set_playback_volume_all(
+        bd.mixer_elm,
+        @floatToInt(
+            c_long,
+            @intToFloat(f64, bd.volume_range.max - bd.volume_range.min) *
+                volume +
+                @intToFloat(f64, bd.volume_range.min),
+        ),
+    ) < 0) unreachable;
 }
 
 pub fn playerVolume(self: *Player) error{}!f64 {
-    _ = self;
-    return undefined;
+    var bd = &self.backend_data.Alsa;
+
+    var volume: c_long = 0;
+    var channel: c_int = 0;
+
+    while (channel < c.SND_MIXER_SCHN_LAST) : (channel += 1) {
+        if (c.snd_mixer_selem_has_playback_channel(bd.mixer_elm, channel) == 1) {
+            if (c.snd_mixer_selem_get_playback_volume(bd.mixer_elm, channel, &volume) == 0)
+                break;
+        }
+    }
+
+    return @intToFloat(f64, volume) / @intToFloat(f64, bd.volume_range.max);
 }
 
 pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {

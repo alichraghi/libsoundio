@@ -232,14 +232,14 @@ pub const Player = struct {
         };
     }
 
-    pub fn pause(self: *Player) StreamError!void {
+    pub fn pause(self: *Player) (StreamError || error{ CannotPlay, CannotPause })!void {
         switch (current_backend.?) {
             inline else => |b| try @field(This, @tagName(b)).playerPausePlay(self, true),
         }
         self.paused = true;
     }
 
-    pub fn play(self: *Player) StreamError!void {
+    pub fn play(self: *Player) (StreamError || error{ CannotPlay, CannotPause })!void {
         if (!self.paused) return;
         switch (current_backend.?) {
             inline else => |b| try @field(This, @tagName(b)).playerPausePlay(self, false),

@@ -1,4 +1,5 @@
 # TODO
 
 -   [ ] Pulseaudio: use getError correctly
--   [ ] Alsa: SELECT BEST DEFAULT DEVICE
+-   [ ] Alsa: check for nulls
+-   [ ] Alsa: Error handling

@@ -246,26 +246,47 @@ pub fn playerPausePlay(self: *Player, pause: bool) !void {
 
 pub fn playerSetVolume(self: *Player, volume: f64) !void {
     var bd = &self.backend_data.PulseAudio;
+
+    if (c.pa_threaded_mainloop_in_thread(bd.pa.main_loop) == 0)
+        c.pa_threaded_mainloop_lock(bd.pa.main_loop);
+    defer if (c.pa_threaded_mainloop_in_thread(bd.pa.main_loop) == 0)
+        c.pa_threaded_mainloop_unlock(bd.pa.main_loop);
+
     var v: c.pa_cvolume = undefined;
     _ = c.pa_cvolume_init(&v);
     v.channels = @intCast(u5, self.channels.len);
     const vol = @floatToInt(u32, @intToFloat(f64, c.PA_VOLUME_NORM) * volume);
     for (self.channels.slice()) |_, i|
         v.values[i] = vol;
+
     try performOperation(
         bd.pa.main_loop,
         c.pa_context_set_sink_input_volume(
             bd.pa.pulse_context,
             c.pa_stream_get_index(bd.stream),
             &v,
-            null,
-            null,
+            opSuccessCb,
+            bd,
         ),
     );
 }
 
+fn opSuccessCb(_: ?*c.pa_context, success: c_int, userdata: ?*anyopaque) callconv(.C) void {
+    var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
+
+    if (success == 1) {
+        c.pa_threaded_mainloop_signal(bd.pa.main_loop, 0);
+    }
+}
+
 pub fn playerVolume(self: *Player) !f64 {
     var bd = &self.backend_data.PulseAudio;
+
+    if (c.pa_threaded_mainloop_in_thread(bd.pa.main_loop) == 0)
+        c.pa_threaded_mainloop_lock(bd.pa.main_loop);
+    defer if (c.pa_threaded_mainloop_in_thread(bd.pa.main_loop) == 0)
+        c.pa_threaded_mainloop_unlock(bd.pa.main_loop);
+
     try performOperation(
         bd.pa.main_loop,
         c.pa_context_get_sink_input_info(

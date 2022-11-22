@@ -8,21 +8,34 @@ test "connect()" {
         var a = try soundio.connect(backend, std.testing.allocator);
         defer a.deinit();
         try a.flushEvents();
-        for (a.devicesList()) |d|
-            std.debug.print("{s} + {s}\n", .{ d.id, @tagName(d.aim) });
         try std.testing.expect(a.devicesList().len > 0);
     }
 }
 
+test "wakeUp()" {
+    std.debug.print("\n", .{});
+    inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
+        std.debug.print("{s} wakeUp()\n", .{@tagName(backend)});
+        var a = try soundio.connect(backend, std.testing.allocator);
+        defer a.deinit();
+        var wait: usize = 4;
+        while (wait > 0) : (wait -= 1) {
+            a.wakeUp();
+            try a.waitEvents();
+        }
+    }
+}
+
 test "waitEvents()" {
+    // if (true) return error.SkipZigTest;
+
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} waitEvents()\n", .{@tagName(backend)});
         var a = try soundio.connect(backend, std.testing.allocator);
         defer a.deinit();
-        var wait: u4 = 0;
-        while (wait < 4) : (wait += 1) {
-            a.wakeUp();
+        var wait: usize = 4;
+        while (wait > 0) : (wait -= 1) {
             try a.waitEvents();
         }
     }
@@ -79,22 +92,22 @@ test "Sine Wave (pause, play)" {
         // std.time.sleep(std.time.ns_per_ms * 1000);
         // p5.deinit();
 
-        std.time.sleep(std.time.ns_per_ms * 2000);
-        try p.pause();
-        std.time.sleep(std.time.ns_per_ms * 2000);
-        try p.play();
-        std.time.sleep(std.time.ns_per_ms * 2000);
-        try p.pause();
-        std.time.sleep(std.time.ns_per_ms * 500);
-        try p.play();
-        std.time.sleep(std.time.ns_per_ms * 500);
-        // var v: f64 = 0.7;
-        // while (v > 0.15) : (v -= 0.0005) {
-        //     try o.setVolume(v);
-        //     std.time.sleep(std.time.ns_per_ms * 5);
-        // }
-        // const volume = try o.volume();
-        // try std.testing.expect(volume > 0.1499 and volume <= 0.15);
+        // std.time.sleep(std.time.ns_per_ms * 2000);
+        // try p.pause();
+        // std.time.sleep(std.time.ns_per_ms * 2000);
+        // try p.play();
+        // std.time.sleep(std.time.ns_per_ms * 2000);
+        // try p.pause();
+        // std.time.sleep(std.time.ns_per_ms * 500);
+        // try p.play();
+        // std.time.sleep(std.time.ns_per_ms * 500);
+        var v: f64 = 1.0;
+        while (v > 0.15) : (v -= 0.0005) {
+            try p.setVolume(v);
+            std.time.sleep(std.time.ns_per_ms * 5);
+        }
+        const volume = try p.volume();
+        try std.testing.expect(volume > 0.149 and volume <= 0.15);
         std.debug.print("\n", .{});
     }
 }
