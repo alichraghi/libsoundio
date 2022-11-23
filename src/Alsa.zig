@@ -20,7 +20,6 @@ cond: std.Thread.Condition,
 thread: std.Thread,
 aborted: std.atomic.Atomic(bool),
 device_scan_queued: std.atomic.Atomic(bool),
-err: error{ SystemResources, OutOfMemory }!void,
 devices_info: DevicesInfo,
 notify_fd: linux.fd_t,
 notify_wd: linux.fd_t,
@@ -89,7 +88,6 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
         },
         .aborted = .{ .value = false },
         .device_scan_queued = .{ .value = false },
-        .err = {},
         .devices_info = DevicesInfo.init(),
         .notify_fd = notify_fd,
         .notify_wd = notify_wd,
@@ -98,6 +96,7 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
     return self;
 }
 
+// self.thread.impl.thread.completion.load(.Unordered) == .deatched
 pub fn deinit(self: *Alsa) void {
     self.aborted.store(true, .Unordered);
 
@@ -115,7 +114,8 @@ pub fn deinit(self: *Alsa) void {
 }
 
 fn deviceEventsLoop(self: *Alsa) !void {
-    var buf: [4096]u8 = undefined;
+    var last_crash: ?i64 = null;
+    var buf: [2048]u8 = undefined;
     var fds = [2]std.os.pollfd{
         .{
             .fd = self.notify_fd,
@@ -138,9 +138,12 @@ fn deviceEventsLoop(self: *Alsa) !void {
             error.NetworkSubsystemFailed,
             error.SystemResources,
             => {
-                self.wakeUp();
-                self.err = error.SystemResources;
-                return;
+                const ts = std.time.milliTimestamp();
+                if (last_crash != null and ts - last_crash.? < 500) {
+                    return;
+                }
+                last_crash = ts;
+                continue;
             },
             error.Unexpected => unreachable,
         };
@@ -149,9 +152,12 @@ fn deviceEventsLoop(self: *Alsa) !void {
             while (true) {
                 const len = std.os.read(self.notify_fd, &buf) catch |err| {
                     if (err == error.WouldBlock) break;
-                    self.wakeUp();
-                    self.err = error.SystemResources;
-                    return;
+                    const ts = std.time.milliTimestamp();
+                    if (last_crash != null and ts - last_crash.? < 500) {
+                        return;
+                    }
+                    last_crash = ts;
+                    break;
                 };
                 if (len == 0) break;
 
@@ -161,8 +167,9 @@ fn deviceEventsLoop(self: *Alsa) !void {
                     evt = @ptrCast(*linux.inotify_event, @alignCast(4, buf[i..]));
                     const evt_name = @ptrCast([*]u8, buf[i..])[@sizeOf(linux.inotify_event) .. @sizeOf(linux.inotify_event) + 8];
 
-                    if (util.hasFlag(evt.mask, linux.IN.ISDIR) or !std.mem.startsWith(u8, evt_name, "pcm"))
+                    if (util.hasFlag(evt.mask, linux.IN.ISDIR) or !std.mem.startsWith(u8, evt_name, "pcm")) {
                         continue;
+                    }
 
                     scan = true;
                 }
@@ -182,8 +189,6 @@ pub fn flushEvents(self: *Alsa) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
 
-    try self.err;
-
     self.device_scan_queued.store(false, .Release);
     try self.refreshDevices();
 }
@@ -194,8 +199,6 @@ pub fn waitEvents(self: *Alsa) !void {
     while (!self.device_scan_queued.load(.Acquire))
         self.cond.wait(&self.mutex);
 
-    try self.err;
-
     self.device_scan_queued.store(false, .Release);
     try self.refreshDevices();
 }
@@ -205,9 +208,10 @@ fn refreshDevices(self: *Alsa) !void {
     try queryDevices(&self.devices_info, self.allocator);
 }
 
-pub fn wakeUp(self: *Alsa) void {
+pub fn wakeUp(self: *Alsa) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
+
     self.device_scan_queued.store(true, .Release);
     self.cond.signal();
 }
@@ -226,6 +230,9 @@ pub const PlayerData = struct {
 };
 
 pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
+    self.mutex.lock();
+    defer self.mutex.unlock();
+
     const snd_stream = alsa_util.aimToStream(device.aim);
     const format = alsa_util.toAlsaFormat(player.format) catch return error.IncompatibleBackend;
     var pcm: ?*c.snd_pcm_t = null;
@@ -278,6 +285,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
 
     {
         var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(u6, player.channels.len) };
+
         for (player.channels.slice()) |ch, i| {
             chmap.pos()[i] = alsa_util.toAlsaChmapPos(ch.id);
         }
@@ -385,6 +393,7 @@ fn playerLoop(self: *Player) void {
 
 pub fn playerPausePlay(self: *Player, pause: bool) !void {
     var bd = &self.backend_data.Alsa;
+
     if (c.snd_pcm_pause(bd.pcm, @boolToInt(pause)) < 0) {
         if (pause) {
             return error.CannotPause;

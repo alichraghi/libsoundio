@@ -91,7 +91,7 @@ const SoundIO = union(Backend) {
         current_backend = null;
     }
 
-    pub const FlushEventsError = error{
+    pub const EventsError = error{
         OutOfMemory,
         Disconnected,
         OperationCanceled,
@@ -101,19 +101,21 @@ const SoundIO = union(Backend) {
         SystemResources,
     };
 
-    pub fn flushEvents(self: SoundIO) FlushEventsError!void {
+    pub fn flushEvents(self: SoundIO) EventsError!void {
         return switch (self) {
             inline else => |b| b.flushEvents(),
         };
     }
 
-    pub fn waitEvents(self: SoundIO) FlushEventsError!void {
+    pub fn waitEvents(self: SoundIO) EventsError!void {
         return switch (self) {
             inline else => |b| b.waitEvents(),
         };
     }
 
-    pub fn wakeUp(self: SoundIO) void {
+    pub const WakeUpError = error{};
+
+    pub fn wakeUp(self: SoundIO) WakeUpError!void {
         return switch (self) {
             inline else => |b| b.wakeUp(),
         };

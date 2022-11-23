@@ -20,7 +20,7 @@ test "wakeUp()" {
         defer a.deinit();
         var wait: usize = 4;
         while (wait > 0) : (wait -= 1) {
-            a.wakeUp();
+            try a.wakeUp();
             try a.waitEvents();
         }
     }

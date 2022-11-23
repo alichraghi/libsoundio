@@ -231,7 +231,7 @@ pub fn playerPausePlay(self: *Player, pause: bool) !void {
         c.pa_threaded_mainloop_unlock(bd.pa.main_loop);
 
     if (pause != (c.pa_stream_is_corked(bd.stream) != 0)) {
-        const op = c.pa_stream_cork(bd.stream, if (pause) 1 else 0, null, null) orelse
+        const op = c.pa_stream_cork(bd.stream, @boolToInt(pause), null, null) orelse
             return error.StreamDisconnected;
         c.pa_operation_unref(op);
     }
