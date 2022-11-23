@@ -5,7 +5,7 @@ test "connect()" {
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} connect()\n", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.testing.allocator);
+        var a = try soundio.connect(backend, std.heap.c_allocator);
         defer a.deinit();
         try a.flushEvents();
         try std.testing.expect(a.devicesList().len > 0);
@@ -16,7 +16,7 @@ test "wakeUp()" {
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} wakeUp()\n", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.testing.allocator);
+        var a = try soundio.connect(backend, std.heap.c_allocator);
         defer a.deinit();
         var wait: usize = 4;
         while (wait > 0) : (wait -= 1) {
@@ -27,14 +27,14 @@ test "wakeUp()" {
 }
 
 test "waitEvents()" {
-    if (false) return error.SkipZigTest;
+    if (true) return error.SkipZigTest;
 
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} waitEvents()\n", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.testing.allocator);
+        var a = try soundio.connect(backend, std.heap.c_allocator);
         defer a.deinit();
-        var wait: usize = 7;
+        var wait: usize = 4;
         while (wait > 0) : (wait -= 1) {
             try a.waitEvents();
             std.debug.print("finished\n", .{});
@@ -46,70 +46,28 @@ test "Sine Wave (pause, play)" {
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} Sine Wave", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.testing.allocator);
+        var a = try soundio.connect(backend, std.heap.c_allocator);
         defer a.deinit();
         try a.flushEvents();
-        const device = a.getDevice(.playback, null) orelse {
-            std.debug.print(": No default device found (SKIPPING)\n", .{});
-            break;
-        };
+        const device = a.getDevice(.playback, null) orelse return error.SkipZigTest;
 
-        // if (backend != .PulseAudio) {
         var p = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i16 });
         defer p.deinit();
         try p.start();
-        // }
+        try p.setVolume(0.7);
+        std.time.sleep(std.time.ns_per_s);
 
-        // var p1 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i16 });
-        // try p1.start();
-        // std.time.sleep(std.time.ns_per_ms * 1000);
-        // p1.deinit();
+        try p.setVolume(0.5);
+        std.time.sleep(std.time.ns_per_s);
 
-        // std.time.sleep(std.time.ns_per_ms * 300);
+        try p.setVolume(0.3);
+        std.time.sleep(std.time.ns_per_s);
 
-        // var p2 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i24 });
-        // try p2.start();
-        // std.time.sleep(std.time.ns_per_ms * 1000);
-        // p2.deinit();
-
-        // std.time.sleep(std.time.ns_per_ms * 300);
-
-        // var p3 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i24_3b });
-        // try p3.start();
-        // std.time.sleep(std.time.ns_per_ms * 1000);
-        // p3.deinit();
-
-        // std.time.sleep(std.time.ns_per_ms * 300);
-
-        // var p4 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i32 });
-        // try p4.start();
-        // std.time.sleep(std.time.ns_per_ms * 1000);
-        // p4.deinit();
-
-        // std.time.sleep(std.time.ns_per_ms * 300);
-
-        // var p5 = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .f32 });
-        // try p5.start();
-        // std.time.sleep(std.time.ns_per_ms * 1000);
-        // p5.deinit();
-
-        // std.time.sleep(std.time.ns_per_ms * 2000);
-        // try p.pause();
-        // std.time.sleep(std.time.ns_per_ms * 2000);
-        // try p.play();
-        // std.time.sleep(std.time.ns_per_ms * 2000);
-        // try p.pause();
-        // std.time.sleep(std.time.ns_per_ms * 500);
-        // try p.play();
-        // std.time.sleep(std.time.ns_per_ms * 500);
-        var v: f64 = 1.0;
-        while (v > 0.15) : (v -= 0.0005) {
-            try p.setVolume(v);
-            std.time.sleep(std.time.ns_per_ms * 5);
-        }
+        try p.setVolume(0.12);
         const volume = try p.volume();
-        try std.testing.expect(volume > 0.149 and volume <= 0.15);
-        std.debug.print("\n", .{});
+        try std.testing.expect(volume >= 0.11);
+
+        std.debug.print("{d}\n", .{volume});
     }
 }
 
@@ -120,18 +78,18 @@ fn writeCallback(self_opaque: *anyopaque, err: soundio.Player.WriteError!void, n
     err catch unreachable;
     var self = @ptrCast(*soundio.Player, @alignCast(@alignOf(soundio.Player), self_opaque));
 
-    var frame: usize = 0;
-    var r = std.rand.DefaultPrng.init(@intCast(u64, std.time.timestamp()));
-    while (frame < n_frame) : (frame += 1) {
-        const sample = r.random().int(i16);
-        self.writeAll(frame, sample);
-    }
-
-    // const seconds_per_frame = 1.0 / @intToFloat(f32, self.sample_rate);
     // var frame: usize = 0;
+    // var r = std.rand.DefaultPrng.init(@intCast(u64, std.time.timestamp()));
     // while (frame < n_frame) : (frame += 1) {
-    //     const sample = std.math.sin((seconds_offset + @intToFloat(f32, frame) * seconds_per_frame) * radians_per_second);
+    //     const sample = r.random().int(i16);
     //     self.writeAll(frame, sample);
     // }
-    // seconds_offset = @mod(seconds_offset + seconds_per_frame * @intToFloat(f32, n_frame), 1.0);
+
+    const seconds_per_frame = 1.0 / @intToFloat(f32, self.sample_rate);
+    var frame: usize = 0;
+    while (frame < n_frame) : (frame += 1) {
+        const sample = std.math.sin((seconds_offset + @intToFloat(f32, frame) * seconds_per_frame) * radians_per_second);
+        self.writeAll(frame, sample);
+    }
+    seconds_offset = @mod(seconds_offset + seconds_per_frame * @intToFloat(f32, n_frame), 1.0);
 }

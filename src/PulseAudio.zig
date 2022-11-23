@@ -177,7 +177,7 @@ pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
     c.pa_stream_set_state_callback(bd.stream, playbackStreamStateCb, bd);
     bd.buf_attr = .{
         .maxlength = std.math.maxInt(u32),
-        .tlength = @intCast(u32, c.pa_usec_to_bytes(player.latency, &sample_spec)),
+        .tlength = std.math.maxInt(u32),
         .prebuf = 0,
         .minreq = std.math.maxInt(u32),
         .fragsize = std.math.maxInt(u32),
@@ -198,13 +198,6 @@ pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
     }
 
     try performOperation(self.main_loop, c.pa_stream_update_timing_info(bd.stream, timingUpdateCb, self));
-
-    // get real latency
-    if (c.pa_stream_get_timing_info(bd.stream)) |timing_info| {
-        if (timing_info.*.sink_usec > 0) {
-            player.latency = timing_info.*.sink_usec;
-        }
-    }
 }
 
 pub fn playerDeinit(self: *Player) void {

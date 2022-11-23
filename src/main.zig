@@ -21,8 +21,9 @@ comptime {
 }
 
 pub const max_channels = 24;
-pub const min_sample_rate = 8000;
-pub const max_sample_rate = 5644800;
+pub const min_sample_rate = 8_000; // Hz
+pub const max_sample_rate = 5_644_800; // Hz
+pub const default_latency = 500 * std.time.ms_per_s; // μs
 
 var current_backend: ?Backend = null;
 
@@ -144,39 +145,37 @@ const SoundIO = union(Backend) {
 
     pub const PlayerOptions = struct {
         writeFn: Player.WriteFn,
-        name: [:0]const u8 = "SoundIoPlayer",
-        latency: u64 = 500000,
-        sample_rate: u32 = 44100,
+        name: [:0]const u8 = "Mach Engine",
+        sample_rate: u32 = 44_100,
         format: ?Format = null,
         userdata: ?*anyopaque = null,
     };
 
     pub fn createPlayer(self: SoundIO, device: Device, options: PlayerOptions) CreateStreamError!Player {
-        var final_fmt: Format = undefined;
-        if (options.format) |format| {
-            var fmt_found = false;
-            for (device.formats) |fmt| {
-                if (format == fmt) {
-                    fmt_found = true;
-                    final_fmt = fmt;
+        var format: ?Format = null;
+        if (options.format) |_| {
+            for (device.formats) |dfmt| {
+                if (options.format.? == dfmt) {
+                    format = dfmt;
                     break;
                 }
             }
-            if (!fmt_found) return error.IncompatibleDevice;
+            if (format == null)
+                return error.IncompatibleDevice;
         } else {
-            final_fmt = device.formats[0];
+            format = device.preferredFormat();
         }
+
         var player = Player{
             .backend_data = undefined,
             .writeFn = options.writeFn,
             .userdata = options.userdata,
             .name = options.name,
             .channels = device.channels,
-            .latency = options.latency,
-            .sample_rate = device.nearestSampleRate(options.sample_rate),
-            .format = final_fmt,
-            .bytes_per_frame = final_fmt.bytesPerFrame(@intCast(u5, device.channels.len)),
-            .bytes_per_sample = final_fmt.bytesPerSample(),
+            .sample_rate = device.rate_range.clamp(options.sample_rate),
+            .format = format.?,
+            .bytes_per_frame = format.?.bytesPerFrame(@intCast(u5, device.channels.len)),
+            .bytes_per_sample = format.?.bytesPerSample(),
             .paused = false,
         };
         switch (self) {
@@ -207,7 +206,6 @@ pub const Player = struct {
     userdata: ?*anyopaque,
     name: [:0]const u8,
     channels: ChannelsArray,
-    latency: u64,
     sample_rate: u32,
     format: Format,
     bytes_per_frame: u32,
@@ -252,6 +250,7 @@ pub const Player = struct {
         OperationCanceled,
     };
 
+    // ±0.09
     pub fn setVolume(self: *Player, vol: f64) GetVolumeError!void {
         std.debug.assert(vol <= 1.0);
         return switch (current_backend.?) {
@@ -281,12 +280,12 @@ pub const Player = struct {
             i32 => self.writei32(channel, frame, sample),
             u32 => self.writeu32(channel, frame, sample),
             f32 => self.writef32(channel, frame, sample),
-            f64 => self.writef32(channel, frame, sample),
+            f64 => self.writef64(channel, frame, sample),
             else => @compileError("invalid sample type"),
         }
     }
 
-    pub fn writei8(self: *Player, channel: usize, frame: usize, sample: i8) void {
+    pub inline fn writei8(self: *Player, channel: usize, frame: usize, sample: i8) void {
         var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
         switch (self.format) {
             .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = sample,
@@ -304,7 +303,7 @@ pub const Player = struct {
         }
     }
 
-    pub fn writeu8(self: *Player, channel: usize, frame: usize, sample: u8) void {
+    pub inline fn writeu8(self: *Player, channel: usize, frame: usize, sample: u8) void {
         var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
@@ -322,7 +321,7 @@ pub const Player = struct {
         }
     }
 
-    pub fn writei16(self: *Player, channel: usize, frame: usize, sample: i16) void {
+    pub inline fn writei16(self: *Player, channel: usize, frame: usize, sample: i16) void {
         var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
@@ -340,7 +339,7 @@ pub const Player = struct {
         }
     }
 
-    pub fn writeu16(self: *Player, channel: usize, frame: usize, sample: u16) void {
+    pub inline fn writeu16(self: *Player, channel: usize, frame: usize, sample: u16) void {
         var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
@@ -358,7 +357,7 @@ pub const Player = struct {
         }
     }
 
-    pub fn writei24(self: *Player, channel: usize, frame: usize, sample: i24) void {
+    pub inline fn writei24(self: *Player, channel: usize, frame: usize, sample: i24) void {
         var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
@@ -376,7 +375,7 @@ pub const Player = struct {
         }
     }
 
-    pub fn writeu24(self: *Player, channel: usize, frame: usize, sample: u24) void {
+    pub inline fn writeu24(self: *Player, channel: usize, frame: usize, sample: u24) void {
         var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
@@ -394,7 +393,7 @@ pub const Player = struct {
         }
     }
 
-    pub fn writei32(self: *Player, channel: usize, frame: usize, sample: i32) void {
+    pub inline fn writei32(self: *Player, channel: usize, frame: usize, sample: i32) void {
         var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
@@ -412,7 +411,7 @@ pub const Player = struct {
         }
     }
 
-    pub fn writeu32(self: *Player, channel: usize, frame: usize, sample: u32) void {
+    pub inline fn writeu32(self: *Player, channel: usize, frame: usize, sample: u32) void {
         var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
@@ -430,7 +429,7 @@ pub const Player = struct {
         }
     }
 
-    pub fn writef32(self: *Player, channel: usize, frame: usize, sample: f32) void {
+    pub inline fn writef32(self: *Player, channel: usize, frame: usize, sample: f32) void {
         var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
         switch (self.format) {
             .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = f32ToSigned(i8, sample),
@@ -448,7 +447,7 @@ pub const Player = struct {
         }
     }
 
-    pub fn writef64(self: *Player, channel: usize, frame: usize, sample: f64) void {
+    pub inline fn writef64(self: *Player, channel: usize, frame: usize, sample: f64) void {
         var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
@@ -492,8 +491,14 @@ pub const Device = struct {
         };
     }
 
-    pub fn nearestSampleRate(self: Device, sample_rate: u32) u32 {
-        return std.math.clamp(sample_rate, self.rate_range.min, self.rate_range.max);
+    pub fn preferredFormat(self: Device) Format {
+        var best: u4 = 0;
+        for (self.formats) |fmt| {
+            if (@enumToInt(fmt) > best) {
+                best = @enumToInt(fmt);
+            }
+        }
+        return @intToEnum(Format, best);
     }
 };
 
@@ -669,8 +674,8 @@ pub fn Range(comptime T: type) type {
         min: T,
         max: T,
 
-        pub fn in(self: Self, num: T) bool {
-            return if (num >= self.min and num <= self.max) true else false;
+        pub fn clamp(self: Self, val: T) T {
+            return std.math.clamp(val, self.min, self.max);
         }
     };
 }
