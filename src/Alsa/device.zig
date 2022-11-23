@@ -49,18 +49,16 @@ pub fn queryDevices(devices_info: *DevicesInfo, allocator: std.mem.Allocator) !v
             const snd_stream = util.aimToStream(aim);
             c.snd_pcm_info_set_stream(pcm_info, snd_stream);
             const err = c.snd_ctl_pcm_info(ctl, pcm_info);
-            if (err < 0) {
-                switch (std.os.linux.getErrno(@intCast(usize, -err))) {
-                    .SUCCESS => {},
-                    .NOENT,
-                    .NXIO,
-                    .NODEV,
-                    => break,
-                    else => return error.SystemResources,
-                }
+            switch (@intToEnum(std.os.linux.E, -err)) {
+                .SUCCESS => {},
+                .NOENT,
+                .NXIO,
+                .NODEV,
+                => break,
+                else => return error.SystemResources,
             }
 
-            var buf: [8]u8 = undefined; // max card|device is 99
+            var buf: [8]u8 = undefined; // max card|device num is 2 digit
             const id = std.fmt.bufPrintZ(&buf, "hw:{d},{d}", .{ card_index, device_index }) catch continue;
 
             var pcm: ?*c.snd_pcm_t = null;

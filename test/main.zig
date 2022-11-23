@@ -27,16 +27,17 @@ test "wakeUp()" {
 }
 
 test "waitEvents()" {
-    // if (true) return error.SkipZigTest;
+    if (false) return error.SkipZigTest;
 
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} waitEvents()\n", .{@tagName(backend)});
         var a = try soundio.connect(backend, std.testing.allocator);
         defer a.deinit();
-        var wait: usize = 4;
+        var wait: usize = 7;
         while (wait > 0) : (wait -= 1) {
             try a.waitEvents();
+            std.debug.print("finished\n", .{});
         }
     }
 }
