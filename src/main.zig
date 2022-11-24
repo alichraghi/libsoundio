@@ -94,7 +94,6 @@ const SoundIO = union(Backend) {
     pub const EventsError = error{
         OutOfMemory,
         Disconnected,
-        OperationCanceled,
         IncompatibleBackend,
         InvalidFormat,
         OpeningDevice,
@@ -137,7 +136,6 @@ const SoundIO = union(Backend) {
 
     pub const CreateStreamError = error{
         OutOfMemory,
-        OperationCanceled,
         IncompatibleBackend,
         IncompatibleDevice,
         StreamDisconnected,
@@ -249,8 +247,6 @@ pub const Player = struct {
 
     pub const SetVolumeError = error{
         CannotSetVolume,
-        OutOfMemory,
-        OperationCanceled,
     };
 
     // confidence interval (±) depends on the device
@@ -263,8 +259,6 @@ pub const Player = struct {
 
     pub const GetVolumeError = error{
         CannotGetVolume,
-        OutOfMemory,
-        OperationCanceled,
     };
 
     // confidence interval (±) depends on the device

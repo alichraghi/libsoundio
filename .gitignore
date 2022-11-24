@@ -6,6 +6,7 @@ zig-out/
 zig-cache/
 pipewire/
 alsa-lib/
+pulseaudio/
 z.zig
 t.zig
 c.c

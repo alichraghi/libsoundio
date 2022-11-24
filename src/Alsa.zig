@@ -222,7 +222,7 @@ pub const PlayerData = struct {
     mixer: ?*c.snd_mixer_t,
     selem: ?*c.snd_mixer_selem_id_t,
     mixer_elm: ?*c.snd_mixer_elem_t,
-    period_size: c.snd_pcm_uframes_t,
+    period_size: c_ulong,
     volume_range: Range(c_long),
 };
 
@@ -233,8 +233,8 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     var mixer: ?*c.snd_mixer_t = null;
     var selem: ?*c.snd_mixer_selem_id_t = null;
     var mixer_elm: ?*c.snd_mixer_elem_t = null;
-    var period_size: c.snd_pcm_uframes_t = 0;
-    var buf_size: c.snd_pcm_uframes_t = 0;
+    var period_size: c_ulong = 0;
+    var buf_size: c_ulong = 0;
     var vol_min: c_long = 0;
     var vol_max: c_long = 0;
 
@@ -379,7 +379,7 @@ fn playerLoop(self: *Player) void {
 }
 
 pub fn playerPausePlay(self: *Player, pause: bool) !void {
-    var bd = &self.backend_data.Alsa;
+    const bd = &self.backend_data.Alsa;
 
     if (c.snd_pcm_pause(bd.pcm, @boolToInt(pause)) < 0) {
         return if (pause)
