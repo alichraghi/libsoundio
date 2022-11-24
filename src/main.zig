@@ -250,7 +250,7 @@ pub const Player = struct {
     };
 
     // confidence interval (±) depends on the device
-    pub fn setVolume(self: *Player, vol: f64) SetVolumeError!void {
+    pub fn setVolume(self: *Player, vol: f32) SetVolumeError!void {
         std.debug.assert(vol <= 1.0);
         return switch (current_backend.?) {
             inline else => |b| @field(This, @tagName(b)).playerSetVolume(self, vol),
@@ -262,7 +262,7 @@ pub const Player = struct {
     };
 
     // confidence interval (±) depends on the device
-    pub fn volume(self: *Player) GetVolumeError!f64 {
+    pub fn volume(self: *Player) GetVolumeError!f32 {
         return switch (current_backend.?) {
             inline else => |b| @field(This, @tagName(b)).playerVolume(self),
         };

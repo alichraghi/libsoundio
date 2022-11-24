@@ -11,8 +11,8 @@ pub const supported_formats = &[_]Format{
     .i32, .f32,
 };
 
-pub fn fromPAChannelMap(map: c.pa_channel_map) ?ChannelsArray {
-    var channels = ChannelsArray.init(map.channels) catch return null;
+pub fn fromPAChannelMap(map: c.pa_channel_map) !ChannelsArray {
+    var channels = try ChannelsArray.init(map.channels);
     for (channels.slice()) |*ch, i|
         ch.*.id = fromPAChannelPos(map.map[i]);
     return channels;

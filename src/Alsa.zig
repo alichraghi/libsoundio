@@ -130,8 +130,6 @@ fn deviceEventsLoop(self: *Alsa) !void {
     };
 
     while (true) {
-        var scan = false;
-
         if (self.aborted.load(.Unordered)) break;
 
         _ = std.os.poll(&fds, -1) catch |err| switch (err) {
@@ -168,16 +166,12 @@ fn deviceEventsLoop(self: *Alsa) !void {
                     if (util.hasFlag(evt.mask, linux.IN.ISDIR) or !std.mem.startsWith(u8, evt_name, "pcm"))
                         continue;
 
-                    scan = true;
+                    self.mutex.lock();
+                    defer self.mutex.unlock();
+                    self.device_scan_queued.store(true, .Release);
+                    self.cond.signal();
                 }
             }
-        }
-
-        if (scan) {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            self.device_scan_queued.store(true, .Release);
-            self.cond.signal();
         }
     }
 }
@@ -389,10 +383,10 @@ pub fn playerPausePlay(self: *Player, pause: bool) !void {
     }
 }
 
-pub fn playerSetVolume(self: *Player, volume: f64) !void {
+pub fn playerSetVolume(self: *Player, volume: f32) !void {
     var bd = &self.backend_data.Alsa;
 
-    const dist = @intToFloat(f64, bd.volume_range.max - bd.volume_range.min);
+    const dist = @intToFloat(f32, bd.volume_range.max - bd.volume_range.min);
     if (c.snd_mixer_selem_set_playback_volume_all(
         bd.mixer_elm,
         @floatToInt(c_long, dist * volume) + bd.volume_range.min,
@@ -400,7 +394,7 @@ pub fn playerSetVolume(self: *Player, volume: f64) !void {
         return error.CannotSetVolume;
 }
 
-pub fn playerVolume(self: *Player) !f64 {
+pub fn playerVolume(self: *Player) !f32 {
     var bd = &self.backend_data.Alsa;
 
     var volume: c_long = 0;
@@ -416,7 +410,7 @@ pub fn playerVolume(self: *Player) !f64 {
     if (channel == c.SND_MIXER_SCHN_LAST)
         return error.CannotGetVolume;
 
-    return @intToFloat(f64, volume) / @intToFloat(f64, bd.volume_range.max - bd.volume_range.min);
+    return @intToFloat(f32, volume) / @intToFloat(f32, bd.volume_range.max - bd.volume_range.min);
 }
 
 pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
