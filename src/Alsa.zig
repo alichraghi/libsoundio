@@ -19,7 +19,7 @@ mutex: std.Thread.Mutex,
 cond: std.Thread.Condition,
 thread: std.Thread,
 aborted: std.atomic.Atomic(bool),
-device_scan_queued: std.atomic.Atomic(bool),
+scan_queued: std.atomic.Atomic(bool),
 devices_info: DevicesInfo,
 notify_fd: linux.fd_t,
 notify_wd: linux.fd_t,
@@ -87,7 +87,7 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
             error.Unexpected => unreachable,
         },
         .aborted = .{ .value = false },
-        .device_scan_queued = .{ .value = false },
+        .scan_queued = .{ .value = false },
         .devices_info = DevicesInfo.init(),
         .notify_fd = notify_fd,
         .notify_wd = notify_wd,
@@ -96,7 +96,6 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
     return self;
 }
 
-// self.thread.impl.thread.completion.load(.Unordered) == .deatched
 pub fn deinit(self: *Alsa) void {
     self.aborted.store(true, .Unordered);
 
@@ -168,7 +167,7 @@ fn deviceEventsLoop(self: *Alsa) !void {
 
                     self.mutex.lock();
                     defer self.mutex.unlock();
-                    self.device_scan_queued.store(true, .Release);
+                    self.scan_queued.store(true, .Release);
                     self.cond.signal();
                 }
             }
@@ -180,17 +179,17 @@ pub fn flushEvents(self: *Alsa) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
 
-    self.device_scan_queued.store(false, .Release);
+    self.scan_queued.store(false, .Release);
     try self.refreshDevices();
 }
 
 pub fn waitEvents(self: *Alsa) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
-    while (!self.device_scan_queued.load(.Acquire))
+    while (!self.scan_queued.load(.Acquire))
         self.cond.wait(&self.mutex);
 
-    self.device_scan_queued.store(false, .Release);
+    self.scan_queued.store(false, .Release);
     try self.refreshDevices();
 }
 
@@ -203,7 +202,7 @@ pub fn wakeUp(self: *Alsa) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
 
-    self.device_scan_queued.store(true, .Release);
+    self.scan_queued.store(true, .Release);
     self.cond.signal();
 }
 
@@ -217,7 +216,7 @@ pub const PlayerData = struct {
     selem: ?*c.snd_mixer_selem_id_t,
     mixer_elm: ?*c.snd_mixer_elem_t,
     period_size: c_ulong,
-    volume_range: Range(c_long),
+    vol_range: Range(c_long),
 };
 
 pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
@@ -309,7 +308,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
             .allocator = self.allocator,
             .sample_buffer = try self.allocator.alloc(u8, buf_size),
             .aborted = .{ .value = false },
-            .volume_range = .{ .min = vol_min, .max = vol_max },
+            .vol_range = .{ .min = vol_min, .max = vol_max },
             .pcm = pcm,
             .mixer = mixer,
             .selem = selem,
@@ -386,10 +385,10 @@ pub fn playerPausePlay(self: *Player, pause: bool) !void {
 pub fn playerSetVolume(self: *Player, volume: f32) !void {
     var bd = &self.backend_data.Alsa;
 
-    const dist = @intToFloat(f32, bd.volume_range.max - bd.volume_range.min);
+    const dist = @intToFloat(f32, bd.vol_range.max - bd.vol_range.min);
     if (c.snd_mixer_selem_set_playback_volume_all(
         bd.mixer_elm,
-        @floatToInt(c_long, dist * volume) + bd.volume_range.min,
+        @floatToInt(c_long, dist * volume) + bd.vol_range.min,
     ) < 0)
         return error.CannotSetVolume;
 }
@@ -410,7 +409,7 @@ pub fn playerVolume(self: *Player) !f32 {
     if (channel == c.SND_MIXER_SCHN_LAST)
         return error.CannotGetVolume;
 
-    return @intToFloat(f32, volume) / @intToFloat(f32, bd.volume_range.max - bd.volume_range.min);
+    return @intToFloat(f32, volume) / @intToFloat(f32, bd.vol_range.max - bd.vol_range.min);
 }
 
 pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
