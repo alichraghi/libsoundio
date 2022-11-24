@@ -247,19 +247,27 @@ pub const Player = struct {
         self.paused = false;
     }
 
-    pub const GetVolumeError = error{
+    pub const SetVolumeError = error{
+        CannotSetVolume,
         OutOfMemory,
         OperationCanceled,
     };
 
-    // ±0.09
-    pub fn setVolume(self: *Player, vol: f64) GetVolumeError!void {
+    // confidence interval (±) depends on the device
+    pub fn setVolume(self: *Player, vol: f64) SetVolumeError!void {
         std.debug.assert(vol <= 1.0);
         return switch (current_backend.?) {
             inline else => |b| @field(This, @tagName(b)).playerSetVolume(self, vol),
         };
     }
 
+    pub const GetVolumeError = error{
+        CannotGetVolume,
+        OutOfMemory,
+        OperationCanceled,
+    };
+
+    // confidence interval (±) depends on the device
     pub fn volume(self: *Player) GetVolumeError!f64 {
         return switch (current_backend.?) {
             inline else => |b| @field(This, @tagName(b)).playerVolume(self),

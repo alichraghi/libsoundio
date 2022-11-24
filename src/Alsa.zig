@@ -76,8 +76,8 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
     errdefer allocator.destroy(self);
     self.* = .{
         .allocator = allocator,
-        .mutex = std.Thread.Mutex{},
-        .cond = std.Thread.Condition{},
+        .mutex = .{},
+        .cond = .{},
         .thread = std.Thread.spawn(.{}, deviceEventsLoop, .{self}) catch |err| switch (err) {
             error.ThreadQuotaExceeded,
             error.SystemResources,
@@ -139,9 +139,8 @@ fn deviceEventsLoop(self: *Alsa) !void {
             error.SystemResources,
             => {
                 const ts = std.time.milliTimestamp();
-                if (last_crash != null and ts - last_crash.? < 500) {
+                if (last_crash != null and ts - last_crash.? < 500)
                     return;
-                }
                 last_crash = ts;
                 continue;
             },
@@ -153,9 +152,8 @@ fn deviceEventsLoop(self: *Alsa) !void {
                 const len = std.os.read(self.notify_fd, &buf) catch |err| {
                     if (err == error.WouldBlock) break;
                     const ts = std.time.milliTimestamp();
-                    if (last_crash != null and ts - last_crash.? < 500) {
+                    if (last_crash != null and ts - last_crash.? < 500)
                         return;
-                    }
                     last_crash = ts;
                     break;
                 };
@@ -167,9 +165,8 @@ fn deviceEventsLoop(self: *Alsa) !void {
                     evt = @ptrCast(*linux.inotify_event, @alignCast(4, buf[i..]));
                     const evt_name = @ptrCast([*]u8, buf[i..])[@sizeOf(linux.inotify_event) .. @sizeOf(linux.inotify_event) + 8];
 
-                    if (util.hasFlag(evt.mask, linux.IN.ISDIR) or !std.mem.startsWith(u8, evt_name, "pcm")) {
+                    if (util.hasFlag(evt.mask, linux.IN.ISDIR) or !std.mem.startsWith(u8, evt_name, "pcm"))
                         continue;
-                    }
 
                     scan = true;
                 }
@@ -230,9 +227,6 @@ pub const PlayerData = struct {
 };
 
 pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
     const snd_stream = alsa_util.aimToStream(device.aim);
     const format = alsa_util.toAlsaFormat(player.format) catch return error.IncompatibleBackend;
     var pcm: ?*c.snd_pcm_t = null;
@@ -244,9 +238,8 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     var vol_min: c_long = 0;
     var vol_max: c_long = 0;
 
-    if (c.snd_pcm_open(&pcm, device.id.ptr, snd_stream, c.SND_PCM_ASYNC) < 0) {
+    if (c.snd_pcm_open(&pcm, device.id.ptr, snd_stream, c.SND_PCM_ASYNC) < 0)
         return error.OpeningDevice;
-    }
     errdefer _ = c.snd_pcm_close(pcm);
 
     {
@@ -260,43 +253,37 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
             player.sample_rate,
             1,
             default_latency,
-        )) < 0) {
+        )) < 0)
             return error.OpeningDevice;
-        }
         errdefer _ = c.snd_pcm_hw_free(pcm);
 
-        if (c.snd_pcm_hw_params_malloc(&hw_params) < 0) {
+        if (c.snd_pcm_hw_params_malloc(&hw_params) < 0)
             return error.OpeningDevice;
-        }
         defer c.snd_pcm_hw_params_free(hw_params);
 
-        if (c.snd_pcm_hw_params_current(pcm, hw_params) < 0) {
+        if (c.snd_pcm_hw_params_current(pcm, hw_params) < 0)
             return error.OpeningDevice;
-        }
 
-        if (c.snd_pcm_hw_params_get_period_size(hw_params, &period_size, null) < 0) {
+        if (c.snd_pcm_hw_params_get_period_size(hw_params, &period_size, null) < 0)
             return error.OpeningDevice;
-        }
 
-        if (c.snd_pcm_hw_params_get_buffer_size(hw_params, &buf_size) < 0) {
+        if (c.snd_pcm_hw_params_get_buffer_size(hw_params, &buf_size) < 0)
             return error.OpeningDevice;
-        }
     }
 
     {
         var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(u6, player.channels.len) };
 
-        for (player.channels.slice()) |ch, i| {
+        for (player.channels.slice()) |ch, i|
             chmap.pos()[i] = alsa_util.toAlsaChmapPos(ch.id);
-        }
-        if (c.snd_pcm_set_chmap(pcm, &chmap) < 0) {
+
+        if (c.snd_pcm_set_chmap(pcm, &chmap) < 0)
             return error.IncompatibleDevice;
-        }
     }
 
     {
         if (c.snd_mixer_open(&mixer, 0) < 0)
-            return error.OpeningDevice;
+            return error.OutOfMemory;
 
         const card_id = try self.allocator.dupeZ(u8, std.mem.sliceTo(device.id, ','));
         defer self.allocator.free(card_id);
@@ -315,9 +302,10 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
         errdefer c.snd_mixer_selem_id_free(selem);
 
         c.snd_mixer_selem_id_set_index(selem, 0);
-        c.snd_mixer_selem_id_set_name(selem, "Master"); // current device
+        c.snd_mixer_selem_id_set_name(selem, "Master");
 
-        mixer_elm = c.snd_mixer_find_selem(mixer, selem);
+        mixer_elm = c.snd_mixer_find_selem(mixer, selem) orelse
+            return error.IncompatibleDevice;
         if (c.snd_mixer_selem_get_playback_volume_range(mixer_elm, &vol_min, &vol_max) < 0)
             return error.OpeningDevice;
     }
@@ -346,7 +334,6 @@ pub fn playerDeinit(self: *Player) void {
 
     _ = c.snd_mixer_close(bd.mixer);
     c.snd_mixer_selem_id_free(bd.selem);
-
     _ = c.snd_pcm_close(bd.pcm);
     _ = c.snd_pcm_hw_free(bd.pcm);
 
@@ -395,29 +382,25 @@ pub fn playerPausePlay(self: *Player, pause: bool) !void {
     var bd = &self.backend_data.Alsa;
 
     if (c.snd_pcm_pause(bd.pcm, @boolToInt(pause)) < 0) {
-        if (pause) {
-            return error.CannotPause;
-        } else {
+        return if (pause)
+            return error.CannotPause
+        else
             return error.CannotPlay;
-        }
     }
 }
 
 pub fn playerSetVolume(self: *Player, volume: f64) !void {
     var bd = &self.backend_data.Alsa;
 
+    const dist = @intToFloat(f64, bd.volume_range.max - bd.volume_range.min);
     if (c.snd_mixer_selem_set_playback_volume_all(
         bd.mixer_elm,
-        @floatToInt(
-            c_long,
-            @intToFloat(f64, bd.volume_range.max - bd.volume_range.min) * volume,
-        ) + bd.volume_range.min,
-    ) < 0) {
-        unreachable; // TODO
-    }
+        @floatToInt(c_long, dist * volume) + bd.volume_range.min,
+    ) < 0)
+        return error.CannotSetVolume;
 }
 
-pub fn playerVolume(self: *Player) error{}!f64 {
+pub fn playerVolume(self: *Player) !f64 {
     var bd = &self.backend_data.Alsa;
 
     var volume: c_long = 0;
@@ -430,9 +413,8 @@ pub fn playerVolume(self: *Player) error{}!f64 {
         }
     }
 
-    // TODO
-    // if (channel == c.SND_MIXER_SCHN_LAST)
-    //     return error.XYZ;
+    if (channel == c.SND_MIXER_SCHN_LAST)
+        return error.CannotGetVolume;
 
     return @intToFloat(f64, volume) / @intToFloat(f64, bd.volume_range.max - bd.volume_range.min);
 }
