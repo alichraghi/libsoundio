@@ -4,3 +4,12 @@ build-win64/
 
 zig-out/
 zig-cache/
+pipewire/
+alsa-lib/
+z.zig
+t.zig
+c.c
+a.out
+p.py
+leak.txt
+*.zst
