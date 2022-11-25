@@ -376,9 +376,9 @@ pub fn playerPausePlay(self: *Player, pause: bool) !void {
 
     if (c.snd_pcm_pause(bd.pcm, @boolToInt(pause)) < 0) {
         return if (pause)
-            return error.CannotPause
+            error.CannotPause
         else
-            return error.CannotPlay;
+            error.CannotPlay;
     }
 }
 

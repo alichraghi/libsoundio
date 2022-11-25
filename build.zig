@@ -32,7 +32,6 @@ fn link(step: *std.build.LibExeObjStep) void {
     step.addLibraryPath("/home/ali/dev/libsoundio/alsa-lib/src/.libs");
     step.linkSystemLibrary("pulse");
     step.linkSystemLibrary("asound");
-    step.linkSystemLibrary("jack");
 }
 
 fn buildPulseAudio() void {}

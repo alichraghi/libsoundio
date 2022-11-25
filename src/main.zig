@@ -35,6 +35,10 @@ const SoundIO = union(Backend) {
     PulseAudio: *PulseAudio,
     Alsa: *Alsa,
 
+    pub const ConnectOptions = struct {
+        app_name: [:0]const u8 = "mach/sysaudio",
+    };
+
     pub const ConnectError = error{
         OutOfMemory,
         Disconnected,
@@ -45,16 +49,8 @@ const SoundIO = union(Backend) {
         AccessDenied,
     };
 
-    pub const ShutdownFn = *const fn (userdata: ?*anyopaque) void;
-    pub const ConnectOptions = struct {
-        /// not called in PulseAudio Backend
-        shutdownFn: ?ShutdownFn = null,
-        /// only useful when `shutdownFn` is used
-        userdata: ?*anyopaque = null,
-    };
-
     /// must be called in the main thread
-    pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator) ConnectError!SoundIO {
+    pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SoundIO {
         std.debug.assert(current_backend == null);
         var data: SoundIO = undefined;
         if (backend) |b| {
@@ -63,13 +59,13 @@ const SoundIO = union(Backend) {
                 @tagName(b),
                 switch (b) {
                     .Alsa => try Alsa.connect(allocator),
-                    .PulseAudio => try PulseAudio.connect(allocator),
+                    .PulseAudio => try PulseAudio.connect(allocator, options),
                 },
             );
         } else {
             switch (builtin.os.tag) {
                 .linux, .freebsd => {
-                    if (PulseAudio.connect(allocator)) |res| {
+                    if (PulseAudio.connect(allocator, options)) |res| {
                         data = .{ .pulseaudio = res };
                     } else |err| {
                         data = .{ .alsa = Alsa.connect(allocator) catch return err };
@@ -145,7 +141,6 @@ const SoundIO = union(Backend) {
 
     pub const PlayerOptions = struct {
         writeFn: Player.WriteFn,
-        name: [:0]const u8 = "Mach Engine",
         sample_rate: u32 = 44_100,
         format: ?Format = null,
         userdata: ?*anyopaque = null,
@@ -170,7 +165,6 @@ const SoundIO = union(Backend) {
             .backend_data = undefined,
             .writeFn = options.writeFn,
             .userdata = options.userdata,
-            .name = options.name,
             .channels = device.channels,
             .sample_rate = device.rate_range.clamp(options.sample_rate),
             .format = format.?,
@@ -204,7 +198,6 @@ pub const Player = struct {
 
     writeFn: WriteFn,
     userdata: ?*anyopaque,
-    name: [:0]const u8,
     channels: ChannelsArray,
     sample_rate: u32,
     format: Format,

@@ -5,7 +5,7 @@ test "connect()" {
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} connect()\n", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.heap.c_allocator);
+        var a = try soundio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
         try a.flushEvents();
         try std.testing.expect(a.devicesList().len > 0);
@@ -16,7 +16,7 @@ test "wakeUp()" {
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} wakeUp()\n", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.heap.c_allocator);
+        var a = try soundio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
         var wait: usize = 4;
         while (wait > 0) : (wait -= 1) {
@@ -32,7 +32,7 @@ test "waitEvents()" {
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} waitEvents()\n", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.heap.c_allocator);
+        var a = try soundio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
         var wait: usize = 4;
         while (wait > 0) : (wait -= 1) {
@@ -46,7 +46,7 @@ test "Sine Wave (pause, play)" {
     std.debug.print("\n", .{});
     inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} Sine Wave", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.heap.c_allocator);
+        var a = try soundio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
         try a.flushEvents();
         const device = a.getDevice(.playback, null) orelse return error.SkipZigTest;
