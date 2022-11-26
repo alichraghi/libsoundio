@@ -35,11 +35,8 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAud
         return error.OutOfMemory;
     errdefer c.pa_context_unref(ctx);
 
-    if (c.pa_context_connect(ctx, null, 0, null) != 0) {
-        return switch (getError(ctx)) {
-            else => error.ConnectionRefused,
-        };
-    }
+    if (c.pa_context_connect(ctx, null, 0, null) != 0)
+        return error.ConnectionRefused;
     errdefer c.pa_context_disconnect(ctx);
 
     if (c.pa_threaded_mainloop_start(main_loop) != 0)
@@ -301,9 +298,7 @@ pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
         c.PA_STREAM_ADJUST_LATENCY;
 
     if (c.pa_stream_connect_playback(bd.stream, device.id.ptr, &buf_attr, flags, null, null) != 0) {
-        return switch (getError(self.ctx)) {
-            else => error.OpeningDevice,
-        };
+        return error.OpeningDevice;
     }
     errdefer _ = c.pa_stream_disconnect(bd.stream);
 
@@ -379,9 +374,7 @@ fn playbackStreamWriteOp(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque)
             ),
             &chunk_size,
         ) != 0)
-            return switch (getError(bd.ctx)) {
-                else => unreachable,
-            };
+            err = error.WriteFailed;
 
         for (self.device.channels) |*ch, i| {
             ch.*.ptr = bd.write_ptr + self.bytesPerSample() * i;
@@ -392,6 +385,7 @@ fn playbackStreamWriteOp(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque)
 
         if (c.pa_stream_write(bd.stream, bd.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0)
             err = error.WriteFailed;
+
         frames_left -= chunk_size;
     }
 }
@@ -650,68 +644,5 @@ fn toPAChannelPos(channel_id: ChannelId) !c.pa_channel_position_t {
         .aux15 => c.PA_CHANNEL_POSITION_AUX15,
 
         else => error.IncompatibleBackend,
-    };
-}
-
-// based on pulseaudio v16.0
-pub const RawError = error{
-    AccessFailure,
-    // UnknownCommand,
-    // InvalidArgument,
-    EntityExists,
-    NoSuchEntity,
-    ConnectionRefused,
-    ProtocolError,
-    Timeout,
-    NoAuthenticationKey,
-    InternalError,
-    ConnectionTerminated,
-    EntityKilled,
-    InvalidServer,
-    ModuleInitializationFailed,
-    // BadState,
-    NoData,
-    IncompatibleProtocolVersion,
-    DataTooLarge,
-    OperationNotSupported,
-    Unknown,
-    NoExtension,
-    Obsolete,
-    NotImplemented,
-    // Forked,
-    InputOutput,
-    BusyResource,
-};
-
-pub fn getError(ctx: *c.pa_context) RawError {
-    return switch (c.pa_context_errno(ctx)) {
-        c.PA_OK => unreachable,
-        c.PA_ERR_ACCESS => error.AccessFailure,
-        c.PA_ERR_COMMAND => unreachable, // Unexpected
-        c.PA_ERR_INVALID => unreachable, // Unexpected
-        c.PA_ERR_EXIST => error.EntityExists,
-        c.PA_ERR_NOENTITY => error.NoSuchEntity,
-        c.PA_ERR_CONNECTIONREFUSED => error.ConnectionRefused,
-        c.PA_ERR_PROTOCOL => error.ProtocolError,
-        c.PA_ERR_TIMEOUT => error.Timeout,
-        c.PA_ERR_AUTHKEY => error.NoAuthenticationKey,
-        c.PA_ERR_INTERNAL => error.InternalError,
-        c.PA_ERR_CONNECTIONTERMINATED => error.ConnectionTerminated,
-        c.PA_ERR_KILLED => error.EntityKilled,
-        c.PA_ERR_INVALIDSERVER => error.InvalidServer,
-        c.PA_ERR_MODINITFAILED => error.ModuleInitializationFailed,
-        c.PA_ERR_BADSTATE => unreachable, // Unexpected
-        c.PA_ERR_NODATA => error.NoData,
-        c.PA_ERR_VERSION => error.IncompatibleProtocolVersion,
-        c.PA_ERR_TOOLARGE => error.DataTooLarge,
-        c.PA_ERR_NOTSUPPORTED => error.OperationNotSupported,
-        c.PA_ERR_UNKNOWN => error.Unknown,
-        c.PA_ERR_NOEXTENSION => error.NoExtension,
-        c.PA_ERR_OBSOLETE => unreachable, // Unexpected
-        c.PA_ERR_NOTIMPLEMENTED => error.NotImplemented,
-        c.PA_ERR_FORKED => unreachable, // Unexpected
-        c.PA_ERR_IO => error.InputOutput,
-        c.PA_ERR_BUSY => error.BusyResource,
-        else => unreachable, // Unexpected
     };
 }
