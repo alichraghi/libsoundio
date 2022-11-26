@@ -1,4 +1,3 @@
-# TODO
+## TODO
 
--   [ ] Pulseaudio: use getError correctly
--   [ ] Bestify error sets
+-   [ ] Alsa MUTEX
