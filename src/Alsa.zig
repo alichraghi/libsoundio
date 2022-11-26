@@ -1,18 +1,20 @@
 const std = @import("std");
-const c = @import("Alsa/c.zig");
-const queryDevices = @import("Alsa/device.zig").queryDevices;
-const alsa_util = @import("Alsa/util.zig");
+const c = @cImport(@cInclude("asoundlib.h"));
+const util = @import("util.zig");
+const Channel = @import("main.zig").Channel;
+const ChannelId = @import("main.zig").ChannelId;
 const Device = @import("main.zig").Device;
+const DevicesInfo = @import("main.zig").DevicesInfo;
+const Format = @import("main.zig").Format;
 const Player = @import("main.zig").Player;
 const Range = @import("main.zig").Range;
-const DevicesInfo = @import("main.zig").DevicesInfo;
-const util = @import("util.zig");
 const default_latency = @import("main.zig").default_latency;
-const linux = std.os.linux;
+const max_channels = @import("main.zig").max_channels;
+const inotify_event = std.os.linux.inotify_event;
+
+const is_little = @import("builtin").cpu.arch.endian() == .Little;
 
 const Alsa = @This();
-
-const max_snd_file_len = 16;
 
 allocator: std.mem.Allocator,
 mutex: std.Thread.Mutex,
@@ -21,12 +23,12 @@ thread: std.Thread,
 aborted: std.atomic.Atomic(bool),
 scan_queued: std.atomic.Atomic(bool),
 devices_info: DevicesInfo,
-notify_fd: linux.fd_t,
-notify_wd: linux.fd_t,
-notify_pipe_fd: [2]linux.fd_t,
+notify_fd: std.os.fd_t,
+notify_wd: std.os.fd_t,
+notify_pipe_fd: [2]std.os.fd_t,
 
 pub fn connect(allocator: std.mem.Allocator) !*Alsa {
-    const notify_fd = std.os.inotify_init1(linux.IN.NONBLOCK) catch |err| switch (err) {
+    const notify_fd = std.os.inotify_init1(std.os.linux.IN.NONBLOCK) catch |err| switch (err) {
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
         error.SystemResources,
@@ -38,7 +40,7 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
     const notify_wd = std.os.inotify_add_watch(
         notify_fd,
         "/dev/snd",
-        linux.IN.CREATE | linux.IN.DELETE,
+        std.os.linux.IN.CREATE | std.os.linux.IN.DELETE,
     ) catch |err| switch (err) {
         error.AccessDenied => return error.AccessDenied,
         error.UserResourceLimitReached,
@@ -54,7 +56,7 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
     errdefer std.os.inotify_rm_watch(notify_fd, notify_wd);
 
     // used to wakeup poll
-    const notify_pipe_fd = std.os.pipe2(linux.O.NONBLOCK) catch |err| switch (err) {
+    const notify_pipe_fd = std.os.pipe2(std.os.O.NONBLOCK) catch |err| switch (err) {
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
         => return error.SystemResources,
@@ -118,12 +120,12 @@ fn deviceEventsLoop(self: *Alsa) !void {
     var fds = [2]std.os.pollfd{
         .{
             .fd = self.notify_fd,
-            .events = linux.POLL.IN,
+            .events = std.os.POLL.IN,
             .revents = 0,
         },
         .{
             .fd = self.notify_pipe_fd[0],
-            .events = linux.POLL.IN,
+            .events = std.os.POLL.IN,
             .revents = 0,
         },
     };
@@ -136,33 +138,35 @@ fn deviceEventsLoop(self: *Alsa) !void {
             error.SystemResources,
             => {
                 const ts = std.time.milliTimestamp();
-                if (last_crash != null and ts - last_crash.? < 500)
-                    return;
+                if (last_crash) |lc| {
+                    if (ts - lc < 500) return;
+                }
                 last_crash = ts;
                 continue;
             },
             error.Unexpected => unreachable,
         };
 
-        if (util.hasFlag(self.notify_fd, linux.POLL.IN)) {
+        if (util.hasFlag(self.notify_fd, std.os.POLL.IN)) {
             while (true) {
                 const len = std.os.read(self.notify_fd, &buf) catch |err| {
                     if (err == error.WouldBlock) break;
                     const ts = std.time.milliTimestamp();
-                    if (last_crash != null and ts - last_crash.? < 500)
-                        return;
+                    if (last_crash) |lc| {
+                        if (ts - lc < 500) return;
+                    }
                     last_crash = ts;
                     break;
                 };
                 if (len == 0) break;
 
                 var i: usize = 0;
-                var evt: *linux.inotify_event = undefined;
-                while (i < buf.len) : (i += @sizeOf(linux.inotify_event) + evt.len) {
-                    evt = @ptrCast(*linux.inotify_event, @alignCast(4, buf[i..]));
-                    const evt_name = @ptrCast([*]u8, buf[i..])[@sizeOf(linux.inotify_event) .. @sizeOf(linux.inotify_event) + 8];
+                var evt: *inotify_event = undefined;
+                while (i < buf.len) : (i += @sizeOf(inotify_event) + evt.len) {
+                    evt = @ptrCast(*inotify_event, @alignCast(4, buf[i..]));
+                    const evt_name = @ptrCast([*]u8, buf[i..])[@sizeOf(inotify_event) .. @sizeOf(inotify_event) + 8];
 
-                    if (util.hasFlag(evt.mask, linux.IN.ISDIR) or !std.mem.startsWith(u8, evt_name, "pcm"))
+                    if (util.hasFlag(evt.mask, std.os.linux.IN.ISDIR) or !std.mem.startsWith(u8, evt_name, "pcm"))
                         continue;
 
                     self.mutex.lock();
@@ -195,7 +199,162 @@ pub fn waitEvents(self: *Alsa) !void {
 
 fn refreshDevices(self: *Alsa) !void {
     self.devices_info.clear(self.allocator);
-    try queryDevices(&self.devices_info, self.allocator);
+
+    var card_info: ?*c.snd_ctl_card_info_t = null;
+    _ = c.snd_ctl_card_info_malloc(&card_info);
+    defer c.snd_ctl_card_info_free(card_info);
+
+    var pcm_info: ?*c.snd_pcm_info_t = null;
+    _ = c.snd_pcm_info_malloc(&pcm_info);
+    defer c.snd_pcm_info_free(pcm_info);
+
+    var card_idx: c_int = -1;
+    if (c.snd_card_next(&card_idx) < 0)
+        return error.SystemResources;
+
+    while (card_idx >= 0) {
+        var card_id_buf: [8]u8 = undefined;
+        const card_id = std.fmt.bufPrintZ(&card_id_buf, "hw:{d}", .{card_idx}) catch break;
+
+        var ctl: ?*c.snd_ctl_t = undefined;
+        _ = switch (c.snd_ctl_open(&ctl, card_id.ptr, c.SND_PCM_ASYNC)) {
+            0 => {},
+            -@intCast(i16, @enumToInt(std.os.E.NOENT)) => break,
+            else => return error.OpeningDevice,
+        };
+        defer _ = c.snd_ctl_close(ctl);
+
+        if (c.snd_ctl_card_info(ctl, card_info) < 0)
+            return error.SystemResources;
+        const card_name = c.snd_ctl_card_info_get_name(card_info);
+
+        var dev_idx: c_int = -1;
+        if (c.snd_ctl_pcm_next_device(ctl, &dev_idx) < 0)
+            return error.SystemResources;
+        if (dev_idx < 0) break;
+
+        c.snd_pcm_info_set_device(pcm_info, @intCast(c_uint, dev_idx));
+        c.snd_pcm_info_set_subdevice(pcm_info, 0);
+        const dev_name = c.snd_pcm_info_get_name(pcm_info);
+
+        for (&[_]Device.Aim{ .playback, .capture }) |aim| {
+            const snd_stream = aimToStream(aim);
+            c.snd_pcm_info_set_stream(pcm_info, snd_stream);
+            const err = c.snd_ctl_pcm_info(ctl, pcm_info);
+            switch (@intToEnum(std.os.E, -err)) {
+                .SUCCESS => {},
+                .NOENT,
+                .NXIO,
+                .NODEV,
+                => break,
+                else => return error.SystemResources,
+            }
+
+            var buf: [8]u8 = undefined; // max card|device num is 2 digit
+            const id = std.fmt.bufPrintZ(&buf, "hw:{d},{d}", .{ card_idx, dev_idx }) catch continue;
+
+            var pcm: ?*c.snd_pcm_t = null;
+            if (c.snd_pcm_open(&pcm, id.ptr, snd_stream, c.SND_PCM_NONBLOCK) < 0)
+                continue;
+            defer _ = c.snd_pcm_close(pcm);
+
+            var params: ?*c.snd_pcm_hw_params_t = null;
+            _ = c.snd_pcm_hw_params_malloc(&params);
+            defer c.snd_pcm_hw_params_free(params);
+            if (c.snd_pcm_hw_params_any(pcm, params) < 0)
+                continue;
+
+            if (c.snd_pcm_hw_params_can_pause(params) == 0)
+                continue;
+
+            const device = Device{
+                .aim = aim,
+                .is_raw = true,
+                .channels = blk: {
+                    const chmap = c.snd_pcm_query_chmaps(pcm);
+                    if (chmap) |_| {
+                        defer c.snd_pcm_free_chmaps(chmap);
+
+                        if (chmap[0] == null) continue;
+
+                        const n_ch = chmap[0][0].map.channels;
+                        if (n_ch <= 0 or n_ch > max_channels) continue;
+
+                        var channels = try self.allocator.alloc(Channel, n_ch);
+                        for (channels) |*ch, i|
+                            ch.*.id = fromCHMAP(chmap[0][0].map.pos()[i]);
+                        break :blk channels;
+                    } else {
+                        continue;
+                    }
+                },
+                .formats = blk: {
+                    var fmt_mask: ?*c.snd_pcm_format_mask_t = null;
+                    _ = c.snd_pcm_format_mask_malloc(&fmt_mask);
+                    defer c.snd_pcm_format_mask_free(fmt_mask);
+                    c.snd_pcm_format_mask_none(fmt_mask);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S8);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U8);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S16_LE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S16_BE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U16_LE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U16_BE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S24_3LE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S24_3BE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U24_3LE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U24_3BE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S24_LE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S24_BE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U24_LE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U24_BE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S32_LE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_S32_BE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U32_LE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_U32_BE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT_LE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT_BE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT64_LE);
+                    c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT64_BE);
+                    c.snd_pcm_hw_params_get_format_mask(params, fmt_mask);
+
+                    var fmt_arr = std.ArrayList(Format).init(self.allocator);
+                    inline for (std.meta.fields(Format)) |format| {
+                        if (c.snd_pcm_format_mask_test(
+                            fmt_mask,
+                            toPCM_FORMAT(@intToEnum(Format, format.value)) catch unreachable,
+                        ) != 0) {
+                            try fmt_arr.append(@intToEnum(Format, format.value));
+                        }
+                    }
+
+                    break :blk fmt_arr.toOwnedSlice();
+                },
+                .rate_range = blk: {
+                    var rate_min: c_uint = 0;
+                    var rate_max: c_uint = 0;
+                    if (c.snd_pcm_hw_params_get_rate_min(params, &rate_min, null) < 0)
+                        continue;
+                    if (c.snd_pcm_hw_params_get_rate_max(params, &rate_max, null) < 0)
+                        continue;
+                    break :blk .{
+                        .min = rate_min,
+                        .max = rate_max,
+                    };
+                },
+                .id = try self.allocator.dupeZ(u8, id),
+                .name = try std.fmt.allocPrintZ(self.allocator, "{s} {s}", .{ card_name, dev_name }),
+            };
+
+            try self.devices_info.list.append(self.allocator, device);
+
+            if (self.devices_info.default(aim) == null and dev_idx == 0) {
+                self.devices_info.setDefault(aim, self.devices_info.list.items.len - 1);
+            }
+        }
+
+        if (c.snd_card_next(&card_idx) < 0)
+            return error.SystemResources;
+    }
 }
 
 pub fn wakeUp(self: *Alsa) !void {
@@ -211,17 +370,17 @@ pub const PlayerData = struct {
     thread: std.Thread,
     aborted: std.atomic.Atomic(bool),
     sample_buffer: []u8,
-    pcm: ?*c.snd_pcm_t,
-    mixer: ?*c.snd_mixer_t,
-    selem: ?*c.snd_mixer_selem_id_t,
-    mixer_elm: ?*c.snd_mixer_elem_t,
+    pcm: *c.snd_pcm_t,
+    mixer: *c.snd_mixer_t,
+    selem: *c.snd_mixer_selem_id_t,
+    mixer_elm: *c.snd_mixer_elem_t,
     period_size: c_ulong,
     vol_range: Range(c_long),
 };
 
 pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
-    const snd_stream = alsa_util.aimToStream(device.aim);
-    const format = alsa_util.toAlsaFormat(player.format) catch return error.IncompatibleBackend;
+    const format = toPCM_FORMAT(player.format) catch
+        return error.IncompatibleBackend;
     var pcm: ?*c.snd_pcm_t = null;
     var mixer: ?*c.snd_mixer_t = null;
     var selem: ?*c.snd_mixer_selem_id_t = null;
@@ -231,7 +390,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     var vol_min: c_long = 0;
     var vol_max: c_long = 0;
 
-    if (c.snd_pcm_open(&pcm, device.id.ptr, snd_stream, c.SND_PCM_ASYNC) < 0)
+    if (c.snd_pcm_open(&pcm, device.id.ptr, aimToStream(device.aim), c.SND_PCM_ASYNC) < 0)
         return error.OpeningDevice;
     errdefer _ = c.snd_pcm_close(pcm);
 
@@ -268,7 +427,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
         var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(c_uint, player.device.channels.len) };
 
         for (player.device.channels) |ch, i|
-            chmap.pos()[i] = alsa_util.toAlsaChmapPos(ch.id);
+            chmap.pos()[i] = toCHMAP(ch.id);
 
         if (c.snd_pcm_set_chmap(pcm, &chmap) < 0)
             return error.IncompatibleDevice;
@@ -309,10 +468,10 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
             .sample_buffer = try self.allocator.alloc(u8, buf_size),
             .aborted = .{ .value = false },
             .vol_range = .{ .min = vol_min, .max = vol_max },
-            .pcm = pcm,
-            .mixer = mixer,
-            .selem = selem,
-            .mixer_elm = mixer_elm,
+            .pcm = pcm.?,
+            .mixer = mixer.?,
+            .selem = selem.?,
+            .mixer_elm = mixer_elm.?,
             .period_size = period_size,
             .thread = undefined,
         },
@@ -430,4 +589,111 @@ pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
     allocator.free(self.name);
     allocator.free(self.formats);
     allocator.free(self.channels);
+}
+
+pub fn aimToStream(aim: Device.Aim) c_uint {
+    return switch (aim) {
+        .playback => c.SND_PCM_STREAM_PLAYBACK,
+        .capture => c.SND_PCM_STREAM_CAPTURE,
+    };
+}
+
+pub fn toPCM_FORMAT(format: Format) !c.snd_pcm_format_t {
+    return switch (format) {
+        .i8 => c.SND_PCM_FORMAT_S8,
+        .u8 => c.SND_PCM_FORMAT_U8,
+        .i16 => if (is_little) c.SND_PCM_FORMAT_S16_LE else c.SND_PCM_FORMAT_S16_BE,
+        .u16 => if (is_little) c.SND_PCM_FORMAT_U16_LE else c.SND_PCM_FORMAT_U16_BE,
+        .i24 => if (is_little) c.SND_PCM_FORMAT_S24_3LE else c.SND_PCM_FORMAT_S24_3BE,
+        .u24 => if (is_little) c.SND_PCM_FORMAT_U24_3LE else c.SND_PCM_FORMAT_U24_3BE,
+        .i24_3b => if (is_little) c.SND_PCM_FORMAT_S24_LE else c.SND_PCM_FORMAT_S24_BE,
+        .u24_3b => if (is_little) c.SND_PCM_FORMAT_U24_LE else c.SND_PCM_FORMAT_U24_BE,
+        .i32 => if (is_little) c.SND_PCM_FORMAT_S32_LE else c.SND_PCM_FORMAT_S32_BE,
+        .u32 => if (is_little) c.SND_PCM_FORMAT_U32_LE else c.SND_PCM_FORMAT_U32_BE,
+        .f32 => if (is_little) c.SND_PCM_FORMAT_FLOAT_LE else c.SND_PCM_FORMAT_FLOAT_BE,
+        .f64 => if (is_little) c.SND_PCM_FORMAT_FLOAT64_LE else c.SND_PCM_FORMAT_FLOAT64_BE,
+    };
+}
+
+pub fn fromCHMAP(pos: c_uint) ChannelId {
+    return switch (pos) {
+        c.SND_CHMAP_UNKNOWN, c.SND_CHMAP_NA => unreachable, // TODO
+        c.SND_CHMAP_MONO, c.SND_CHMAP_FC => .front_center,
+        c.SND_CHMAP_FL => .front_left,
+        c.SND_CHMAP_FR => .front_right,
+        c.SND_CHMAP_RL => .back_left,
+        c.SND_CHMAP_RR => .back_right,
+        c.SND_CHMAP_LFE => .lfe,
+        c.SND_CHMAP_SL => .side_left,
+        c.SND_CHMAP_SR => .side_right,
+        c.SND_CHMAP_RC => .back_center,
+        c.SND_CHMAP_FLC => .front_left_center,
+        c.SND_CHMAP_FRC => .front_right_center,
+        c.SND_CHMAP_RLC => .back_left_center,
+        c.SND_CHMAP_RRC => .back_right_center,
+        c.SND_CHMAP_FLW => .front_left_wide,
+        c.SND_CHMAP_FRW => .front_right_wide,
+        c.SND_CHMAP_FLH => .front_left_high,
+        c.SND_CHMAP_FCH => .front_center_high,
+        c.SND_CHMAP_FRH => .front_right_high,
+        c.SND_CHMAP_TC => .top_center,
+        c.SND_CHMAP_TFL => .top_front_left,
+        c.SND_CHMAP_TFR => .top_front_right,
+        c.SND_CHMAP_TFC => .top_front_center,
+        c.SND_CHMAP_TRL => .top_back_left,
+        c.SND_CHMAP_TRR => .top_back_right,
+        c.SND_CHMAP_TRC => .top_back_center,
+        c.SND_CHMAP_TFLC => .top_front_left_center,
+        c.SND_CHMAP_TFRC => .top_front_right_center,
+        c.SND_CHMAP_TSL => .top_side_left,
+        c.SND_CHMAP_TSR => .top_side_right,
+        c.SND_CHMAP_LLFE => .left_lfe,
+        c.SND_CHMAP_RLFE => .right_lfe,
+        c.SND_CHMAP_BC => .bottom_center,
+        c.SND_CHMAP_BLC => .bottom_left_center,
+        c.SND_CHMAP_BRC => .bottom_right_center,
+
+        else => unreachable,
+    };
+}
+
+pub fn toCHMAP(pos: ChannelId) c_uint {
+    return switch (pos) {
+        .front_center => c.SND_CHMAP_FC,
+        .front_left => c.SND_CHMAP_FL,
+        .front_right => c.SND_CHMAP_FR,
+        .back_left => c.SND_CHMAP_RL,
+        .back_right => c.SND_CHMAP_RR,
+        .lfe => c.SND_CHMAP_LFE,
+        .side_left => c.SND_CHMAP_SL,
+        .side_right => c.SND_CHMAP_SR,
+        .back_center => c.SND_CHMAP_RC,
+        .front_left_center => c.SND_CHMAP_FLC,
+        .front_right_center => c.SND_CHMAP_FRC,
+        .back_left_center => c.SND_CHMAP_RLC,
+        .back_right_center => c.SND_CHMAP_RRC,
+        .front_left_wide => c.SND_CHMAP_FLW,
+        .front_right_wide => c.SND_CHMAP_FRW,
+        .front_left_high => c.SND_CHMAP_FLH,
+        .front_center_high => c.SND_CHMAP_FCH,
+        .front_right_high => c.SND_CHMAP_FRH,
+        .top_center => c.SND_CHMAP_TC,
+        .top_front_left => c.SND_CHMAP_TFL,
+        .top_front_right => c.SND_CHMAP_TFR,
+        .top_front_center => c.SND_CHMAP_TFC,
+        .top_back_left => c.SND_CHMAP_TRL,
+        .top_back_right => c.SND_CHMAP_TRR,
+        .top_back_center => c.SND_CHMAP_TRC,
+        .top_front_left_center => c.SND_CHMAP_TFLC,
+        .top_front_right_center => c.SND_CHMAP_TFRC,
+        .top_side_left => c.SND_CHMAP_TSL,
+        .top_side_right => c.SND_CHMAP_TSR,
+        .left_lfe => c.SND_CHMAP_LLFE,
+        .right_lfe => c.SND_CHMAP_RLFE,
+        .bottom_center => c.SND_CHMAP_BC,
+        .bottom_left_center => c.SND_CHMAP_BLC,
+        .bottom_right_center => c.SND_CHMAP_BRC,
+
+        else => unreachable,
+    };
 }
