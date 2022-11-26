@@ -1,3 +1,3 @@
 ## TODO
 
--   [ ] Alsa MUTEX
+nothing yet?
