@@ -6,7 +6,7 @@ const Device = @import("main.zig").Device;
 const Format = @import("main.zig").Format;
 const ConnectOptions = @import("main.zig").ConnectOptions;
 const ChannelId = @import("main.zig").ChannelId;
-const ChannelArray = @import("main.zig").ChannelArray;
+const Channel = @import("main.zig").Channel;
 const Player = @import("main.zig").Player;
 const min_sample_rate = @import("main.zig").min_sample_rate;
 const max_sample_rate = @import("main.zig").max_sample_rate;
@@ -154,10 +154,10 @@ pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
     const sample_spec = c.pa_sample_spec{
         .format = try pulse_util.toPAFormat(player.format),
         .rate = player.sample_rate,
-        .channels = @intCast(u5, player.channels.len),
+        .channels = @intCast(u5, player.device.channels.len),
     };
 
-    const channel_map = try pulse_util.toPAChannelMap(player.channels);
+    const channel_map = try pulse_util.toPAChannelMap(player.device.channels);
 
     var stream = c.pa_stream_new(self.ctx, self.app_name.ptr, &sample_spec, &channel_map);
     if (stream == null)
@@ -224,42 +224,62 @@ pub fn playerDeinit(self: *Player) void {
 
 pub fn playerStart(self: *Player) !void {
     var bd = &self.backend_data.PulseAudio;
+
     c.pa_threaded_mainloop_lock(bd.main_loop);
     defer c.pa_threaded_mainloop_unlock(bd.main_loop);
+
     const op = c.pa_stream_cork(bd.stream, 0, null, null) orelse
         return error.StreamDisconnected;
     c.pa_operation_unref(op);
     c.pa_stream_set_write_callback(bd.stream, playbackStreamWriteCb, self);
 }
 
-pub fn playerPausePlay(self: *Player, pause: bool) !void {
+pub fn playerPlay(self: *Player) !void {
     var bd = &self.backend_data.PulseAudio;
 
-    if (c.pa_threaded_mainloop_in_thread(bd.main_loop) == 0)
-        c.pa_threaded_mainloop_lock(bd.main_loop);
-    defer if (c.pa_threaded_mainloop_in_thread(bd.main_loop) == 0)
-        c.pa_threaded_mainloop_unlock(bd.main_loop);
+    c.pa_threaded_mainloop_lock(bd.main_loop);
+    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
 
-    if (pause != (c.pa_stream_is_corked(bd.stream) != 0)) {
-        const op = c.pa_stream_cork(bd.stream, @boolToInt(pause), null, null) orelse
+    if (c.pa_stream_is_corked(bd.stream) > 0) {
+        const op = c.pa_stream_cork(bd.stream, 0, null, null) orelse
             return error.StreamDisconnected;
         c.pa_operation_unref(op);
     }
 }
 
+pub fn playerPause(self: *Player) !void {
+    var bd = &self.backend_data.PulseAudio;
+
+    c.pa_threaded_mainloop_lock(bd.main_loop);
+    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
+
+    if (c.pa_stream_is_corked(bd.stream) == 0) {
+        const op = c.pa_stream_cork(bd.stream, 1, null, null) orelse
+            return error.StreamDisconnected;
+        c.pa_operation_unref(op);
+    }
+}
+
+pub fn playerPaused(self: *Player) bool {
+    var bd = &self.backend_data.PulseAudio;
+
+    c.pa_threaded_mainloop_lock(bd.main_loop);
+    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
+
+    return c.pa_stream_is_corked(bd.stream) > 0;
+}
+
 pub fn playerSetVolume(self: *Player, volume: f32) !void {
     var bd = &self.backend_data.PulseAudio;
 
-    if (c.pa_threaded_mainloop_in_thread(bd.main_loop) == 0)
-        c.pa_threaded_mainloop_lock(bd.main_loop);
-    defer if (c.pa_threaded_mainloop_in_thread(bd.main_loop) == 0)
-        c.pa_threaded_mainloop_unlock(bd.main_loop);
+    c.pa_threaded_mainloop_lock(bd.main_loop);
+    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
 
     var v: c.pa_cvolume = undefined;
     _ = c.pa_cvolume_init(&v);
-    v.channels = @intCast(u5, self.channels.len);
+    v.channels = @intCast(u5, self.device.channels.len);
     const vol = @floatToInt(u32, @intToFloat(f32, c.PA_VOLUME_NORM) * volume);
-    for (self.channels.slice()) |_, i|
+    for (self.device.channels) |_, i|
         v.values[i] = vol;
 
     performOperation(
@@ -277,10 +297,8 @@ pub fn playerSetVolume(self: *Player, volume: f32) !void {
 pub fn playerVolume(self: *Player) !f32 {
     var bd = &self.backend_data.PulseAudio;
 
-    if (c.pa_threaded_mainloop_in_thread(bd.main_loop) == 0)
-        c.pa_threaded_mainloop_lock(bd.main_loop);
-    defer if (c.pa_threaded_mainloop_in_thread(bd.main_loop) == 0)
-        c.pa_threaded_mainloop_unlock(bd.main_loop);
+    c.pa_threaded_mainloop_lock(bd.main_loop);
+    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
 
     performOperation(
         bd.main_loop,
@@ -297,6 +315,7 @@ pub fn playerVolume(self: *Player) !f32 {
 pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
     allocator.free(self.id);
     allocator.free(self.name);
+    allocator.free(self.channels);
 }
 
 fn opSuccessCb(_: ?*c.pa_context, success: c_int, userdata: ?*anyopaque) callconv(.C) void {
@@ -338,11 +357,11 @@ fn playbackStreamWriteCb(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque)
                 else => unreachable,
             };
 
-        for (self.channels.slice()) |*ch, i| {
-            ch.*.ptr = bd.write_ptr + self.bytes_per_sample * i;
+        for (self.device.channels) |*ch, i| {
+            ch.*.ptr = bd.write_ptr + self.bytesPerSample() * i;
         }
 
-        const frames = chunk_size / self.bytes_per_frame;
+        const frames = chunk_size / self.bytesPerFrame();
         self.writeFn(self, err, frames);
 
         if (c.pa_stream_write(bd.stream, bd.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0)
@@ -457,7 +476,13 @@ fn deviceInfoCb(self: *PulseAudio, info: anytype, aim: Device.Aim) !void {
     var device = Device{
         .aim = aim,
         .is_raw = false,
-        .channels = try pulse_util.fromPAChannelMap(info.*.channel_map),
+        .channels = blk: {
+            // TODO: check channels count
+            var channels = try self.allocator.alloc(Channel, info.*.channel_map.channels);
+            for (channels) |*ch, i|
+                ch.*.id = pulse_util.fromPAChannelPos(info.*.channel_map.map[i]);
+            break :blk channels;
+        },
         .formats = pulse_util.supported_formats,
         .rate_range = .{
             .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),

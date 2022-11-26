@@ -1,5 +1,5 @@
 const c = @import("c.zig");
-const ChannelArray = @import("../main.zig").ChannelArray;
+const Channel = @import("../main.zig").Channel;
 const ChannelId = @import("../main.zig").ChannelId;
 const Format = @import("../main.zig").Format;
 
@@ -11,14 +11,7 @@ pub const supported_formats = &[_]Format{
     .i32, .f32,
 };
 
-pub fn fromPAChannelMap(map: c.pa_channel_map) !ChannelArray {
-    var channels = try ChannelArray.init(map.channels);
-    for (channels.slice()) |*ch, i|
-        ch.*.id = fromPAChannelPos(map.map[i]);
-    return channels;
-}
-
-fn fromPAChannelPos(pos: c.pa_channel_position_t) ChannelId {
+pub fn fromPAChannelPos(pos: c.pa_channel_position_t) ChannelId {
     return switch (pos) {
         c.PA_CHANNEL_POSITION_MONO => .front_center,
         c.PA_CHANNEL_POSITION_FRONT_LEFT => .front_left, // PA_CHANNEL_POSITION_LEFT
@@ -100,10 +93,10 @@ pub fn toPAFormat(format: Format) !c.pa_sample_format_t {
     };
 }
 
-pub fn toPAChannelMap(channels: ChannelArray) !c.pa_channel_map {
+pub fn toPAChannelMap(channels: []const Channel) !c.pa_channel_map {
     var channel_map: c.pa_channel_map = undefined;
     channel_map.channels = @intCast(u5, channels.len);
-    for (channels.slice()) |ch, i|
+    for (channels) |ch, i|
         channel_map.map[i] = try toPAChannelPos(ch.id);
     return channel_map;
 }

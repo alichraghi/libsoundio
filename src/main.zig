@@ -20,7 +20,7 @@ comptime {
     std.testing.refAllDeclsRecursive(@import("util.zig"));
 }
 
-pub const max_channels = 24;
+pub const max_channels = 32;
 pub const min_sample_rate = 8_000; // Hz
 pub const max_sample_rate = 5_644_800; // Hz
 pub const default_latency = 500 * std.time.ms_per_s; // μs
@@ -141,36 +141,30 @@ const SysAudio = union(Backend) {
 
     pub const PlayerOptions = struct {
         writeFn: Player.WriteFn,
-        sample_rate: u32 = 44_100,
         format: ?Format = null,
+        sample_rate: u32 = 44_100,
         userdata: ?*anyopaque = null,
     };
 
     pub fn createPlayer(self: SysAudio, device: Device, options: PlayerOptions) CreateStreamError!Player {
-        var format: ?Format = null;
-        if (options.format) |_| {
-            for (device.formats) |dfmt| {
-                if (options.format.? == dfmt) {
-                    format = dfmt;
-                    break;
-                }
-            }
-            if (format == null)
-                return error.IncompatibleDevice;
-        } else {
-            format = device.preferredFormat();
-        }
-
         var player = Player{
             .backend_data = undefined,
             .writeFn = options.writeFn,
             .userdata = options.userdata,
-            .channels = device.channels,
+            .device = device,
+            .format = blk: {
+                if (options.format) |format| {
+                    for (device.formats) |dfmt| {
+                        if (format == dfmt) {
+                            break :blk dfmt;
+                        }
+                    }
+                    return error.IncompatibleDevice;
+                }
+
+                break :blk device.preferredFormat();
+            },
             .sample_rate = device.rate_range.clamp(options.sample_rate),
-            .format = format.?,
-            .bytes_per_frame = format.?.bytesPerFrame(@intCast(u5, device.channels.len)),
-            .bytes_per_sample = format.?.bytesPerSample(),
-            .paused = false,
         };
         switch (self) {
             inline else => |b| try b.openPlayer(&player, device),
@@ -188,8 +182,6 @@ pub const StartStreamError = error{
     SystemResources,
 };
 
-pub const ChannelArray = std.BoundedArray(Channel, max_channels);
-
 pub const Player = struct {
     // TODO: `*Player` instead `*anyopaque`
     // https://github.com/ziglang/zig/issues/12325
@@ -198,12 +190,9 @@ pub const Player = struct {
 
     writeFn: WriteFn,
     userdata: ?*anyopaque,
-    channels: ChannelArray,
-    sample_rate: u32,
+    device: Device,
     format: Format,
-    bytes_per_frame: u32,
-    bytes_per_sample: u32,
-    paused: bool,
+    sample_rate: u32,
 
     backend_data: PlayerBackendData,
     const PlayerBackendData = union(Backend) {
@@ -223,19 +212,22 @@ pub const Player = struct {
         };
     }
 
-    pub fn pause(self: *Player) (StreamError || error{ CannotPlay, CannotPause })!void {
-        switch (current_backend.?) {
-            inline else => |b| try @field(This, @tagName(b)).playerPausePlay(self, true),
-        }
-        self.paused = true;
+    pub fn play(self: *Player) (StreamError || error{ CannotPlay, CannotPause })!void {
+        return switch (current_backend.?) {
+            inline else => |b| @field(This, @tagName(b)).playerPlay(self),
+        };
     }
 
-    pub fn play(self: *Player) (StreamError || error{ CannotPlay, CannotPause })!void {
-        if (!self.paused) return;
-        switch (current_backend.?) {
-            inline else => |b| try @field(This, @tagName(b)).playerPausePlay(self, false),
-        }
-        self.paused = false;
+    pub fn pause(self: *Player) (StreamError || error{ CannotPlay, CannotPause })!void {
+        return switch (current_backend.?) {
+            inline else => |b| @field(This, @tagName(b)).playerPause(self),
+        };
+    }
+
+    pub fn paused(self: *Player) bool {
+        return switch (current_backend.?) {
+            inline else => |b| @field(This, @tagName(b)).playerPaused(self),
+        };
     }
 
     pub const SetVolumeError = error{
@@ -261,8 +253,16 @@ pub const Player = struct {
         };
     }
 
+    pub fn bytesPerFrame(self: Player) u8 {
+        return self.format.bytesPerFrame(@intCast(u5, self.device.channels.len));
+    }
+
+    pub fn bytesPerSample(self: Player) u4 {
+        return self.format.bytesPerSample();
+    }
+
     pub fn writeAll(self: *Player, frame: usize, value: anytype) void {
-        for (self.channels.slice()) |_, i|
+        for (self.device.channels) |_, i|
             self.write(i, frame, value);
     }
 
@@ -283,7 +283,7 @@ pub const Player = struct {
     }
 
     pub inline fn writei8(self: *Player, channel: usize, frame: usize, sample: i8) void {
-        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
             .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = sample,
             .u8 => @panic("TODO"),
@@ -301,7 +301,7 @@ pub const Player = struct {
     }
 
     pub inline fn writeu8(self: *Player, channel: usize, frame: usize, sample: u8) void {
-        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
             .u8 => bytesAsValue(u8, ptr[0..@sizeOf(u8)]).* = sample,
@@ -319,7 +319,7 @@ pub const Player = struct {
     }
 
     pub inline fn writei16(self: *Player, channel: usize, frame: usize, sample: i16) void {
-        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
             .u8 => @panic("TODO"),
@@ -337,7 +337,7 @@ pub const Player = struct {
     }
 
     pub inline fn writeu16(self: *Player, channel: usize, frame: usize, sample: u16) void {
-        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
             .u8 => @panic("TODO"),
@@ -355,7 +355,7 @@ pub const Player = struct {
     }
 
     pub inline fn writei24(self: *Player, channel: usize, frame: usize, sample: i24) void {
-        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
             .u8 => @panic("TODO"),
@@ -373,7 +373,7 @@ pub const Player = struct {
     }
 
     pub inline fn writeu24(self: *Player, channel: usize, frame: usize, sample: u24) void {
-        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
             .u8 => @panic("TODO"),
@@ -391,7 +391,7 @@ pub const Player = struct {
     }
 
     pub inline fn writei32(self: *Player, channel: usize, frame: usize, sample: i32) void {
-        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
             .u8 => @panic("TODO"),
@@ -409,7 +409,7 @@ pub const Player = struct {
     }
 
     pub inline fn writeu32(self: *Player, channel: usize, frame: usize, sample: u32) void {
-        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
             .u8 => @panic("TODO"),
@@ -427,7 +427,7 @@ pub const Player = struct {
     }
 
     pub inline fn writef32(self: *Player, channel: usize, frame: usize, sample: f32) void {
-        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
             .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = f32ToSigned(i8, sample),
             .u8 => @panic("TODO"),
@@ -445,7 +445,7 @@ pub const Player = struct {
     }
 
     pub inline fn writef64(self: *Player, channel: usize, frame: usize, sample: f64) void {
-        var ptr = self.channels.get(channel).ptr + self.bytes_per_frame * frame;
+        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
             .i8 => @panic("TODO"),
             .u8 => @panic("TODO"),
@@ -478,7 +478,7 @@ pub const Device = struct {
     name: [:0]const u8,
     aim: Aim,
     is_raw: bool,
-    channels: ChannelArray,
+    channels: []Channel,
     formats: []const Format,
     rate_range: Range(u32),
 
@@ -644,7 +644,7 @@ pub const Format = enum {
     f32,
     f64,
 
-    pub fn bytesPerSample(self: Format) u5 {
+    pub fn bytesPerSample(self: Format) u4 {
         return switch (self) {
             .i8, .u8 => 1,
             .i16, .u16 => 2,

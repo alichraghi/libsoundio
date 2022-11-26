@@ -4,7 +4,7 @@ const util = @import("util.zig");
 const Device = @import("../main.zig").Device;
 const DevicesInfo = @import("../main.zig").DevicesInfo;
 const Format = @import("../main.zig").Format;
-const ChannelArray = @import("../main.zig").ChannelArray;
+const Channel = @import("../main.zig").Channel;
 const max_channels = @import("../main.zig").max_channels;
 
 pub fn queryDevices(devices_info: *DevicesInfo, allocator: std.mem.Allocator) !void {
@@ -82,10 +82,15 @@ pub fn queryDevices(devices_info: *DevicesInfo, allocator: std.mem.Allocator) !v
                     const chmap = c.snd_pcm_query_chmaps(pcm);
                     if (chmap) |_| {
                         defer c.snd_pcm_free_chmaps(chmap);
-                        if (chmap[0] == null or chmap[0][0].map.channels <= 0) continue;
-                        var channels = ChannelArray.init(std.math.min(max_channels, chmap[0][0].map.channels)) catch unreachable;
-                        for (channels.slice()) |*pos, i|
-                            pos.*.id = util.fromAlsaChmapPos(chmap[0][0].map.pos()[i]);
+
+                        if (chmap[0] == null) continue;
+
+                        const n_ch = chmap[0][0].map.channels;
+                        if (n_ch <= 0 or n_ch > max_channels) continue;
+
+                        var channels = try allocator.alloc(Channel, n_ch);
+                        for (channels) |*ch, i|
+                            ch.*.id = util.fromAlsaChmapPos(chmap[0][0].map.pos()[i]);
                         break :blk channels;
                     } else {
                         continue;

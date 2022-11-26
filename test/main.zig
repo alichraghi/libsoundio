@@ -42,7 +42,7 @@ test "waitEvents()" {
     }
 }
 
-test "Sine Wave (pause, play)" {
+test "Sine Wave (pause, play, volume)" {
     std.debug.print("\n", .{});
     inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} Sine Wave", .{@tagName(backend)});
@@ -56,6 +56,12 @@ test "Sine Wave (pause, play)" {
         try p.start();
         try p.setVolume(0.7);
         std.time.sleep(std.time.ns_per_s);
+
+        try p.pause();
+        std.time.sleep(std.time.ns_per_s);
+        try std.testing.expect(p.paused());
+        try p.play();
+        try std.testing.expect(!p.paused());
 
         try p.setVolume(0.5);
         std.time.sleep(std.time.ns_per_s);

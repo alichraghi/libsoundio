@@ -242,7 +242,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
             pcm,
             format,
             c.SND_PCM_ACCESS_RW_INTERLEAVED,
-            @intCast(u6, player.channels.len),
+            @intCast(c_uint, player.device.channels.len),
             player.sample_rate,
             1,
             default_latency,
@@ -265,9 +265,9 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     }
 
     {
-        var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(u6, player.channels.len) };
+        var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(c_uint, player.device.channels.len) };
 
-        for (player.channels.slice()) |ch, i|
+        for (player.device.channels) |ch, i|
             chmap.pos()[i] = alsa_util.toAlsaChmapPos(ch.id);
 
         if (c.snd_pcm_set_chmap(pcm, &chmap) < 0)
@@ -349,8 +349,8 @@ pub fn playerStart(self: *Player) !void {
 fn playerLoop(self: *Player) void {
     var bd = &self.backend_data.Alsa;
 
-    for (self.channels.slice()) |*ch, i| {
-        ch.*.ptr = bd.sample_buffer.ptr + i * self.bytes_per_sample;
+    for (self.device.channels) |*ch, i| {
+        ch.*.ptr = bd.sample_buffer.ptr + i * self.bytesPerSample();
     }
 
     var err: error{WriteFailed}!void = {};
@@ -371,15 +371,28 @@ fn playerLoop(self: *Player) void {
     }
 }
 
-pub fn playerPausePlay(self: *Player, pause: bool) !void {
+pub fn playerPlay(self: *Player) !void {
     const bd = &self.backend_data.Alsa;
 
-    if (c.snd_pcm_pause(bd.pcm, @boolToInt(pause)) < 0) {
-        return if (pause)
-            error.CannotPause
-        else
-            error.CannotPlay;
+    if (c.snd_pcm_state(bd.pcm) == c.SND_PCM_STATE_PAUSED) {
+        if (c.snd_pcm_pause(bd.pcm, 0) < 0)
+            return error.CannotPause;
     }
+}
+
+pub fn playerPause(self: *Player) !void {
+    const bd = &self.backend_data.Alsa;
+
+    if (c.snd_pcm_state(bd.pcm) != c.SND_PCM_STATE_PAUSED) {
+        if (c.snd_pcm_pause(bd.pcm, 1) < 0)
+            return error.CannotPause;
+    }
+}
+
+pub fn playerPaused(self: *Player) bool {
+    const bd = &self.backend_data.Alsa;
+
+    return c.snd_pcm_state(bd.pcm) == c.SND_PCM_STATE_PAUSED;
 }
 
 pub fn playerSetVolume(self: *Player, volume: f32) !void {
@@ -416,4 +429,5 @@ pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
     allocator.free(self.id);
     allocator.free(self.name);
     allocator.free(self.formats);
+    allocator.free(self.channels);
 }
