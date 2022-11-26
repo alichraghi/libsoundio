@@ -357,7 +357,7 @@ fn refreshDevices(self: *Alsa) !void {
     }
 }
 
-pub fn wakeUp(self: *Alsa) !void {
+pub fn wakeUp(self: *Alsa) void {
     self.mutex.lock();
     defer self.mutex.unlock();
 
@@ -441,7 +441,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
         defer self.allocator.free(card_id);
 
         if (c.snd_mixer_attach(mixer, card_id.ptr) < 0)
-            return error.OpeningDevice;
+            return error.IncompatibleDevice;
 
         if (c.snd_mixer_selem_register(mixer, null, null) < 0)
             return error.OpeningDevice;
@@ -535,7 +535,7 @@ pub fn playerPlay(self: *Player) !void {
 
     if (c.snd_pcm_state(bd.pcm) == c.SND_PCM_STATE_PAUSED) {
         if (c.snd_pcm_pause(bd.pcm, 0) < 0)
-            return error.CannotPause;
+            return error.CannotPlay;
     }
 }
 

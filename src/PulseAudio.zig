@@ -37,16 +37,13 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAud
 
     if (c.pa_context_connect(ctx, null, 0, null) != 0) {
         return switch (getError(ctx)) {
-            error.InvalidServer => error.InvalidServer,
-            error.ConnectionRefused => error.ConnectionRefused,
-            error.ConnectionTerminated => error.ConnectionTerminated,
             else => error.ConnectionRefused,
         };
     }
     errdefer c.pa_context_disconnect(ctx);
 
     if (c.pa_threaded_mainloop_start(main_loop) != 0)
-        return error.OutOfMemory;
+        return error.SystemResources;
     errdefer c.pa_threaded_mainloop_stop(main_loop);
 
     c.pa_threaded_mainloop_lock(main_loop);
@@ -79,13 +76,16 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAud
             c.PA_CONTEXT_AUTHORIZING,
             // The client is passing its application name to the daemon.
             c.PA_CONTEXT_SETTING_NAME,
-            // The connection was terminated cleanly.
-            c.PA_CONTEXT_TERMINATED,
             => c.pa_threaded_mainloop_wait(main_loop),
+
             // The connection is established, the context is ready to execute operations.
             c.PA_CONTEXT_READY => break,
+
+            // The connection was terminated cleanly.
+            c.PA_CONTEXT_TERMINATED,
             // The connection failed or was disconnected.
-            c.PA_CONTEXT_FAILED => return error.Disconnected,
+            c.PA_CONTEXT_FAILED,
+            => return error.ConnectionRefused,
 
             else => unreachable,
         }
@@ -279,7 +279,7 @@ pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
             .stream = stream.?,
             .status = std.atomic.Atomic(StreamStatus).init(.unknown),
             .write_ptr = undefined,
-            .volume = 0.0,
+            .volume = 1.0,
         },
     };
     var bd = &player.backend_data.PulseAudio;
@@ -311,7 +311,7 @@ pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
         switch (bd.status.load(.Unordered)) {
             .unknown => c.pa_threaded_mainloop_wait(self.main_loop),
             .ready => break,
-            .failure => return error.StreamDisconnected,
+            .failure => return error.OpeningDevice,
         }
     }
 }
@@ -357,7 +357,7 @@ pub fn playerStart(self: *Player) !void {
     defer c.pa_threaded_mainloop_unlock(bd.main_loop);
 
     const op = c.pa_stream_cork(bd.stream, 0, null, null) orelse
-        return error.StreamDisconnected;
+        return error.CannotPlay;
     c.pa_operation_unref(op);
 
     c.pa_stream_set_write_callback(bd.stream, playbackStreamWriteOp, self);
@@ -404,7 +404,7 @@ pub fn playerPlay(self: *Player) !void {
 
     if (c.pa_stream_is_corked(bd.stream) > 0) {
         const op = c.pa_stream_cork(bd.stream, 0, null, null) orelse
-            return error.StreamDisconnected;
+            return error.CannotPlay;
         c.pa_operation_unref(op);
     }
 }
@@ -417,7 +417,7 @@ pub fn playerPause(self: *Player) !void {
 
     if (c.pa_stream_is_corked(bd.stream) == 0) {
         const op = c.pa_stream_cork(bd.stream, 1, null, null) orelse
-            return error.StreamDisconnected;
+            return error.CannotPause;
         c.pa_operation_unref(op);
     }
 }
@@ -676,7 +676,7 @@ pub const RawError = error{
     OperationNotSupported,
     Unknown,
     NoExtension,
-    // Obsolete,
+    Obsolete,
     NotImplemented,
     // Forked,
     InputOutput,

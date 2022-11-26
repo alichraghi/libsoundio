@@ -41,10 +41,7 @@ const SysAudio = union(Backend) {
 
     pub const ConnectError = error{
         OutOfMemory,
-        Disconnected,
-        InvalidServer,
         ConnectionRefused,
-        ConnectionTerminated,
         SystemResources,
         AccessDenied,
     };
@@ -89,9 +86,6 @@ const SysAudio = union(Backend) {
 
     pub const EventsError = error{
         OutOfMemory,
-        Disconnected,
-        IncompatibleBackend,
-        InvalidFormat,
         OpeningDevice,
         SystemResources,
     };
@@ -108,9 +102,7 @@ const SysAudio = union(Backend) {
         };
     }
 
-    pub const WakeUpError = error{};
-
-    pub fn wakeUp(self: SysAudio) WakeUpError!void {
+    pub fn wakeUp(self: SysAudio) void {
         return switch (self) {
             inline else => |b| b.wakeUp(),
         };
@@ -132,10 +124,9 @@ const SysAudio = union(Backend) {
 
     pub const CreateStreamError = error{
         OutOfMemory,
+        SystemResources,
         IncompatibleBackend,
         IncompatibleDevice,
-        StreamDisconnected,
-        SystemResources,
         OpeningDevice,
     };
 
@@ -176,11 +167,6 @@ const SysAudio = union(Backend) {
 pub const StreamError = error{
     StreamDisconnected,
 };
-pub const StartStreamError = error{
-    StreamDisconnected,
-    OutOfMemory,
-    SystemResources,
-};
 
 pub const Player = struct {
     // TODO: `*Player` instead `*anyopaque`
@@ -206,19 +192,33 @@ pub const Player = struct {
         };
     }
 
-    pub fn start(self: *Player) StartStreamError!void {
+    pub const StartError = error{
+        CannotPlay,
+        OutOfMemory,
+        SystemResources,
+    };
+
+    pub fn start(self: *Player) StartError!void {
         return switch (current_backend.?) {
             inline else => |b| @field(This, @tagName(b)).playerStart(self),
         };
     }
 
-    pub fn play(self: *Player) (StreamError || error{ CannotPlay, CannotPause })!void {
+    pub const PlayError = error{
+        CannotPlay,
+    };
+
+    pub fn play(self: *Player) PlayError!void {
         return switch (current_backend.?) {
             inline else => |b| @field(This, @tagName(b)).playerPlay(self),
         };
     }
 
-    pub fn pause(self: *Player) (StreamError || error{ CannotPlay, CannotPause })!void {
+    pub const PauseError = error{
+        CannotPause,
+    };
+
+    pub fn pause(self: *Player) PauseError!void {
         return switch (current_backend.?) {
             inline else => |b| @field(This, @tagName(b)).playerPause(self),
         };
