@@ -3,9 +3,7 @@ const c = @import("PulseAudio/c.zig");
 const pulse_util = @import("PulseAudio/util.zig");
 const DevicesInfo = @import("main.zig").DevicesInfo;
 const Device = @import("main.zig").Device;
-const Format = @import("main.zig").Format;
 const ConnectOptions = @import("main.zig").ConnectOptions;
-const ChannelId = @import("main.zig").ChannelId;
 const Channel = @import("main.zig").Channel;
 const Player = @import("main.zig").Player;
 const min_sample_rate = @import("main.zig").min_sample_rate;
@@ -231,6 +229,7 @@ pub fn playerStart(self: *Player) !void {
     const op = c.pa_stream_cork(bd.stream, 0, null, null) orelse
         return error.StreamDisconnected;
     c.pa_operation_unref(op);
+
     c.pa_stream_set_write_callback(bd.stream, playbackStreamWriteCb, self);
 }
 
@@ -309,6 +308,7 @@ pub fn playerVolume(self: *Player) !f32 {
             bd,
         ),
     );
+
     return bd.volume;
 }
 
@@ -316,14 +316,6 @@ pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
     allocator.free(self.id);
     allocator.free(self.name);
     allocator.free(self.channels);
-}
-
-fn opSuccessCb(_: ?*c.pa_context, success: c_int, userdata: ?*anyopaque) callconv(.C) void {
-    var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
-
-    if (success == 1) {
-        c.pa_threaded_mainloop_signal(bd.main_loop, 0);
-    }
 }
 
 fn sinkInputInfoCb(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
@@ -335,59 +327,6 @@ fn sinkInputInfoCb(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol:
     }
 
     bd.volume = @intToFloat(f32, info.*.volume.values[0]) / @intToFloat(f32, c.PA_VOLUME_NORM);
-}
-
-fn playbackStreamWriteCb(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
-    var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
-    var bd = &self.backend_data.PulseAudio;
-
-    var frames_left = nbytes;
-    var err: error{WriteFailed}!void = {};
-    while (frames_left > 0) {
-        var chunk_size = frames_left;
-        if (c.pa_stream_begin_write(
-            bd.stream,
-            @ptrCast(
-                [*c]?*anyopaque,
-                @alignCast(@alignOf([*c]?*anyopaque), &bd.write_ptr),
-            ),
-            &chunk_size,
-        ) != 0)
-            return switch (pulse_util.getError(bd.ctx)) {
-                else => unreachable,
-            };
-
-        for (self.device.channels) |*ch, i| {
-            ch.*.ptr = bd.write_ptr + self.bytesPerSample() * i;
-        }
-
-        const frames = chunk_size / self.bytesPerFrame();
-        self.writeFn(self, err, frames);
-
-        if (c.pa_stream_write(bd.stream, bd.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0)
-            err = error.WriteFailed;
-        frames_left -= chunk_size;
-    }
-}
-
-fn playbackStreamStateCb(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
-    var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
-
-    switch (c.pa_stream_get_state(stream)) {
-        c.PA_STREAM_UNCONNECTED,
-        c.PA_STREAM_CREATING,
-        c.PA_STREAM_TERMINATED,
-        => {},
-        c.PA_STREAM_READY => {
-            bd.status.store(.ready, .Unordered);
-            c.pa_threaded_mainloop_signal(bd.main_loop, 0);
-        },
-        c.PA_STREAM_FAILED => {
-            bd.status.store(.failure, .Unordered);
-            c.pa_threaded_mainloop_signal(bd.main_loop, 0);
-        },
-        else => unreachable,
-    }
 }
 
 fn refreshDevices(self: *PulseAudio) !void {
@@ -445,6 +384,17 @@ fn contextStateCb(ctx: ?*c.pa_context, userdata: ?*anyopaque) callconv(.C) void 
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
+fn serverInfoCb(_: ?*c.pa_context, info: [*c]const c.pa_server_info, userdata: ?*anyopaque) callconv(.C) void {
+    var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
+
+    defer c.pa_threaded_mainloop_signal(self.main_loop, 0);
+    self.default_sink = self.allocator.dupeZ(u8, std.mem.span(info.*.default_sink_name)) catch return;
+    self.default_source = self.allocator.dupeZ(u8, std.mem.span(info.*.default_source_name)) catch {
+        self.allocator.free(self.default_sink.?);
+        return;
+    };
+}
+
 fn sinkInfoCb(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
 
@@ -495,13 +445,63 @@ fn deviceInfoCb(self: *PulseAudio, info: anytype, aim: Device.Aim) !void {
     try self.devices_info.list.append(self.allocator, device);
 }
 
-fn serverInfoCb(_: ?*c.pa_context, info: [*c]const c.pa_server_info, userdata: ?*anyopaque) callconv(.C) void {
-    var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
+fn playbackStreamStateCb(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
+    var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
 
-    defer c.pa_threaded_mainloop_signal(self.main_loop, 0);
-    self.default_sink = self.allocator.dupeZ(u8, std.mem.span(info.*.default_sink_name)) catch return;
-    self.default_source = self.allocator.dupeZ(u8, std.mem.span(info.*.default_source_name)) catch {
-        self.allocator.free(self.default_sink.?);
-        return;
-    };
+    switch (c.pa_stream_get_state(stream)) {
+        c.PA_STREAM_UNCONNECTED,
+        c.PA_STREAM_CREATING,
+        c.PA_STREAM_TERMINATED,
+        => {},
+        c.PA_STREAM_READY => {
+            bd.status.store(.ready, .Unordered);
+            c.pa_threaded_mainloop_signal(bd.main_loop, 0);
+        },
+        c.PA_STREAM_FAILED => {
+            bd.status.store(.failure, .Unordered);
+            c.pa_threaded_mainloop_signal(bd.main_loop, 0);
+        },
+        else => unreachable,
+    }
+}
+
+fn playbackStreamWriteCb(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
+    var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
+    var bd = &self.backend_data.PulseAudio;
+
+    var frames_left = nbytes;
+    var err: error{WriteFailed}!void = {};
+    while (frames_left > 0) {
+        var chunk_size = frames_left;
+        if (c.pa_stream_begin_write(
+            bd.stream,
+            @ptrCast(
+                [*c]?*anyopaque,
+                @alignCast(@alignOf([*c]?*anyopaque), &bd.write_ptr),
+            ),
+            &chunk_size,
+        ) != 0)
+            return switch (pulse_util.getError(bd.ctx)) {
+                else => unreachable,
+            };
+
+        for (self.device.channels) |*ch, i| {
+            ch.*.ptr = bd.write_ptr + self.bytesPerSample() * i;
+        }
+
+        const frames = chunk_size / self.bytesPerFrame();
+        self.writeFn(self, err, frames);
+
+        if (c.pa_stream_write(bd.stream, bd.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0)
+            err = error.WriteFailed;
+        frames_left -= chunk_size;
+    }
+}
+
+fn opSuccessCb(_: ?*c.pa_context, success: c_int, userdata: ?*anyopaque) callconv(.C) void {
+    var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
+
+    if (success == 1) {
+        c.pa_threaded_mainloop_signal(bd.main_loop, 0);
+    }
 }

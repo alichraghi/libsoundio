@@ -2,10 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 pub fn hasFlag(int: anytype, flags: @TypeOf(int)) bool {
-    return if (int & flags == flags)
-        true
-    else
-        false;
+    return int & flags == flags;
 }
 
 test "hasFlag()" {
