@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const pkg = std.build.Pkg{
-    .name = "soundio",
+    .name = "sysaudio",
     .source = .{ .path = "src/main.zig" },
 };
 

@@ -7,11 +7,11 @@ const PulseAudio = @import("PulseAudio.zig");
 const Alsa = @import("Alsa.zig");
 
 const This = @This();
-pub usingnamespace SoundIO;
+pub usingnamespace SysAudio;
 
 comptime {
     std.testing.refAllDecls(@This());
-    std.testing.refAllDeclsRecursive(SoundIO);
+    std.testing.refAllDeclsRecursive(SysAudio);
     std.testing.refAllDeclsRecursive(Player);
     std.testing.refAllDeclsRecursive(Device);
     std.testing.refAllDeclsRecursive(channel_layout);
@@ -31,7 +31,7 @@ pub const Backend = enum {
     PulseAudio,
     Alsa,
 };
-const SoundIO = union(Backend) {
+const SysAudio = union(Backend) {
     PulseAudio: *PulseAudio,
     Alsa: *Alsa,
 
@@ -50,12 +50,12 @@ const SoundIO = union(Backend) {
     };
 
     /// must be called in the main thread
-    pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SoundIO {
+    pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SysAudio {
         std.debug.assert(current_backend == null);
-        var data: SoundIO = undefined;
+        var data: SysAudio = undefined;
         if (backend) |b| {
             data = @unionInit(
-                SoundIO,
+                SysAudio,
                 @tagName(b),
                 switch (b) {
                     .Alsa => try Alsa.connect(allocator),
@@ -80,7 +80,7 @@ const SoundIO = union(Backend) {
         return data;
     }
 
-    pub fn deinit(self: SoundIO) void {
+    pub fn deinit(self: SysAudio) void {
         switch (self) {
             inline else => |b| b.deinit(),
         }
@@ -96,13 +96,13 @@ const SoundIO = union(Backend) {
         SystemResources,
     };
 
-    pub fn flushEvents(self: SoundIO) EventsError!void {
+    pub fn flushEvents(self: SysAudio) EventsError!void {
         return switch (self) {
             inline else => |b| b.flushEvents(),
         };
     }
 
-    pub fn waitEvents(self: SoundIO) EventsError!void {
+    pub fn waitEvents(self: SysAudio) EventsError!void {
         return switch (self) {
             inline else => |b| b.waitEvents(),
         };
@@ -110,19 +110,19 @@ const SoundIO = union(Backend) {
 
     pub const WakeUpError = error{};
 
-    pub fn wakeUp(self: SoundIO) WakeUpError!void {
+    pub fn wakeUp(self: SysAudio) WakeUpError!void {
         return switch (self) {
             inline else => |b| b.wakeUp(),
         };
     }
 
-    pub fn devicesList(self: SoundIO) []const Device {
+    pub fn devicesList(self: SysAudio) []const Device {
         return switch (self) {
             inline else => |b| b.devices_info.list.items,
         };
     }
 
-    pub fn getDevice(self: SoundIO, aim: Device.Aim, index: ?usize) ?Device {
+    pub fn getDevice(self: SysAudio, aim: Device.Aim, index: ?usize) ?Device {
         switch (self) {
             inline else => |b| {
                 return b.devices_info.get(index orelse return b.devices_info.default(aim));
@@ -146,7 +146,7 @@ const SoundIO = union(Backend) {
         userdata: ?*anyopaque = null,
     };
 
-    pub fn createPlayer(self: SoundIO, device: Device, options: PlayerOptions) CreateStreamError!Player {
+    pub fn createPlayer(self: SysAudio, device: Device, options: PlayerOptions) CreateStreamError!Player {
         var format: ?Format = null;
         if (options.format) |_| {
             for (device.formats) |dfmt| {
@@ -188,7 +188,7 @@ pub const StartStreamError = error{
     SystemResources,
 };
 
-pub const ChannelsArray = std.BoundedArray(Channel, max_channels);
+pub const ChannelArray = std.BoundedArray(Channel, max_channels);
 
 pub const Player = struct {
     // TODO: `*Player` instead `*anyopaque`
@@ -198,7 +198,7 @@ pub const Player = struct {
 
     writeFn: WriteFn,
     userdata: ?*anyopaque,
-    channels: ChannelsArray,
+    channels: ChannelArray,
     sample_rate: u32,
     format: Format,
     bytes_per_frame: u32,
@@ -478,7 +478,7 @@ pub const Device = struct {
     name: [:0]const u8,
     aim: Aim,
     is_raw: bool,
-    channels: ChannelsArray,
+    channels: ChannelArray,
     formats: []const Format,
     rate_range: Range(u32),
 

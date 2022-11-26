@@ -1,11 +1,11 @@
 const std = @import("std");
-const soundio = @import("soundio");
+const sysaudio = @import("sysaudio");
 
 test "connect()" {
     std.debug.print("\n", .{});
-    inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
+    inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} connect()\n", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.testing.allocator, .{});
+        var a = try sysaudio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
         try a.flushEvents();
         try std.testing.expect(a.devicesList().len > 0);
@@ -14,9 +14,9 @@ test "connect()" {
 
 test "wakeUp()" {
     std.debug.print("\n", .{});
-    inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
+    inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} wakeUp()\n", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.testing.allocator, .{});
+        var a = try sysaudio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
         var wait: usize = 4;
         while (wait > 0) : (wait -= 1) {
@@ -30,9 +30,9 @@ test "waitEvents()" {
     if (true) return error.SkipZigTest;
 
     std.debug.print("\n", .{});
-    inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
+    inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} waitEvents()\n", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.testing.allocator, .{});
+        var a = try sysaudio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
         var wait: usize = 4;
         while (wait > 0) : (wait -= 1) {
@@ -44,9 +44,9 @@ test "waitEvents()" {
 
 test "Sine Wave (pause, play)" {
     std.debug.print("\n", .{});
-    inline for (&[_]soundio.Backend{ .Alsa, .PulseAudio }) |backend| {
+    inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio }) |backend| {
         std.debug.print("{s} Sine Wave", .{@tagName(backend)});
-        var a = try soundio.connect(backend, std.testing.allocator, .{});
+        var a = try sysaudio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
         try a.flushEvents();
         const device = a.getDevice(.playback, null) orelse return error.SkipZigTest;
@@ -74,9 +74,9 @@ test "Sine Wave (pause, play)" {
 const pitch = 440.0;
 const radians_per_second = pitch * 2.0 * std.math.pi;
 var seconds_offset: f32 = 0.0;
-fn writeCallback(self_opaque: *anyopaque, err: soundio.Player.WriteError!void, n_frame: usize) void {
+fn writeCallback(self_opaque: *anyopaque, err: sysaudio.Player.WriteError!void, n_frame: usize) void {
     err catch unreachable;
-    var self = @ptrCast(*soundio.Player, @alignCast(@alignOf(soundio.Player), self_opaque));
+    var self = @ptrCast(*sysaudio.Player, @alignCast(@alignOf(sysaudio.Player), self_opaque));
 
     // var frame: usize = 0;
     // var r = std.rand.DefaultPrng.init(@intCast(u64, std.time.timestamp()));

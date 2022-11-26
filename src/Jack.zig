@@ -43,7 +43,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Jack {
         .shutdownFn = options.shutdownFn,
         .userdata = options.userdata,
         .devices_info = DevicesInfo.init(),
-        .client = c.jack_client_open("SoundIO", c.JackNoStartServer, &status) orelse {
+        .client = c.jack_client_open(options.app_name, c.JackNoStartServer, &status) orelse {
             std.debug.assert(status & c.JackInvalidOption == 0);
             return if (status & c.JackShmFailure != 0)
                 error.SystemResources
