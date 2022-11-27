@@ -3,7 +3,7 @@ const sysaudio = @import("sysaudio");
 
 test "connect()" {
     std.debug.print("\n", .{});
-    inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio }) |backend| {
+    inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio, .Dummy }) |backend| {
         std.debug.print("{s} connect()\n", .{@tagName(backend)});
         var a = try sysaudio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
@@ -14,7 +14,7 @@ test "connect()" {
 
 test "wakeUp()" {
     std.debug.print("\n", .{});
-    inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio }) |backend| {
+    inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio, .Dummy }) |backend| {
         std.debug.print("{s} wakeUp()\n", .{@tagName(backend)});
         var a = try sysaudio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
@@ -30,7 +30,7 @@ test "waitEvents()" {
     if (true) return error.SkipZigTest;
 
     std.debug.print("\n", .{});
-    inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio }) |backend| {
+    inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio, .Dummy }) |backend| {
         std.debug.print("{s} waitEvents()\n", .{@tagName(backend)});
         var a = try sysaudio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
@@ -44,17 +44,17 @@ test "waitEvents()" {
 
 test "Sine Wave (pause, play, volume)" {
     std.debug.print("\n", .{});
-    inline for (&[_]sysaudio.Backend{ .Alsa, .PulseAudio }) |backend| {
-        std.debug.print("{s} Sine Wave", .{@tagName(backend)});
+    inline for (&[_]sysaudio.Backend{.PulseAudio}) |backend| {
+        std.debug.print("{s} Sine Wave\n", .{@tagName(backend)});
         var a = try sysaudio.connect(backend, std.testing.allocator, .{});
         defer a.deinit();
         try a.flushEvents();
-        const device = a.getDevice(.playback, null) orelse return error.SkipZigTest;
+        const device = a.getDevice(.playback, null) orelse return error.eeeeee;
 
         var p = try a.createPlayer(device, .{ .writeFn = writeCallback, .format = .i16 });
         defer p.deinit();
         try p.start();
-        try p.setVolume(0.7);
+        try p.setVolume(1.0);
         std.time.sleep(std.time.ns_per_s);
 
         try p.pause();
@@ -63,17 +63,23 @@ test "Sine Wave (pause, play, volume)" {
         try p.play();
         try std.testing.expect(!p.paused());
 
+        try p.setVolume(0.7);
+        std.time.sleep(std.time.ns_per_s);
+
         try p.setVolume(0.5);
         std.time.sleep(std.time.ns_per_s);
 
         try p.setVolume(0.3);
         std.time.sleep(std.time.ns_per_s);
-
-        try p.setVolume(0.12);
+        try p.setVolume(0.1);
+        std.time.sleep(std.time.ns_per_s);
         const volume = try p.volume();
         try std.testing.expect(volume >= 0.11);
 
         std.debug.print("{d}\n", .{volume});
+
+        if (backend == .Alsa)
+            try p.setVolume(1.0);
     }
 }
 

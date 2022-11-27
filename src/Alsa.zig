@@ -171,6 +171,7 @@ fn deviceEventsLoop(self: *Alsa) !void {
 
                     self.mutex.lock();
                     defer self.mutex.unlock();
+
                     self.scan_queued.store(true, .Release);
                     self.cond.signal();
                 }
@@ -368,6 +369,7 @@ pub fn wakeUp(self: *Alsa) void {
 pub const PlayerData = struct {
     allocator: std.mem.Allocator,
     thread: std.Thread,
+    mutex: std.Thread.Mutex,
     aborted: std.atomic.Atomic(bool),
     sample_buffer: []u8,
     pcm: *c.snd_pcm_t,
@@ -465,6 +467,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     player.backend_data = .{
         .Alsa = .{
             .allocator = self.allocator,
+            .mutex = .{},
             .sample_buffer = try self.allocator.alloc(u8, buf_size),
             .aborted = .{ .value = false },
             .vol_range = .{ .min = vol_min, .max = vol_max },
@@ -513,9 +516,7 @@ fn playerLoop(self: *Player) void {
     }
 
     var err: error{WriteFailed}!void = {};
-    while (true) {
-        if (bd.aborted.load(.Unordered)) return;
-
+    while (!bd.aborted.load(.Unordered)) {
         var frames_left = bd.period_size;
         while (frames_left > 0) {
             self.writeFn(self, err, frames_left);
@@ -557,6 +558,9 @@ pub fn playerPaused(self: *Player) bool {
 pub fn playerSetVolume(self: *Player, volume: f32) !void {
     var bd = &self.backend_data.Alsa;
 
+    bd.mutex.lock();
+    defer bd.mutex.unlock();
+
     const dist = @intToFloat(f32, bd.vol_range.max - bd.vol_range.min);
     if (c.snd_mixer_selem_set_playback_volume_all(
         bd.mixer_elm,
@@ -567,6 +571,9 @@ pub fn playerSetVolume(self: *Player, volume: f32) !void {
 
 pub fn playerVolume(self: *Player) !f32 {
     var bd = &self.backend_data.Alsa;
+
+    bd.mutex.lock();
+    defer bd.mutex.unlock();
 
     var volume: c_long = 0;
     var channel: c_int = 0;

@@ -15,35 +15,9 @@
             }
         },
         {
-            "label": "Build B",
-            "type": "shell",
-            "command": "cd brucelib && ~/dev/zig/build/stage3/bin/zig build",
-            "problemMatcher": [],
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "presentation": {
-                "clear": true
-            }
-        },
-        {
             "label": "Build C",
             "type": "shell",
             "command": "cd build && make",
-            "problemMatcher": [],
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "presentation": {
-                "clear": true
-            }
-        },
-        {
-            "label": "Build TC",
-            "type": "shell",
-            "command": "zigo cc c.c -L/home/ali/dev/libsoundio/alsa-lib/src/.libs -lasound -lm",
             "problemMatcher": [],
             "group": {
                 "kind": "build",

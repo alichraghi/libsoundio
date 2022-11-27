@@ -434,9 +434,9 @@ pub fn playerSetVolume(self: *Player, volume: f32) !void {
     var v: c.pa_cvolume = undefined;
     _ = c.pa_cvolume_init(&v);
     v.channels = @intCast(u5, self.device.channels.len);
-    const vol = @floatToInt(u32, @intToFloat(f32, c.PA_VOLUME_NORM) * volume);
-    for (self.device.channels) |_, i|
-        v.values[i] = vol;
+    for (self.device.channels) |_, i| {
+        _ = c.pa_cvolume_set(&v, @intCast(c_uint, i), c.pa_sw_volume_from_linear(volume));
+    }
 
     performOperation(
         bd.main_loop,

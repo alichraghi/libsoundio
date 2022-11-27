@@ -5,6 +5,7 @@ const bytesAsValue = std.mem.bytesAsValue;
 
 const PulseAudio = @import("PulseAudio.zig");
 const Alsa = @import("Alsa.zig");
+const Dummy = @import("Dummy.zig");
 
 const This = @This();
 pub usingnamespace SysAudio;
@@ -17,26 +18,31 @@ comptime {
     std.testing.refAllDeclsRecursive(channel_layout);
     std.testing.refAllDeclsRecursive(PulseAudio);
     std.testing.refAllDeclsRecursive(Alsa);
+    std.testing.refAllDeclsRecursive(Dummy);
     std.testing.refAllDeclsRecursive(@import("util.zig"));
 }
 
 pub const max_channels = 32;
 pub const min_sample_rate = 8_000; // Hz
 pub const max_sample_rate = 5_644_800; // Hz
-pub const default_latency = 500 * std.time.ms_per_s; // μs
+pub const default_latency = 500 * std.time.us_per_ms; // μs
 
 var current_backend: ?Backend = null;
 
 pub const Backend = enum {
     PulseAudio,
     Alsa,
+    Dummy,
 };
+
 const SysAudio = union(Backend) {
     PulseAudio: *PulseAudio,
     Alsa: *Alsa,
+    Dummy: *Dummy,
 
     pub const ConnectOptions = struct {
-        app_name: [:0]const u8 = "mach/sysaudio",
+        app_name: [:0]const u8 = "mach game",
+        no_dummy: bool = false,
     };
 
     pub const ConnectError = error{
@@ -57,15 +63,18 @@ const SysAudio = union(Backend) {
                 switch (b) {
                     .Alsa => try Alsa.connect(allocator),
                     .PulseAudio => try PulseAudio.connect(allocator, options),
+                    .Dummy => try Dummy.connect(allocator),
                 },
             );
         } else {
             switch (builtin.os.tag) {
                 .linux, .freebsd => {
                     if (PulseAudio.connect(allocator, options)) |res| {
-                        data = .{ .pulseaudio = res };
-                    } else |err| {
-                        data = .{ .alsa = Alsa.connect(allocator) catch return err };
+                        data = .{ .PulseAudio = res };
+                    } else if (Alsa.connect(allocator)) |res| {
+                        data = .{ .Alsa = res };
+                    } else {
+                        data = .{ .Dummy = Dummy.connect() };
                     }
                 },
                 .macos, .ios, .watchos, .tvos => @panic("TODO: CoreAudio"),
@@ -184,6 +193,7 @@ pub const Player = struct {
     const PlayerBackendData = union(Backend) {
         PulseAudio: PulseAudio.PlayerData,
         Alsa: Alsa.PlayerData,
+        Dummy: Dummy.PlayerData,
     };
 
     pub fn deinit(self: *Player) void {
