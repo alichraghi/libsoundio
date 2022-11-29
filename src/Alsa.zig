@@ -3,6 +3,7 @@ const c = @cImport(@cInclude("asoundlib.h"));
 const util = @import("util.zig");
 const Channel = @import("main.zig").Channel;
 const ChannelId = @import("main.zig").ChannelId;
+const ConnectOptions = @import("main.zig").ConnectOptions;
 const Device = @import("main.zig").Device;
 const DevicesInfo = @import("main.zig").DevicesInfo;
 const Format = @import("main.zig").Format;
@@ -27,7 +28,8 @@ notify_fd: std.os.fd_t,
 notify_wd: std.os.fd_t,
 notify_pipe_fd: [2]std.os.fd_t,
 
-pub fn connect(allocator: std.mem.Allocator) !*Alsa {
+pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
+    _ = options;
     const notify_fd = std.os.inotify_init1(std.os.linux.IN.NONBLOCK) catch |err| switch (err) {
         error.ProcessFdQuotaExceeded,
         error.SystemFdQuotaExceeded,
@@ -98,7 +100,7 @@ pub fn connect(allocator: std.mem.Allocator) !*Alsa {
     return self;
 }
 
-pub fn deinit(self: *Alsa) void {
+pub fn disconnect(self: *Alsa) void {
     self.aborted.store(true, .Unordered);
 
     // wake up thread
@@ -218,7 +220,7 @@ fn refreshDevices(self: *Alsa) !void {
         const card_id = std.fmt.bufPrintZ(&card_id_buf, "hw:{d}", .{card_idx}) catch break;
 
         var ctl: ?*c.snd_ctl_t = undefined;
-        _ = switch (c.snd_ctl_open(&ctl, card_id.ptr, c.SND_PCM_ASYNC)) {
+        _ = switch (c.snd_ctl_open(&ctl, card_id.ptr, 0)) {
             0 => {},
             -@intCast(i16, @enumToInt(std.os.E.NOENT)) => break,
             else => return error.OpeningDevice,
@@ -251,11 +253,11 @@ fn refreshDevices(self: *Alsa) !void {
                 else => return error.SystemResources,
             }
 
-            var buf: [8]u8 = undefined; // max card|device num is 2 digit
+            var buf: [9]u8 = undefined; // 'hw' + max(card|device) * 2 + ':' + \0
             const id = std.fmt.bufPrintZ(&buf, "hw:{d},{d}", .{ card_idx, dev_idx }) catch continue;
 
             var pcm: ?*c.snd_pcm_t = null;
-            if (c.snd_pcm_open(&pcm, id.ptr, snd_stream, c.SND_PCM_NONBLOCK) < 0)
+            if (c.snd_pcm_open(&pcm, id.ptr, snd_stream, 0) < 0)
                 continue;
             defer _ = c.snd_pcm_close(pcm);
 
@@ -388,11 +390,10 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     var selem: ?*c.snd_mixer_selem_id_t = null;
     var mixer_elm: ?*c.snd_mixer_elem_t = null;
     var period_size: c_ulong = 0;
-    var buf_size: c_ulong = 0;
     var vol_min: c_long = 0;
     var vol_max: c_long = 0;
 
-    if (c.snd_pcm_open(&pcm, device.id.ptr, aimToStream(device.aim), c.SND_PCM_ASYNC) < 0)
+    if (c.snd_pcm_open(&pcm, device.id.ptr, aimToStream(device.aim), 0) < 0)
         return error.OpeningDevice;
     errdefer _ = c.snd_pcm_close(pcm);
 
@@ -419,9 +420,6 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
             return error.OpeningDevice;
 
         if (c.snd_pcm_hw_params_get_period_size(hw_params, &period_size, null) < 0)
-            return error.OpeningDevice;
-
-        if (c.snd_pcm_hw_params_get_buffer_size(hw_params, &buf_size) < 0)
             return error.OpeningDevice;
     }
 
@@ -468,7 +466,10 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
         .Alsa = .{
             .allocator = self.allocator,
             .mutex = .{},
-            .sample_buffer = try self.allocator.alloc(u8, buf_size),
+            .sample_buffer = try self.allocator.alloc(
+                u8,
+                player.bytesPerFrame() * period_size,
+            ),
             .aborted = .{ .value = false },
             .vol_range = .{ .min = vol_min, .max = vol_max },
             .pcm = pcm.?,

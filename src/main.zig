@@ -3,179 +3,181 @@ const std = @import("std");
 const channel_layout = @import("channel_layout.zig");
 const bytesAsValue = std.mem.bytesAsValue;
 
-const PulseAudio = @import("PulseAudio.zig");
-const Alsa = @import("Alsa.zig");
+const PulseAudio = if (builtin.os.tag == .linux) @import("PulseAudio.zig") else void;
+const Alsa = if (builtin.os.tag == .linux) @import("Alsa.zig") else void;
+const WASApi = if (builtin.os.tag == .windows) @import("WASApi.zig") else void;
 const Dummy = @import("Dummy.zig");
 
-const This = @This();
-pub usingnamespace SysAudio;
-
 comptime {
-    std.testing.refAllDecls(@This());
-    std.testing.refAllDeclsRecursive(SysAudio);
-    std.testing.refAllDeclsRecursive(Player);
-    std.testing.refAllDeclsRecursive(Device);
-    std.testing.refAllDeclsRecursive(channel_layout);
-    std.testing.refAllDeclsRecursive(PulseAudio);
-    std.testing.refAllDeclsRecursive(Alsa);
-    std.testing.refAllDeclsRecursive(Dummy);
-    std.testing.refAllDeclsRecursive(@import("util.zig"));
+    std.testing.refAllDeclsRecursive(@This());
 }
+
+const SysAudio = @This();
 
 pub const max_channels = 32;
 pub const min_sample_rate = 8_000; // Hz
 pub const max_sample_rate = 5_644_800; // Hz
+pub const default_sample_rate = 44_100; // Hz
 pub const default_latency = 500 * std.time.us_per_ms; // μs
 
 var current_backend: ?Backend = null;
 
-pub const Backend = enum {
-    PulseAudio,
-    Alsa,
-    Dummy,
+pub const Backend = std.meta.Tag(BackendType);
+pub const BackendType = switch (builtin.os.tag) {
+    .linux,
+    .kfreebsd,
+    .freebsd,
+    .openbsd,
+    .netbsd,
+    .dragonfly,
+    => union(enum) {
+        PulseAudio: *PulseAudio,
+        Alsa: *Alsa,
+        Dummy: *Dummy,
+    },
+    .windows => union(enum) {
+        // WASApi,
+        Dummy: *Dummy,
+    },
+    .ios, .macos, .watchos, .tvos => union(enum) {
+        // CoreAudio,
+        Dummy: *Dummy,
+    },
+    else => union(enum) {
+        Dummy: *Dummy,
+    },
 };
 
-const SysAudio = union(Backend) {
-    PulseAudio: *PulseAudio,
-    Alsa: *Alsa,
-    Dummy: *Dummy,
+data: BackendType,
 
-    pub const ConnectOptions = struct {
-        app_name: [:0]const u8 = "mach game",
-        no_dummy: bool = false,
-    };
+pub const ConnectError = error{
+    OutOfMemory,
+    SystemResources,
+    AccessDenied,
+    ConnectionRefused,
+};
 
-    pub const ConnectError = error{
-        OutOfMemory,
-        ConnectionRefused,
-        SystemResources,
-        AccessDenied,
-    };
+pub const ConnectOptions = struct {
+    app_name: [:0]const u8 = "Mach Game",
+};
 
-    /// must be called in the main thread
-    pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SysAudio {
-        std.debug.assert(current_backend == null);
-        var data: SysAudio = undefined;
-        if (backend) |b| {
-            data = @unionInit(
-                SysAudio,
-                @tagName(b),
-                switch (b) {
-                    .Alsa => try Alsa.connect(allocator),
-                    .PulseAudio => try PulseAudio.connect(allocator, options),
-                    .Dummy => try Dummy.connect(allocator),
-                },
-            );
-        } else {
-            switch (builtin.os.tag) {
-                .linux, .freebsd => {
-                    if (PulseAudio.connect(allocator, options)) |res| {
-                        data = .{ .PulseAudio = res };
-                    } else if (Alsa.connect(allocator)) |res| {
-                        data = .{ .Alsa = res };
-                    } else {
-                        data = .{ .Dummy = Dummy.connect() };
-                    }
-                },
-                .macos, .ios, .watchos, .tvos => @panic("TODO: CoreAudio"),
-                .windows => @panic("TODO: WASAPI"),
-                else => @compileError("Unsupported OS"),
+/// must be called in the main thread
+pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SysAudio {
+    std.debug.assert(current_backend == null);
+    var data: ?BackendType = null;
+
+    if (backend) |b| {
+        data = @unionInit(
+            BackendType,
+            @tagName(b),
+            try @field(SysAudio, @tagName(b)).connect(allocator, options),
+        );
+    } else {
+        var first_err: ConnectError!void = {};
+
+        inline for (std.meta.fields(Backend)) |b, i| {
+            if (@field(SysAudio, b.name).connect(allocator, options) catch |err| blk: {
+                if (i == 0) first_err = err;
+                break :blk null;
+            }) |d| {
+                data = @unionInit(BackendType, b.name, d);
+                break;
             }
         }
-        current_backend = std.meta.activeTag(data);
-        return data;
+
+        if (data == null)
+            try first_err;
     }
 
-    pub fn deinit(self: SysAudio) void {
-        switch (self) {
-            inline else => |b| b.deinit(),
-        }
-        current_backend = null;
-    }
+    current_backend = std.meta.activeTag(data.?);
+    return .{ .data = data.? };
+}
 
-    pub const EventsError = error{
-        OutOfMemory,
-        OpeningDevice,
-        SystemResources,
+pub fn disconnect(self: SysAudio) void {
+    switch (self.data) {
+        inline else => |b| b.disconnect(),
+    }
+    current_backend = null;
+}
+
+pub const EventsError = error{
+    OutOfMemory,
+    OpeningDevice,
+    SystemResources,
+};
+
+pub fn flushEvents(self: SysAudio) EventsError!void {
+    return switch (self.data) {
+        inline else => |b| b.flushEvents(),
     };
+}
 
-    pub fn flushEvents(self: SysAudio) EventsError!void {
-        return switch (self) {
-            inline else => |b| b.flushEvents(),
-        };
-    }
-
-    pub fn waitEvents(self: SysAudio) EventsError!void {
-        return switch (self) {
-            inline else => |b| b.waitEvents(),
-        };
-    }
-
-    pub fn wakeUp(self: SysAudio) void {
-        return switch (self) {
-            inline else => |b| b.wakeUp(),
-        };
-    }
-
-    pub fn devicesList(self: SysAudio) []const Device {
-        return switch (self) {
-            inline else => |b| b.devices_info.list.items,
-        };
-    }
-
-    pub fn getDevice(self: SysAudio, aim: Device.Aim, index: ?usize) ?Device {
-        switch (self) {
-            inline else => |b| {
-                return b.devices_info.get(index orelse return b.devices_info.default(aim));
-            },
-        }
-    }
-
-    pub const CreateStreamError = error{
-        OutOfMemory,
-        SystemResources,
-        IncompatibleBackend,
-        IncompatibleDevice,
-        OpeningDevice,
+pub fn waitEvents(self: SysAudio) EventsError!void {
+    return switch (self.data) {
+        inline else => |b| b.waitEvents(),
     };
+}
 
-    pub const PlayerOptions = struct {
-        writeFn: Player.WriteFn,
-        format: ?Format = null,
-        sample_rate: u32 = 44_100,
-        userdata: ?*anyopaque = null,
+pub fn wakeUp(self: SysAudio) void {
+    return switch (self.data) {
+        inline else => |b| b.wakeUp(),
     };
+}
 
-    pub fn createPlayer(self: SysAudio, device: Device, options: PlayerOptions) CreateStreamError!Player {
-        var player = Player{
-            .backend_data = undefined,
-            .writeFn = options.writeFn,
-            .userdata = options.userdata,
-            .device = device,
-            .format = blk: {
-                if (options.format) |format| {
-                    for (device.formats) |dfmt| {
-                        if (format == dfmt) {
-                            break :blk dfmt;
-                        }
+pub fn devicesList(self: SysAudio) []const Device {
+    return switch (self.data) {
+        inline else => |b| b.devices_info.list.items,
+    };
+}
+
+pub fn getDevice(self: SysAudio, aim: Device.Aim, index: ?usize) ?Device {
+    switch (self.data) {
+        inline else => |b| {
+            return b.devices_info.get(index orelse return b.devices_info.default(aim));
+        },
+    }
+}
+
+pub const CreateStreamError = error{
+    OutOfMemory,
+    SystemResources,
+    IncompatibleBackend,
+    IncompatibleDevice,
+    OpeningDevice,
+};
+
+pub const PlayerOptions = struct {
+    writeFn: Player.WriteFn,
+    format: ?Format = null,
+    sample_rate: u32 = default_sample_rate,
+    userdata: ?*anyopaque = null,
+};
+
+pub fn createPlayer(self: SysAudio, device: Device, options: PlayerOptions) CreateStreamError!Player {
+    var player = Player{
+        .backend_data = undefined,
+        .writeFn = options.writeFn,
+        .userdata = options.userdata,
+        .device = device,
+        .format = blk: {
+            if (options.format) |format| {
+                for (device.formats) |dfmt| {
+                    if (format == dfmt) {
+                        break :blk dfmt;
                     }
-                    return error.IncompatibleDevice;
                 }
+                return error.IncompatibleDevice;
+            }
 
-                break :blk device.preferredFormat();
-            },
-            .sample_rate = device.rate_range.clamp(options.sample_rate),
-        };
-        switch (self) {
-            inline else => |b| try b.openPlayer(&player, device),
-        }
-        return player;
+            break :blk device.preferredFormat();
+        },
+        .sample_rate = device.rate_range.clamp(options.sample_rate),
+    };
+    switch (self.data) {
+        inline else => |b| try b.openPlayer(&player, device),
     }
-};
-
-pub const StreamError = error{
-    StreamDisconnected,
-};
+    return player;
+}
 
 pub const Player = struct {
     // TODO: `*Player` instead `*anyopaque`
@@ -189,16 +191,28 @@ pub const Player = struct {
     format: Format,
     sample_rate: u32,
 
-    backend_data: PlayerBackendData,
-    const PlayerBackendData = union(Backend) {
-        PulseAudio: PulseAudio.PlayerData,
-        Alsa: Alsa.PlayerData,
-        Dummy: Dummy.PlayerData,
-    };
+    backend_data: PlayerBackendData(),
+
+    fn PlayerBackendData() type {
+        var fields: [std.meta.fields(BackendType).len]std.builtin.Type.UnionField = undefined;
+        for (std.meta.fields(BackendType)) |b, i| {
+            fields[i] = std.builtin.Type.UnionField{
+                .name = b.name,
+                .field_type = @field(SysAudio, b.name).PlayerData,
+                .alignment = @alignOf(@field(SysAudio, b.name).PlayerData),
+            };
+        }
+        return @Type(.{ .Union = .{
+            .layout = .Auto,
+            .tag_type = Backend,
+            .fields = &fields,
+            .decls = &.{},
+        } });
+    }
 
     pub fn deinit(self: *Player) void {
         return switch (current_backend.?) {
-            inline else => |b| @field(This, @tagName(b)).playerDeinit(self),
+            inline else => |b| @field(SysAudio, @tagName(b)).playerDeinit(self),
         };
     }
 
@@ -210,7 +224,7 @@ pub const Player = struct {
 
     pub fn start(self: *Player) StartError!void {
         return switch (current_backend.?) {
-            inline else => |b| @field(This, @tagName(b)).playerStart(self),
+            inline else => |b| @field(SysAudio, @tagName(b)).playerStart(self),
         };
     }
 
@@ -220,7 +234,7 @@ pub const Player = struct {
 
     pub fn play(self: *Player) PlayError!void {
         return switch (current_backend.?) {
-            inline else => |b| @field(This, @tagName(b)).playerPlay(self),
+            inline else => |b| @field(SysAudio, @tagName(b)).playerPlay(self),
         };
     }
 
@@ -230,13 +244,13 @@ pub const Player = struct {
 
     pub fn pause(self: *Player) PauseError!void {
         return switch (current_backend.?) {
-            inline else => |b| @field(This, @tagName(b)).playerPause(self),
+            inline else => |b| @field(SysAudio, @tagName(b)).playerPause(self),
         };
     }
 
     pub fn paused(self: *Player) bool {
         return switch (current_backend.?) {
-            inline else => |b| @field(This, @tagName(b)).playerPaused(self),
+            inline else => |b| @field(SysAudio, @tagName(b)).playerPaused(self),
         };
     }
 
@@ -248,7 +262,7 @@ pub const Player = struct {
     pub fn setVolume(self: *Player, vol: f32) SetVolumeError!void {
         std.debug.assert(vol <= 1.0);
         return switch (current_backend.?) {
-            inline else => |b| @field(This, @tagName(b)).playerSetVolume(self, vol),
+            inline else => |b| @field(SysAudio, @tagName(b)).playerSetVolume(self, vol),
         };
     }
 
@@ -259,7 +273,7 @@ pub const Player = struct {
     // confidence interval (±) depends on the device
     pub fn volume(self: *Player) GetVolumeError!f32 {
         return switch (current_backend.?) {
-            inline else => |b| @field(This, @tagName(b)).playerVolume(self),
+            inline else => |b| @field(SysAudio, @tagName(b)).playerVolume(self),
         };
     }
 
@@ -494,18 +508,18 @@ pub const Device = struct {
 
     pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
         return switch (current_backend.?) {
-            inline else => |b| @field(This, @tagName(b)).deviceDeinit(self, allocator),
+            inline else => |b| @field(SysAudio, @tagName(b)).deviceDeinit(self, allocator),
         };
     }
 
     pub fn preferredFormat(self: Device) Format {
-        var best: u4 = 0;
+        var best: Format = self.formats[0];
         for (self.formats) |fmt| {
-            if (@enumToInt(fmt) > best) {
-                best = @enumToInt(fmt);
+            if (fmt.bytesPerSample() > best.bytesPerSample()) {
+                best = fmt;
             }
         }
-        return @intToEnum(Format, best);
+        return best;
     }
 };
 

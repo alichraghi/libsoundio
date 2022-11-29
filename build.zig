@@ -9,29 +9,29 @@ pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardReleaseOptions();
 
-    const behavior_tests = b.addTestExe("test", "test/main.zig");
-    link(behavior_tests);
-    behavior_tests.addPackage(pkg);
-    behavior_tests.setTarget(target);
-    behavior_tests.setBuildMode(mode);
-    behavior_tests.install();
+    const sine_wave = b.addExecutable("sine_wave", "example/sine_wave.zig");
+    sine_wave.addPackage(pkg);
+    sine_wave.setTarget(target);
+    sine_wave.setBuildMode(mode);
+    link(sine_wave);
+    sine_wave.install();
 
     const main_tests = b.addTest("src/util.zig");
     link(main_tests);
     main_tests.setTarget(target);
     main_tests.setBuildMode(mode);
 
-    const test_step = b.step("test", "Run library tests");
-    test_step.dependOn(&behavior_tests.run().step);
-    test_step.dependOn(&main_tests.step);
+    const sine_wave_step = b.step("sine_wave", "Run library tests");
+    sine_wave_step.dependOn(&sine_wave.step);
+    // test_step.dependOn(&main_tests.step);
 }
 
 fn link(step: *std.build.LibExeObjStep) void {
     step.linkLibC();
-    step.addIncludePath("alsa-lib/include");
-    step.addLibraryPath("/home/ali/dev/libsoundio/alsa-lib/src/.libs");
-    step.linkSystemLibrary("pulse");
-    step.linkSystemLibrary("asound");
+    if (step.target_info.target.os.tag != .windows) {
+        step.linkSystemLibrary("pulse");
+        step.linkSystemLibrary("asound");
+    }
 }
 
 fn buildPulseAudio() void {}

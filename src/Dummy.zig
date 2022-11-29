@@ -2,31 +2,23 @@ const std = @import("std");
 const c = @cImport(@cInclude("asoundlib.h"));
 const util = @import("util.zig");
 const Channel = @import("main.zig").Channel;
-const ChannelId = @import("main.zig").ChannelId;
+const ConnectOptions = @import("main.zig").ConnectOptions;
 const Device = @import("main.zig").Device;
 const DevicesInfo = @import("main.zig").DevicesInfo;
 const Format = @import("main.zig").Format;
 const Player = @import("main.zig").Player;
-const Range = @import("main.zig").Range;
 const default_latency = @import("main.zig").default_latency;
 const min_sample_rate = @import("main.zig").min_sample_rate;
 const max_sample_rate = @import("main.zig").max_sample_rate;
 
 const Dummy = @This();
 
-var chasd = [_]Channel{
-    .{
-        .id = .front_center,
-        .ptr = undefined,
-    },
-};
-
 const dummy_playback = Device{
     .id = "dummy-playback",
     .name = "Dummy Device",
     .aim = .playback,
     .is_raw = false,
-    .channels = &chasd,
+    .channels = undefined,
     .formats = &.{
         .i8,
         .u8,
@@ -52,7 +44,7 @@ const dummy_capture = Device{
     .name = "Dummy Device",
     .aim = .capture,
     .is_raw = false,
-    .channels = &chasd,
+    .channels = undefined,
     .formats = &.{
         .i8,
         .u8,
@@ -79,7 +71,8 @@ cond: std.Thread.Condition,
 scan_queued: std.atomic.Atomic(bool),
 devices_info: DevicesInfo,
 
-pub fn connect(allocator: std.mem.Allocator) !*Dummy {
+pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Dummy {
+    _ = options;
     var self = try allocator.create(Dummy);
     errdefer allocator.destroy(self);
     self.* = .{
@@ -91,12 +84,22 @@ pub fn connect(allocator: std.mem.Allocator) !*Dummy {
     };
     try self.devices_info.list.append(self.allocator, dummy_playback);
     try self.devices_info.list.append(self.allocator, dummy_capture);
+    self.devices_info.list.items[0].channels = try allocator.alloc(Channel, 1);
+    self.devices_info.list.items[0].channels[0] = .{
+        .id = .front_center,
+        .ptr = undefined,
+    };
+    self.devices_info.list.items[1].channels = try allocator.alloc(Channel, 1);
+    self.devices_info.list.items[1].channels[0] = .{
+        .id = .front_center,
+        .ptr = undefined,
+    };
     self.devices_info.setDefault(.playback, 0);
     self.devices_info.setDefault(.capture, 1);
     return self;
 }
 
-pub fn deinit(self: *Dummy) void {
+pub fn disconnect(self: *Dummy) void {
     self.devices_info.deinit(self.allocator);
     self.allocator.destroy(self);
 }
@@ -225,6 +228,5 @@ pub fn playerVolume(self: *Player) !f32 {
 }
 
 pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
-    _ = self;
-    _ = allocator;
+    allocator.free(self.channels);
 }

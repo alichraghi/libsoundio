@@ -111,7 +111,7 @@ fn contextStateOp(ctx: ?*c.pa_context, userdata: ?*anyopaque) callconv(.C) void 
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
-pub fn deinit(self: *PulseAudio) void {
+pub fn disconnect(self: *PulseAudio) void {
     c.pa_context_set_subscribe_callback(self.ctx, null, null);
     c.pa_context_set_state_callback(self.ctx, null, null);
     c.pa_context_disconnect(self.ctx);
