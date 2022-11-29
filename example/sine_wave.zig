@@ -1,0 +1,36 @@
+const std = @import("std");
+const sysaudio = @import("sysaudio");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var a = try sysaudio.connect(null, allocator, .{});
+    defer a.disconnect();
+    try a.flushEvents();
+    const device = a.getDevice(.playback, null) orelse return error.NoDevice;
+
+    var p = try a.createPlayer(device, .{ .writeFn = writeCallback });
+    defer p.deinit();
+    try p.start();
+
+    try p.setVolume(1.0);
+    std.time.sleep(std.time.ns_per_s * 3);
+}
+
+const pitch = 440.0;
+const radians_per_second = pitch * 2.0 * std.math.pi;
+var seconds_offset: f32 = 0.0;
+fn writeCallback(self_opaque: *anyopaque, err: sysaudio.Player.WriteError!void, n_frame: usize) void {
+    err catch unreachable;
+    var self = @ptrCast(*sysaudio.Player, @alignCast(@alignOf(sysaudio.Player), self_opaque));
+
+    const seconds_per_frame = 1.0 / @intToFloat(f32, self.sample_rate);
+    var frame: usize = 0;
+    while (frame < n_frame) : (frame += 1) {
+        const sample = std.math.sin((seconds_offset + @intToFloat(f32, frame) * seconds_per_frame) * radians_per_second);
+        self.writeAll(frame, sample);
+    }
+    seconds_offset = @mod(seconds_offset + seconds_per_frame * @intToFloat(f32, n_frame), 1.0);
+}
