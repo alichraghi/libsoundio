@@ -199,7 +199,6 @@ fn deviceInfoOp(self: *PulseAudio, info: anytype, aim: Device.Aim) !void {
 
     var device = Device{
         .aim = aim,
-        .is_raw = false,
         .channels = blk: {
             // TODO: check channels count
             var channels = try self.allocator.alloc(Channel, info.*.channel_map.channels);

@@ -116,7 +116,7 @@ pub fn disconnect(self: *Alsa) void {
     self.allocator.destroy(self);
 }
 
-fn deviceEventsLoop(self: *Alsa) !void {
+fn deviceEventsLoop(self: *Alsa) void {
     var last_crash: ?i64 = null;
     var buf: [2048]u8 = undefined;
     var fds = [2]std.os.pollfd{
@@ -132,9 +132,7 @@ fn deviceEventsLoop(self: *Alsa) !void {
         },
     };
 
-    while (true) {
-        if (self.aborted.load(.Unordered)) break;
-
+    while (!self.aborted.load(.Unordered)) {
         _ = std.os.poll(&fds, -1) catch |err| switch (err) {
             error.NetworkSubsystemFailed,
             error.SystemResources,
@@ -272,7 +270,6 @@ fn refreshDevices(self: *Alsa) !void {
 
             const device = Device{
                 .aim = aim,
-                .is_raw = true,
                 .channels = blk: {
                     const chmap = c.snd_pcm_query_chmaps(pcm);
                     if (chmap) |_| {
@@ -321,12 +318,12 @@ fn refreshDevices(self: *Alsa) !void {
                     c.snd_pcm_hw_params_get_format_mask(params, fmt_mask);
 
                     var fmt_arr = std.ArrayList(Format).init(self.allocator);
-                    inline for (std.meta.fields(Format)) |format| {
+                    inline for (std.meta.tags(Format)) |format| {
                         if (c.snd_pcm_format_mask_test(
                             fmt_mask,
-                            toPCM_FORMAT(@intToEnum(Format, format.value)) catch unreachable,
+                            toPCM_FORMAT(format) catch unreachable,
                         ) != 0) {
-                            try fmt_arr.append(@intToEnum(Format, format.value));
+                            try fmt_arr.append(format);
                         }
                     }
 

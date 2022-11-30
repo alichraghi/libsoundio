@@ -117,7 +117,6 @@ pub fn refreshDevices(self: *Jack) !void {
                     found = true;
                     // we hit the channel limit, skip the leftovers
                     d.channels.append(.{
-                        .ptr = undefined,
                         .id = parseChannelId(channel_name) orelse break,
                     }) catch break;
                     break;
@@ -131,9 +130,7 @@ pub fn refreshDevices(self: *Jack) !void {
                 device.name = device.id;
 
                 device.aim = aim;
-                device.is_raw = flags & c.JackPortIsPhysical != 0;
                 device.channels.append(.{
-                    .ptr = undefined,
                     .id = parseChannelId(channel_name) orelse continue,
                 }) catch continue;
                 device.rate_range = .{

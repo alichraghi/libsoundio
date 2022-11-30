@@ -3,6 +3,12 @@ const std = @import("std");
 pub const pkg = std.build.Pkg{
     .name = "sysaudio",
     .source = .{ .path = "src/main.zig" },
+    .dependencies = &.{.{
+        .name = "win32",
+        .source = .{
+            .path = "zigwin32/win32.zig",
+        },
+    }},
 };
 
 pub fn build(b: *std.build.Builder) void {
@@ -28,6 +34,7 @@ pub fn build(b: *std.build.Builder) void {
 
 fn link(step: *std.build.LibExeObjStep) void {
     step.linkLibC();
+
     if (step.target_info.target.os.tag != .windows) {
         step.linkSystemLibrary("pulse");
         step.linkSystemLibrary("asound");

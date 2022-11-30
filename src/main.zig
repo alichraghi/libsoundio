@@ -36,7 +36,7 @@ pub const BackendType = switch (builtin.os.tag) {
         Dummy: *Dummy,
     },
     .windows => union(enum) {
-        // WASApi,
+        WASApi: *WASApi,
         Dummy: *Dummy,
     },
     .ios, .macos, .watchos, .tvos => union(enum) {
@@ -501,7 +501,6 @@ pub const Device = struct {
     id: [:0]const u8,
     name: [:0]const u8,
     aim: Aim,
-    is_raw: bool,
     channels: []Channel,
     formats: []const Format,
     rate_range: Range(u32),
@@ -574,7 +573,7 @@ pub const DevicesInfo = struct {
 };
 
 pub const Channel = struct {
-    ptr: [*]u8,
+    ptr: [*]u8 = undefined,
     id: ChannelId,
 };
 

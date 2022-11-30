@@ -17,7 +17,6 @@ const dummy_playback = Device{
     .id = "dummy-playback",
     .name = "Dummy Device",
     .aim = .playback,
-    .is_raw = false,
     .channels = undefined,
     .formats = &.{
         .i8,
@@ -43,7 +42,6 @@ const dummy_capture = Device{
     .id = "dummy-capture",
     .name = "Dummy Device",
     .aim = .capture,
-    .is_raw = false,
     .channels = undefined,
     .formats = &.{
         .i8,
@@ -87,12 +85,10 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Dummy {
     self.devices_info.list.items[0].channels = try allocator.alloc(Channel, 1);
     self.devices_info.list.items[0].channels[0] = .{
         .id = .front_center,
-        .ptr = undefined,
     };
     self.devices_info.list.items[1].channels = try allocator.alloc(Channel, 1);
     self.devices_info.list.items[1].channels[0] = .{
         .id = .front_center,
-        .ptr = undefined,
     };
     self.devices_info.setDefault(.playback, 0);
     self.devices_info.setDefault(.capture, 1);

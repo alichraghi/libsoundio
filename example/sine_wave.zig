@@ -9,14 +9,15 @@ pub fn main() !void {
     var a = try sysaudio.connect(null, allocator, .{});
     defer a.disconnect();
     try a.flushEvents();
+    std.time.sleep(2000000000000000);
     const device = a.getDevice(.playback, null) orelse return error.NoDevice;
 
     var p = try a.createPlayer(device, .{ .writeFn = writeCallback });
     defer p.deinit();
     try p.start();
 
-    try p.setVolume(1.0);
-    std.time.sleep(std.time.ns_per_s * 3);
+    try p.setVolume(0.7);
+    while (true) {}
 }
 
 const pitch = 440.0;
