@@ -28,7 +28,7 @@ pub fn build(b: *std.build.Builder) void {
     main_tests.setBuildMode(mode);
 
     const sine_wave_step = b.step("sine_wave", "Run library tests");
-    sine_wave_step.dependOn(&sine_wave.step);
+    sine_wave_step.dependOn(&sine_wave.run().step);
     // test_step.dependOn(&main_tests.step);
 }
 

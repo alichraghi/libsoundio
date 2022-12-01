@@ -15,14 +15,14 @@ const is_little = @import("builtin").cpu.arch.endian() == .Little;
 const PulseAudio = @This();
 
 allocator: std.mem.Allocator,
+devices_info: DevicesInfo,
 app_name: [:0]const u8,
 main_loop: *c.pa_threaded_mainloop,
 ctx: *c.pa_context,
 ctx_state: c.pa_context_state_t,
-devices_info: DevicesInfo,
-scan_queued: std.atomic.Atomic(bool),
 default_sink: ?[:0]const u8,
 default_source: ?[:0]const u8,
+scan_queued: ?std.atomic.Atomic(bool),
 
 pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAudio {
     const main_loop = c.pa_threaded_mainloop_new() orelse
@@ -39,29 +39,28 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAud
         return error.ConnectionRefused;
     errdefer c.pa_context_disconnect(ctx);
 
+    var self = try allocator.create(PulseAudio);
+    errdefer allocator.destroy(self);
+    self.* = PulseAudio{
+        .allocator = allocator,
+        .devices_info = DevicesInfo.init(),
+        .app_name = options.app_name,
+        .main_loop = main_loop,
+        .ctx = ctx,
+        .ctx_state = c.PA_CONTEXT_UNCONNECTED,
+        .default_sink = null,
+        .default_source = null,
+        .scan_queued = if (options.watch_devices) .{ .value = false } else null,
+    };
+
+    c.pa_context_set_state_callback(ctx, contextStateOp, self);
+
     if (c.pa_threaded_mainloop_start(main_loop) != 0)
         return error.SystemResources;
     errdefer c.pa_threaded_mainloop_stop(main_loop);
 
     c.pa_threaded_mainloop_lock(main_loop);
     defer c.pa_threaded_mainloop_unlock(main_loop);
-
-    var self = try allocator.create(PulseAudio);
-    errdefer allocator.destroy(self);
-    self.* = PulseAudio{
-        .allocator = allocator,
-        .app_name = options.app_name,
-        .main_loop = main_loop,
-        .ctx = ctx,
-        .ctx_state = c.PA_CONTEXT_UNCONNECTED,
-        .devices_info = DevicesInfo.init(),
-        .scan_queued = std.atomic.Atomic(bool).init(false),
-        .default_sink = null,
-        .default_source = null,
-    };
-
-    c.pa_context_set_subscribe_callback(ctx, subscribeOp, self);
-    c.pa_context_set_state_callback(ctx, contextStateOp, self);
 
     while (true) {
         switch (self.ctx_state) {
@@ -87,12 +86,14 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAud
             else => unreachable,
         }
     }
-
     // subscribe to events
-    const events = c.PA_SUBSCRIPTION_MASK_SINK | c.PA_SUBSCRIPTION_MASK_SOURCE | c.PA_SUBSCRIPTION_MASK_SERVER;
-    const subscribe_op = c.pa_context_subscribe(ctx, events, null, self) orelse
-        return error.OutOfMemory;
-    c.pa_operation_unref(subscribe_op);
+    if (options.watch_devices) {
+        c.pa_context_set_subscribe_callback(ctx, subscribeOp, self);
+        const events = c.PA_SUBSCRIPTION_MASK_SINK | c.PA_SUBSCRIPTION_MASK_SOURCE | c.PA_SUBSCRIPTION_MASK_SERVER;
+        const subscribe_op = c.pa_context_subscribe(ctx, events, null, self) orelse
+            return error.OutOfMemory;
+        c.pa_operation_unref(subscribe_op);
+    }
 
     return self;
 }
@@ -100,7 +101,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAud
 fn subscribeOp(_: ?*c.pa_context, _: c.pa_subscription_event_type_t, _: u32, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
 
-    self.scan_queued.store(true, .Unordered);
+    self.scan_queued.?.store(true, .Unordered);
     c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
@@ -122,19 +123,30 @@ pub fn disconnect(self: *PulseAudio) void {
     self.allocator.destroy(self);
 }
 
-pub fn flushEvents(self: *PulseAudio) !void {
+pub fn flush(self: *PulseAudio) !void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
     try self.refreshDevices();
 }
 
-pub fn waitEvents(self: *PulseAudio) !void {
+pub fn wait(self: *PulseAudio) !void {
+    std.debug.assert(self.scan_queued != null);
+
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
-    while (!self.scan_queued.load(.Acquire))
+    while (!self.scan_queued.?.load(.Acquire))
         c.pa_threaded_mainloop_wait(self.main_loop);
-    self.scan_queued.store(false, .Release);
+    self.scan_queued.?.store(false, .Release);
     try self.refreshDevices();
+}
+
+pub fn wakeUp(self: *PulseAudio) void {
+    std.debug.assert(self.scan_queued != null);
+
+    c.pa_threaded_mainloop_lock(self.main_loop);
+    defer c.pa_threaded_mainloop_unlock(self.main_loop);
+    self.scan_queued.?.store(true, .Release);
+    c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
 fn refreshDevices(self: *PulseAudio) !void {
@@ -182,7 +194,6 @@ fn serverInfoOp(_: ?*c.pa_context, info: [*c]const c.pa_server_info, userdata: ?
 
 fn sinkInfoOp(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
-
     if (eol != 0) {
         c.pa_threaded_mainloop_signal(self.main_loop, 0);
         return;
@@ -191,11 +202,25 @@ fn sinkInfoOp(_: ?*c.pa_context, info: [*c]const c.pa_sink_info, eol: c_int, use
     self.deviceInfoOp(info, .playback) catch return;
 }
 
+fn sourceInfoOp(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
+    var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
+    if (eol != 0) {
+        c.pa_threaded_mainloop_signal(self.main_loop, 0);
+        return;
+    }
+
+    self.deviceInfoOp(info, .capture) catch return;
+}
+
 fn deviceInfoOp(self: *PulseAudio, info: anytype, aim: Device.Aim) !void {
     var id = try self.allocator.dupeZ(u8, std.mem.span(info.*.name));
     errdefer self.allocator.free(id);
     var name = try self.allocator.dupeZ(u8, std.mem.span(info.*.description));
     errdefer self.allocator.free(name);
+
+    if (info.*.sameple_spec.rate < min_sample_rate or
+        info.*.sameple_spec.rate > max_sample_rate)
+        return;
 
     var device = Device{
         .aim = aim,
@@ -208,32 +233,14 @@ fn deviceInfoOp(self: *PulseAudio, info: anytype, aim: Device.Aim) !void {
         },
         .formats = available_formats,
         .rate_range = .{
-            .min = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
-            .max = std.math.clamp(info.*.sample_spec.rate, min_sample_rate, max_sample_rate),
+            .min = info.*.sample_spec.rate,
+            .max = info.*.sample_spec.rate,
         },
         .id = id,
         .name = name,
     };
 
     try self.devices_info.list.append(self.allocator, device);
-}
-
-fn sourceInfoOp(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
-    var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
-
-    if (eol != 0) {
-        c.pa_threaded_mainloop_signal(self.main_loop, 0);
-        return;
-    }
-
-    self.deviceInfoOp(info, .capture) catch return;
-}
-
-pub fn wakeUp(self: *PulseAudio) void {
-    c.pa_threaded_mainloop_lock(self.main_loop);
-    defer c.pa_threaded_mainloop_unlock(self.main_loop);
-    self.scan_queued.store(true, .Release);
-    c.pa_threaded_mainloop_signal(self.main_loop, 0);
 }
 
 const StreamStatus = enum(u8) {

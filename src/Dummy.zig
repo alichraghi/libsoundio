@@ -64,22 +64,28 @@ const dummy_capture = Device{
 };
 
 allocator: std.mem.Allocator,
-mutex: std.Thread.Mutex,
-cond: std.Thread.Condition,
-scan_queued: std.atomic.Atomic(bool),
 devices_info: DevicesInfo,
+device_watcher: ?DeviceWatcher,
+
+const DeviceWatcher = struct {
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
+    scan_queued: std.atomic.Atomic(bool),
+};
 
 pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Dummy {
-    _ = options;
     var self = try allocator.create(Dummy);
     errdefer allocator.destroy(self);
     self.* = .{
         .allocator = allocator,
-        .mutex = .{},
-        .cond = .{},
-        .scan_queued = .{ .value = false },
         .devices_info = DevicesInfo.init(),
+        .device_watcher = if (options.watch_devices) .{
+            .mutex = .{},
+            .cond = .{},
+            .scan_queued = .{ .value = false },
+        } else null,
     };
+
     try self.devices_info.list.append(self.allocator, dummy_playback);
     try self.devices_info.list.append(self.allocator, dummy_capture);
     self.devices_info.list.items[0].channels = try allocator.alloc(Channel, 1);
@@ -92,6 +98,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Dummy {
     };
     self.devices_info.setDefault(.playback, 0);
     self.devices_info.setDefault(.capture, 1);
+
     return self;
 }
 
@@ -100,29 +107,35 @@ pub fn disconnect(self: *Dummy) void {
     self.allocator.destroy(self);
 }
 
-pub fn flushEvents(self: *Dummy) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
-    self.scan_queued.store(false, .Release);
+pub fn flush(self: *Dummy) !void {
+    if (self.device_watcher) |*dw| {
+        dw.mutex.lock();
+        defer dw.mutex.unlock();
+        dw.scan_queued.store(false, .Release);
+    }
 }
 
-pub fn waitEvents(self: *Dummy) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+pub fn wait(self: *Dummy) !void {
+    std.debug.assert(self.device_watcher != null);
+    var dw = &self.device_watcher.?;
 
-    while (!self.scan_queued.load(.Acquire))
-        self.cond.wait(&self.mutex);
+    dw.mutex.lock();
+    defer dw.mutex.unlock();
 
-    self.scan_queued.store(false, .Release);
+    while (!dw.scan_queued.load(.Acquire))
+        dw.cond.wait(&dw.mutex);
+
+    dw.scan_queued.store(false, .Release);
 }
 
 pub fn wakeUp(self: *Dummy) void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+    std.debug.assert(self.device_watcher != null);
+    var dw = &self.device_watcher.?;
 
-    self.scan_queued.store(true, .Release);
-    self.cond.signal();
+    dw.mutex.lock();
+    defer dw.mutex.unlock();
+    dw.scan_queued.store(true, .Release);
+    dw.cond.signal();
 }
 
 pub const PlayerData = struct {

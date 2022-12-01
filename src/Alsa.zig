@@ -18,55 +18,82 @@ const is_little = @import("builtin").cpu.arch.endian() == .Little;
 const Alsa = @This();
 
 allocator: std.mem.Allocator,
-mutex: std.Thread.Mutex,
-cond: std.Thread.Condition,
-thread: std.Thread,
-aborted: std.atomic.Atomic(bool),
-scan_queued: std.atomic.Atomic(bool),
 devices_info: DevicesInfo,
-notify_fd: std.os.fd_t,
-notify_wd: std.os.fd_t,
-notify_pipe_fd: [2]std.os.fd_t,
+device_watcher: ?DeviceWatcher,
+
+const DeviceWatcher = struct {
+    thread: std.Thread,
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
+    aborted: std.atomic.Atomic(bool),
+    scan_queued: std.atomic.Atomic(bool),
+    notify_fd: std.os.fd_t,
+    notify_wd: std.os.fd_t,
+    notify_pipe_fd: [2]std.os.fd_t,
+};
 
 pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
-    _ = options;
-    const notify_fd = std.os.inotify_init1(std.os.linux.IN.NONBLOCK) catch |err| switch (err) {
-        error.ProcessFdQuotaExceeded,
-        error.SystemFdQuotaExceeded,
-        error.SystemResources,
-        => return error.SystemResources,
-        error.Unexpected => unreachable,
-    };
-    errdefer std.os.close(notify_fd);
+    var self = try allocator.create(Alsa);
+    errdefer allocator.destroy(self);
 
-    const notify_wd = std.os.inotify_add_watch(
-        notify_fd,
-        "/dev/snd",
-        std.os.linux.IN.CREATE | std.os.linux.IN.DELETE,
-    ) catch |err| switch (err) {
-        error.AccessDenied => return error.AccessDenied,
-        error.UserResourceLimitReached,
-        error.NotDir,
-        error.FileNotFound,
-        error.SystemResources,
-        => return error.SystemResources,
-        error.NameTooLong,
-        error.WatchAlreadyExists,
-        error.Unexpected,
-        => unreachable,
-    };
-    errdefer std.os.inotify_rm_watch(notify_fd, notify_wd);
+    var device_watcher: ?DeviceWatcher = null;
+    if (options.watch_devices) {
+        const notify_fd = std.os.inotify_init1(std.os.linux.IN.NONBLOCK) catch |err| switch (err) {
+            error.ProcessFdQuotaExceeded,
+            error.SystemFdQuotaExceeded,
+            error.SystemResources,
+            => return error.SystemResources,
+            error.Unexpected => unreachable,
+        };
+        errdefer std.os.close(notify_fd);
 
-    // used to wakeup poll
-    const notify_pipe_fd = std.os.pipe2(std.os.O.NONBLOCK) catch |err| switch (err) {
-        error.ProcessFdQuotaExceeded,
-        error.SystemFdQuotaExceeded,
-        => return error.SystemResources,
-        error.Unexpected => unreachable,
-    };
-    errdefer {
-        std.os.close(notify_pipe_fd[0]);
-        std.os.close(notify_pipe_fd[1]);
+        const notify_wd = std.os.inotify_add_watch(
+            notify_fd,
+            "/dev/snd",
+            std.os.linux.IN.CREATE | std.os.linux.IN.DELETE,
+        ) catch |err| switch (err) {
+            error.AccessDenied => return error.AccessDenied,
+            error.UserResourceLimitReached,
+            error.NotDir,
+            error.FileNotFound,
+            error.SystemResources,
+            => return error.SystemResources,
+            error.NameTooLong,
+            error.WatchAlreadyExists,
+            error.Unexpected,
+            => unreachable,
+        };
+        errdefer std.os.inotify_rm_watch(notify_fd, notify_wd);
+
+        // used to wakeup poll
+        const notify_pipe_fd = std.os.pipe2(std.os.O.NONBLOCK) catch |err| switch (err) {
+            error.ProcessFdQuotaExceeded,
+            error.SystemFdQuotaExceeded,
+            => return error.SystemResources,
+            error.Unexpected => unreachable,
+        };
+        errdefer {
+            std.os.close(notify_pipe_fd[0]);
+            std.os.close(notify_pipe_fd[1]);
+        }
+
+        device_watcher = .{
+            .thread = std.Thread.spawn(.{}, deviceEventsLoop, .{self}) catch |err| switch (err) {
+                error.ThreadQuotaExceeded,
+                error.SystemResources,
+                error.LockedMemoryLimitExceeded,
+                => return error.SystemResources,
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Unexpected => unreachable,
+            },
+            .mutex = .{},
+            .cond = .{},
+            .aborted = .{ .value = false },
+            .scan_queued = .{ .value = false },
+            .notify_fd = notify_fd,
+            .notify_wd = notify_wd,
+            .notify_pipe_fd = notify_pipe_fd,
+        };
     }
 
     // zig fmt: off
@@ -76,63 +103,50 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
         ));
     // zig fmt: on
 
-    var self = try allocator.create(Alsa);
-    errdefer allocator.destroy(self);
     self.* = .{
         .allocator = allocator,
-        .mutex = .{},
-        .cond = .{},
-        .thread = std.Thread.spawn(.{}, deviceEventsLoop, .{self}) catch |err| switch (err) {
-            error.ThreadQuotaExceeded,
-            error.SystemResources,
-            error.LockedMemoryLimitExceeded,
-            => return error.SystemResources,
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Unexpected => unreachable,
-        },
-        .aborted = .{ .value = false },
-        .scan_queued = .{ .value = false },
         .devices_info = DevicesInfo.init(),
-        .notify_fd = notify_fd,
-        .notify_wd = notify_wd,
-        .notify_pipe_fd = notify_pipe_fd,
+        .device_watcher = device_watcher,
     };
     return self;
 }
 
 pub fn disconnect(self: *Alsa) void {
-    self.aborted.store(true, .Unordered);
+    if (self.device_watcher) |*dw| {
+        dw.aborted.store(true, .Unordered);
 
-    // wake up thread
-    _ = std.os.write(self.notify_pipe_fd[1], "a") catch {};
-    self.thread.join();
+        // wake up thread
+        _ = std.os.write(dw.notify_pipe_fd[1], "a") catch {};
+        dw.thread.join();
 
-    std.os.close(self.notify_pipe_fd[0]);
-    std.os.close(self.notify_pipe_fd[1]);
-    std.os.inotify_rm_watch(self.notify_fd, self.notify_wd);
-    std.os.close(self.notify_fd);
+        std.os.close(dw.notify_pipe_fd[0]);
+        std.os.close(dw.notify_pipe_fd[1]);
+        std.os.inotify_rm_watch(dw.notify_fd, dw.notify_wd);
+        std.os.close(dw.notify_fd);
+    }
 
     self.devices_info.deinit(self.allocator);
     self.allocator.destroy(self);
 }
 
 fn deviceEventsLoop(self: *Alsa) void {
+    var dw = &self.device_watcher.?;
     var last_crash: ?i64 = null;
     var buf: [2048]u8 = undefined;
     var fds = [2]std.os.pollfd{
         .{
-            .fd = self.notify_fd,
+            .fd = dw.notify_fd,
             .events = std.os.POLL.IN,
             .revents = 0,
         },
         .{
-            .fd = self.notify_pipe_fd[0],
+            .fd = dw.notify_pipe_fd[0],
             .events = std.os.POLL.IN,
             .revents = 0,
         },
     };
 
-    while (!self.aborted.load(.Unordered)) {
+    while (!dw.aborted.load(.Unordered)) {
         _ = std.os.poll(&fds, -1) catch |err| switch (err) {
             error.NetworkSubsystemFailed,
             error.SystemResources,
@@ -147,9 +161,9 @@ fn deviceEventsLoop(self: *Alsa) void {
             error.Unexpected => unreachable,
         };
 
-        if (util.hasFlag(self.notify_fd, std.os.POLL.IN)) {
+        if (util.hasFlag(dw.notify_fd, std.os.POLL.IN)) {
             while (true) {
-                const len = std.os.read(self.notify_fd, &buf) catch |err| {
+                const len = std.os.read(dw.notify_fd, &buf) catch |err| {
                     if (err == error.WouldBlock) break;
                     const ts = std.time.milliTimestamp();
                     if (last_crash) |lc| {
@@ -169,33 +183,48 @@ fn deviceEventsLoop(self: *Alsa) void {
                     if (util.hasFlag(evt.mask, std.os.linux.IN.ISDIR) or !std.mem.startsWith(u8, evt_name, "pcm"))
                         continue;
 
-                    self.mutex.lock();
-                    defer self.mutex.unlock();
+                    dw.mutex.lock();
+                    defer dw.mutex.unlock();
 
-                    self.scan_queued.store(true, .Release);
-                    self.cond.signal();
+                    dw.scan_queued.store(true, .Release);
+                    dw.cond.signal();
                 }
             }
         }
     }
 }
 
-pub fn flushEvents(self: *Alsa) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+pub fn flush(self: *Alsa) !void {
+    if (self.device_watcher) |*dw| {
+        dw.mutex.lock();
+        defer dw.mutex.unlock();
 
-    self.scan_queued.store(false, .Release);
+        dw.scan_queued.store(false, .Release);
+    }
     try self.refreshDevices();
 }
 
-pub fn waitEvents(self: *Alsa) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-    while (!self.scan_queued.load(.Acquire))
-        self.cond.wait(&self.mutex);
+pub fn wait(self: *Alsa) !void {
+    std.debug.assert(self.device_watcher != null);
+    var dw = &self.device_watcher.?;
 
-    self.scan_queued.store(false, .Release);
+    dw.mutex.lock();
+    defer dw.mutex.unlock();
+    while (!dw.scan_queued.load(.Acquire))
+        dw.cond.wait(&dw.mutex);
+
+    dw.scan_queued.store(false, .Release);
     try self.refreshDevices();
+}
+
+pub fn wakeUp(self: *Alsa) void {
+    std.debug.assert(self.device_watcher != null);
+    var dw = &self.device_watcher.?;
+
+    dw.lock();
+    defer dw.unlock();
+    dw.scan_queued.store(true, .Release);
+    dw.cond.signal();
 }
 
 fn refreshDevices(self: *Alsa) !void {
@@ -355,14 +384,6 @@ fn refreshDevices(self: *Alsa) !void {
         if (c.snd_card_next(&card_idx) < 0)
             return error.SystemResources;
     }
-}
-
-pub fn wakeUp(self: *Alsa) void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
-    self.scan_queued.store(true, .Release);
-    self.cond.signal();
 }
 
 pub const PlayerData = struct {

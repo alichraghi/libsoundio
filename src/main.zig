@@ -59,6 +59,7 @@ pub const ConnectError = error{
 
 pub const ConnectOptions = struct {
     app_name: [:0]const u8 = "Mach Game",
+    watch_devices: bool = false, // TODO: change this to `false`
 };
 
 /// must be called in the main thread
@@ -106,15 +107,15 @@ pub const EventsError = error{
     SystemResources,
 };
 
-pub fn flushEvents(self: SysAudio) EventsError!void {
+pub fn flush(self: SysAudio) EventsError!void {
     return switch (self.data) {
-        inline else => |b| b.flushEvents(),
+        inline else => |b| b.flush(),
     };
 }
 
-pub fn waitEvents(self: SysAudio) EventsError!void {
+pub fn wait(self: SysAudio) EventsError!void {
     return switch (self.data) {
-        inline else => |b| b.waitEvents(),
+        inline else => |b| b.wait(),
     };
 }
 
