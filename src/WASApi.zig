@@ -27,77 +27,225 @@ const max_sample_rate = @import("main.zig").max_sample_rate;
 const WASApi = @This();
 
 allocator: std.mem.Allocator,
-mutex: std.Thread.Mutex,
-cond: std.Thread.Condition,
-scan_queued: std.atomic.Atomic(bool),
 devices_info: DevicesInfo,
+enumerator: ?*win32.IMMDeviceEnumerator,
+device_watcher: ?DeviceWatcher,
+
+const DeviceWatcher = struct {
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
+    scan_queued: std.atomic.Atomic(bool),
+    notif_client: win32.IMMNotificationClient,
+};
 
 pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*WASApi {
-    _ = options;
-
     _ = win32.COINIT.initFlags(.{ .APARTMENTTHREADED = 1, .DISABLE_OLE1DDE = 1 });
-    if (win32.FAILED(win32.CoInitialize(null)))
-        unreachable;
+    var hr = win32.CoInitialize(null);
+    switch (hr) {
+        win32.S_OK,
+        win32.S_FALSE,
+        win32.RPC_E_CHANGED_MODE,
+        => {},
+        win32.E_OUTOFMEMORY => return error.OutOfMemory,
+        win32.E_INVALIDARG => unreachable,
+        win32.E_UNEXPECTED => return error.SystemResources,
+        else => unreachable,
+    }
 
     var self = try allocator.create(WASApi);
     errdefer allocator.destroy(self);
     self.* = .{
         .allocator = allocator,
-        .mutex = .{},
-        .cond = .{},
-        .scan_queued = .{ .value = false },
         .devices_info = DevicesInfo.init(),
+        .enumerator = blk: {
+            var enumerator: ?*win32.IMMDeviceEnumerator = null;
+
+            hr = win32.CoCreateInstance(
+                win32.CLSID_MMDeviceEnumerator,
+                null,
+                win32.CLSCTX_ALL,
+                win32.IID_IMMDeviceEnumerator,
+                @ptrCast(*?*anyopaque, &enumerator),
+            );
+            switch (hr) {
+                win32.S_OK => {},
+                win32.CLASS_E_NOAGGREGATION => return error.SystemResources,
+                win32.REGDB_E_CLASSNOTREG => unreachable,
+                win32.E_NOINTERFACE => unreachable,
+                win32.E_POINTER => unreachable,
+                else => unreachable,
+            }
+
+            break :blk enumerator;
+        },
+        .device_watcher = if (options.watch_devices) .{
+            .mutex = .{},
+            .cond = .{},
+            .scan_queued = .{ .value = false },
+            .notif_client = win32.IMMNotificationClient{
+                .vtable = &.{
+                    .base = .{
+                        .QueryInterface = ncQueryInterface,
+                        .AddRef = ncAddRef,
+                        .Release = ncRelease,
+                    },
+                    .OnDeviceStateChanged = ncOnDeviceStateChanged,
+                    .OnDeviceAdded = ncOnDeviceAdded,
+                    .OnDeviceRemoved = ncOnDeviceRemoved,
+                    .OnDefaultDeviceChanged = ncOnDefaultDeviceChanged,
+                    .OnPropertyValueChanged = ncOnPropertyValueChanged,
+                },
+            },
+        } else null,
     };
+
+    if (options.watch_devices) {
+        hr = self.enumerator.?.IMMDeviceEnumerator_RegisterEndpointNotificationCallback(&self.device_watcher.?.notif_client);
+        switch (hr) {
+            win32.S_OK => {},
+            win32.E_POINTER => unreachable,
+            win32.E_OUTOFMEMORY => return error.OutOfMemory,
+            else => return error.SystemResources,
+        }
+    }
+
     return self;
 }
 
+fn ncQueryInterface(
+    self: *const win32.IUnknown,
+    riid: ?*const win32.Guid,
+    ppv: ?*?*anyopaque,
+) callconv(std.os.windows.WINAPI) win32.HRESULT {
+    if (isEqualIID(riid.?, win32.IID_IUnknown) or isEqualIID(riid.?, win32.IID_IMMNotificationClient)) {
+        ppv.?.* = @intToPtr(?*anyopaque, @ptrToInt(self));
+        _ = self.IUnknown_AddRef();
+        return win32.S_OK;
+    } else {
+        ppv.?.* = null;
+        return win32.E_NOINTERFACE;
+    }
+}
+
+// chromium does nothing so we do nothing
+// https://chromium.googlesource.com/chromium/src/media/+/master/audio/win/audio_device_listener_win.cc#70
+fn ncAddRef(self: *const win32.IUnknown) callconv(std.os.windows.WINAPI) u32 {
+    _ = self;
+    return 1;
+}
+
+fn ncRelease(self: *const win32.IUnknown) callconv(std.os.windows.WINAPI) u32 {
+    _ = self;
+    return 1;
+}
+
+fn ncOnDeviceStateChanged(
+    self: *const win32.IMMNotificationClient,
+    device_id: ?[*:0]const u16,
+    new_state: u32,
+) callconv(std.os.windows.WINAPI) win32.HRESULT {
+    _ = device_id;
+    _ = new_state;
+    var dw = @fieldParentPtr(DeviceWatcher, "notif_client", self);
+    std.debug.print("s: {*}", .{dw});
+    return win32.S_OK;
+}
+
+fn ncOnDeviceAdded(
+    self: *const win32.IMMNotificationClient,
+    device_id: ?[*:0]const u16,
+) callconv(std.os.windows.WINAPI) win32.HRESULT {
+    _ = device_id;
+    var dw = @fieldParentPtr(DeviceWatcher, "notif_client", self);
+    std.debug.print("s: {*}", .{dw});
+    return win32.S_OK;
+}
+
+fn ncOnDeviceRemoved(
+    self: *const win32.IMMNotificationClient,
+    device_id: ?[*:0]const u16,
+) callconv(std.os.windows.WINAPI) win32.HRESULT {
+    _ = device_id;
+    var dw = @fieldParentPtr(DeviceWatcher, "notif_client", self);
+    std.debug.print("s: {*}", .{dw});
+    return win32.S_OK;
+}
+
+fn ncOnDefaultDeviceChanged(
+    self: *const win32.IMMNotificationClient,
+    flow: win32.EDataFlow,
+    role: win32.ERole,
+    default_device_id: ?[*:0]const u16,
+) callconv(std.os.windows.WINAPI) win32.HRESULT {
+    _ = flow;
+    _ = role;
+    _ = default_device_id;
+    var dw = @fieldParentPtr(DeviceWatcher, "notif_client", self);
+    std.debug.print("s: {*}", .{dw});
+    return win32.S_OK;
+}
+
+fn ncOnPropertyValueChanged(
+    self: *const win32.IMMNotificationClient,
+    device_id: ?[*:0]const u16,
+    key: win32.PROPERTYKEY,
+) callconv(std.os.windows.WINAPI) win32.HRESULT {
+    _ = device_id;
+    _ = key;
+    var dw = @fieldParentPtr(DeviceWatcher, "notif_client", self);
+    std.debug.print("s: {*}", .{dw});
+    return win32.S_OK;
+}
+
 pub fn disconnect(self: *WASApi) void {
+    if (self.device_watcher) |*dw| {
+        _ = self.enumerator.?.IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(&dw.notif_client);
+    }
+    _ = self.enumerator.?.IUnknown_Release();
     self.devices_info.deinit(self.allocator);
     self.allocator.destroy(self);
 }
 
-pub fn flushEvents(self: *WASApi) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+pub fn flush(self: *WASApi) !void {
+    if (self.device_watcher) |*dw| {
+        dw.mutex.lock();
+        defer dw.mutex.unlock();
 
-    self.scan_queued.store(false, .Release);
+        dw.scan_queued.store(false, .Release);
+    }
     try self.refreshDevices();
 }
 
-pub fn waitEvents(self: *WASApi) !void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
+pub fn wait(self: *WASApi) !void {
+    std.debug.assert(self.device_watcher != null);
+    var dw = &self.device_watcher.?;
 
-    while (!self.scan_queued.load(.Acquire))
-        self.cond.wait(&self.mutex);
+    dw.mutex.lock();
+    defer dw.mutex.unlock();
 
-    self.scan_queued.store(false, .Release);
+    while (!dw.scan_queued.load(.Acquire))
+        dw.cond.wait(&dw.mutex);
+
+    dw.scan_queued.store(false, .Release);
     try self.refreshDevices();
+}
+
+pub fn wakeUp(self: *WASApi) void {
+    std.debug.assert(self.device_watcher != null);
+    var dw = &self.device_watcher.?;
+
+    dw.mutex.lock();
+    defer dw.mutex.unlock();
+
+    dw.scan_queued.store(true, .Release);
+    dw.cond.signal();
 }
 
 fn refreshDevices(self: *WASApi) !void {
-    var hr: win32.HRESULT = win32.SUCCESS;
-
-    var enumerator: ?*win32.IMMDeviceEnumerator = null;
-    hr = win32.CoCreateInstance(
-        win32.CLSID_MMDeviceEnumerator,
-        null,
-        win32.CLSCTX_ALL,
-        win32.IID_IMMDeviceEnumerator,
-        @ptrCast(*?*anyopaque, &enumerator),
-    );
-    switch (hr) {
-        win32.S_OK => {},
-        win32.CLASS_E_NOAGGREGATION => return error.SystemResources,
-        win32.REGDB_E_CLASSNOTREG => unreachable,
-        win32.E_NOINTERFACE => unreachable,
-        win32.E_POINTER => unreachable,
-        else => unreachable,
-    }
-    defer _ = enumerator.?.IUnknown_Release();
+    var hr: win32.HRESULT = win32.S_OK;
 
     var collection: ?*win32.IMMDeviceCollection = null;
-    hr = enumerator.?.IMMDeviceEnumerator_EnumAudioEndpoints(
+    hr = self.enumerator.?.IMMDeviceEnumerator_EnumAudioEndpoints(
         win32.EDataFlow.eAll,
         win32.DEVICE_STATE_ACTIVE,
         &collection,
@@ -253,15 +401,45 @@ fn refreshDevices(self: *WASApi) !void {
             },
         };
 
-        for (device.channels) |ch| {
-            std.debug.print("{s}\n", .{@tagName(ch.id)});
-        }
-        for (device.formats) |ch| {
-            std.debug.print("{s}\n", .{@tagName(ch)});
-        }
-        std.debug.print("\n", .{});
+        _ = device.channels;
+        _ = device.formats;
+        // std.debug.print("{s} - {s}\n", .{ device.id, device.name });
 
         try self.devices_info.list.append(self.allocator, device);
+    }
+
+    for (&[_]win32.EDataFlow{ .eRender, .eCapture }) |dataflow| {
+        var imm_device: ?*win32.IMMDevice = null;
+        hr = self.enumerator.?.IMMDeviceEnumerator_GetDefaultAudioEndpoint(dataflow, .eMultimedia, &imm_device);
+        switch (hr) {
+            win32.S_OK => {},
+            // TODO: win32.E_NOTFOUND!?
+            win32.E_OUTOFMEMORY => return error.OutOfMemory,
+            win32.E_POINTER => unreachable,
+            win32.E_INVALIDARG => unreachable,
+            else => return error.OpeningDevice,
+        }
+        defer _ = imm_device.?.IUnknown_Release();
+
+        var id_u16: ?[*:0]u16 = undefined;
+        hr = imm_device.?.IMMDevice_GetId(&id_u16);
+        switch (hr) {
+            win32.S_OK => {},
+            win32.E_OUTOFMEMORY => return error.OutOfMemory,
+            win32.E_POINTER => unreachable,
+            else => return error.OpeningDevice,
+        }
+
+        const id = std.unicode.utf16leToUtf8AllocZ(self.allocator, std.mem.span(id_u16.?)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable,
+        };
+
+        for (self.devices_info.list.items) |dev, j| {
+            if (std.mem.eql(u8, id, dev.id)) {
+                self.devices_info.setDefault(dev.aim, j);
+            }
+        }
     }
 }
 
@@ -328,14 +506,6 @@ fn setWaveFormatFormat(wf: *WAVEFORMATEXTENSIBLE, format: Format) !void {
         },
         else => return error.InvalidFormat,
     }
-}
-
-pub fn wakeUp(self: *WASApi) void {
-    self.mutex.lock();
-    defer self.mutex.unlock();
-
-    self.scan_queued.store(true, .Release);
-    self.cond.signal();
 }
 
 pub const PlayerData = struct {
@@ -438,6 +608,9 @@ pub fn playerVolume(self: *Player) !f32 {
 
 pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
     allocator.free(self.id);
+    allocator.free(self.name);
+    allocator.free(self.formats);
+    allocator.free(self.channels);
 }
 
 pub const WAVEFORMATEX = extern struct {
@@ -460,3 +633,9 @@ pub const WAVEFORMATEXTENSIBLE = extern struct {
     dwChannelMask: u32 align(1),
     SubFormat: win32.Guid align(1),
 };
+
+// TODO: remove these
+fn isEqualIID(riid1: *const win32.Guid, riid2: *const win32.Guid) bool {
+    std.debug.print("{d}\n", .{riid1.Bytes});
+    return std.mem.eql(u8, &riid1.Bytes, &riid2.Bytes);
+}

@@ -218,8 +218,8 @@ fn deviceInfoOp(self: *PulseAudio, info: anytype, aim: Device.Aim) !void {
     var name = try self.allocator.dupeZ(u8, std.mem.span(info.*.description));
     errdefer self.allocator.free(name);
 
-    if (info.*.sameple_spec.rate < min_sample_rate or
-        info.*.sameple_spec.rate > max_sample_rate)
+    if (info.*.sample_spec.rate < min_sample_rate or
+        info.*.sample_spec.rate > max_sample_rate)
         return;
 
     var device = Device{

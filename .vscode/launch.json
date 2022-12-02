@@ -12,6 +12,14 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "Debug W",
+            "program": "wine ${workspaceFolder}/zig-out/bin/sine_wave.exe",
+            // "arguments": [],
+            "preLaunchTask": "Build W"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug C",
             "program": "${workspaceFolder}/build/sio_sine",
             "args": ["--backend", "alsa"],

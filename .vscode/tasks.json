@@ -15,6 +15,19 @@
             }
         },
         {
+            "label": "Build W",
+            "type": "shell",
+            "command": "zig build -Dtarget=x86_64-windows",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "clear": true
+            }
+        },
+        {
             "label": "Build C",
             "type": "shell",
             "command": "cd build && make",
