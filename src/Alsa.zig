@@ -401,8 +401,7 @@ pub const PlayerData = struct {
 };
 
 pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
-    const format = toPCM_FORMAT(player.format) catch
-        return error.IncompatibleBackend;
+    const format = toPCM_FORMAT(player.format) catch unreachable;
     var pcm: ?*c.snd_pcm_t = null;
     var mixer: ?*c.snd_mixer_t = null;
     var selem: ?*c.snd_mixer_selem_id_t = null;
@@ -626,16 +625,11 @@ pub fn aimToStream(aim: Device.Aim) c_uint {
 
 pub fn toPCM_FORMAT(format: Format) !c.snd_pcm_format_t {
     return switch (format) {
-        .i8 => c.SND_PCM_FORMAT_S8,
         .u8 => c.SND_PCM_FORMAT_U8,
         .i16 => if (is_little) c.SND_PCM_FORMAT_S16_LE else c.SND_PCM_FORMAT_S16_BE,
-        .u16 => if (is_little) c.SND_PCM_FORMAT_U16_LE else c.SND_PCM_FORMAT_U16_BE,
         .i24 => if (is_little) c.SND_PCM_FORMAT_S24_3LE else c.SND_PCM_FORMAT_S24_3BE,
-        .u24 => if (is_little) c.SND_PCM_FORMAT_U24_3LE else c.SND_PCM_FORMAT_U24_3BE,
         .i24_3b => if (is_little) c.SND_PCM_FORMAT_S24_LE else c.SND_PCM_FORMAT_S24_BE,
-        .u24_3b => if (is_little) c.SND_PCM_FORMAT_U24_LE else c.SND_PCM_FORMAT_U24_BE,
         .i32 => if (is_little) c.SND_PCM_FORMAT_S32_LE else c.SND_PCM_FORMAT_S32_BE,
-        .u32 => if (is_little) c.SND_PCM_FORMAT_U32_LE else c.SND_PCM_FORMAT_U32_BE,
         .f32 => if (is_little) c.SND_PCM_FORMAT_FLOAT_LE else c.SND_PCM_FORMAT_FLOAT_BE,
         .f64 => if (is_little) c.SND_PCM_FORMAT_FLOAT64_LE else c.SND_PCM_FORMAT_FLOAT64_BE,
     };
@@ -647,21 +641,12 @@ pub fn fromCHMAP(pos: c_uint) ChannelId {
         c.SND_CHMAP_MONO, c.SND_CHMAP_FC => .front_center,
         c.SND_CHMAP_FL => .front_left,
         c.SND_CHMAP_FR => .front_right,
-        c.SND_CHMAP_RL => .back_left,
-        c.SND_CHMAP_RR => .back_right,
         c.SND_CHMAP_LFE => .lfe,
         c.SND_CHMAP_SL => .side_left,
         c.SND_CHMAP_SR => .side_right,
         c.SND_CHMAP_RC => .back_center,
         c.SND_CHMAP_FLC => .front_left_center,
         c.SND_CHMAP_FRC => .front_right_center,
-        c.SND_CHMAP_RLC => .back_left_center,
-        c.SND_CHMAP_RRC => .back_right_center,
-        c.SND_CHMAP_FLW => .front_left_wide,
-        c.SND_CHMAP_FRW => .front_right_wide,
-        c.SND_CHMAP_FLH => .front_left_high,
-        c.SND_CHMAP_FCH => .front_center_high,
-        c.SND_CHMAP_FRH => .front_right_high,
         c.SND_CHMAP_TC => .top_center,
         c.SND_CHMAP_TFL => .top_front_left,
         c.SND_CHMAP_TFR => .top_front_right,
@@ -669,15 +654,6 @@ pub fn fromCHMAP(pos: c_uint) ChannelId {
         c.SND_CHMAP_TRL => .top_back_left,
         c.SND_CHMAP_TRR => .top_back_right,
         c.SND_CHMAP_TRC => .top_back_center,
-        c.SND_CHMAP_TFLC => .top_front_left_center,
-        c.SND_CHMAP_TFRC => .top_front_right_center,
-        c.SND_CHMAP_TSL => .top_side_left,
-        c.SND_CHMAP_TSR => .top_side_right,
-        c.SND_CHMAP_LLFE => .left_lfe,
-        c.SND_CHMAP_RLFE => .right_lfe,
-        c.SND_CHMAP_BC => .bottom_center,
-        c.SND_CHMAP_BLC => .bottom_left_center,
-        c.SND_CHMAP_BRC => .bottom_right_center,
 
         else => unreachable,
     };
@@ -688,21 +664,12 @@ pub fn toCHMAP(pos: ChannelId) c_uint {
         .front_center => c.SND_CHMAP_FC,
         .front_left => c.SND_CHMAP_FL,
         .front_right => c.SND_CHMAP_FR,
-        .back_left => c.SND_CHMAP_RL,
-        .back_right => c.SND_CHMAP_RR,
         .lfe => c.SND_CHMAP_LFE,
         .side_left => c.SND_CHMAP_SL,
         .side_right => c.SND_CHMAP_SR,
         .back_center => c.SND_CHMAP_RC,
         .front_left_center => c.SND_CHMAP_FLC,
         .front_right_center => c.SND_CHMAP_FRC,
-        .back_left_center => c.SND_CHMAP_RLC,
-        .back_right_center => c.SND_CHMAP_RRC,
-        .front_left_wide => c.SND_CHMAP_FLW,
-        .front_right_wide => c.SND_CHMAP_FRW,
-        .front_left_high => c.SND_CHMAP_FLH,
-        .front_center_high => c.SND_CHMAP_FCH,
-        .front_right_high => c.SND_CHMAP_FRH,
         .top_center => c.SND_CHMAP_TC,
         .top_front_left => c.SND_CHMAP_TFL,
         .top_front_right => c.SND_CHMAP_TFR,
@@ -710,16 +677,5 @@ pub fn toCHMAP(pos: ChannelId) c_uint {
         .top_back_left => c.SND_CHMAP_TRL,
         .top_back_right => c.SND_CHMAP_TRR,
         .top_back_center => c.SND_CHMAP_TRC,
-        .top_front_left_center => c.SND_CHMAP_TFLC,
-        .top_front_right_center => c.SND_CHMAP_TFRC,
-        .top_side_left => c.SND_CHMAP_TSL,
-        .top_side_right => c.SND_CHMAP_TSR,
-        .left_lfe => c.SND_CHMAP_LLFE,
-        .right_lfe => c.SND_CHMAP_RLFE,
-        .bottom_center => c.SND_CHMAP_BC,
-        .bottom_left_center => c.SND_CHMAP_BLC,
-        .bottom_right_center => c.SND_CHMAP_BRC,
-
-        else => unreachable,
     };
 }

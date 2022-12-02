@@ -1,6 +1,4 @@
 const std = @import("std");
-const c = @cImport(@cInclude("asoundlib.h"));
-const util = @import("util.zig");
 const Channel = @import("main.zig").Channel;
 const ConnectOptions = @import("main.zig").ConnectOptions;
 const Device = @import("main.zig").Device;
@@ -18,20 +16,7 @@ const dummy_playback = Device{
     .name = "Dummy Device",
     .aim = .playback,
     .channels = undefined,
-    .formats = &.{
-        .i8,
-        .u8,
-        .i16,
-        .u16,
-        .i24,
-        .u24,
-        .i24_3b,
-        .u24_3b,
-        .i32,
-        .u32,
-        .f32,
-        .f64,
-    },
+    .formats = std.meta.tags(Format),
     .rate_range = .{
         .min = min_sample_rate,
         .max = max_sample_rate,
@@ -43,20 +28,7 @@ const dummy_capture = Device{
     .name = "Dummy Device",
     .aim = .capture,
     .channels = undefined,
-    .formats = &.{
-        .i8,
-        .u8,
-        .i16,
-        .u16,
-        .i24,
-        .u24,
-        .i24_3b,
-        .u24_3b,
-        .i32,
-        .u32,
-        .f32,
-        .f64,
-    },
+    .formats = std.meta.tags(Format),
     .rate_range = .{
         .min = min_sample_rate,
         .max = max_sample_rate,

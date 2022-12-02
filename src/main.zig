@@ -1,6 +1,5 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const channel_layout = @import("channel_layout.zig");
 const bytesAsValue = std.mem.bytesAsValue;
 
 const PulseAudio = if (builtin.os.tag == .linux) @import("PulseAudio.zig") else void;
@@ -59,14 +58,14 @@ pub const ConnectError = error{
 
 pub const ConnectOptions = struct {
     app_name: [:0]const u8 = "Mach Game",
-    watch_devices: bool = false, // TODO: change this to `false`
+    watch_devices: bool = false,
 };
 
 /// must be called in the main thread
 pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SysAudio {
     std.debug.assert(current_backend == null);
-    var data: ?BackendType = null;
 
+    var data: ?BackendType = null;
     if (backend) |b| {
         data = @unionInit(
             BackendType,
@@ -101,19 +100,19 @@ pub fn disconnect(self: SysAudio) void {
     current_backend = null;
 }
 
-pub const EventsError = error{
+pub const FlushError = error{
     OutOfMemory,
     OpeningDevice,
     SystemResources,
 };
 
-pub fn flush(self: SysAudio) EventsError!void {
+pub fn flush(self: SysAudio) FlushError!void {
     return switch (self.data) {
         inline else => |b| b.flush(),
     };
 }
 
-pub fn wait(self: SysAudio) EventsError!void {
+pub fn wait(self: SysAudio) FlushError!void {
     return switch (self.data) {
         inline else => |b| b.wait(),
     };
@@ -293,51 +292,24 @@ pub const Player = struct {
 
     pub fn write(self: *Player, channel: usize, frame: usize, sample: anytype) void {
         switch (@TypeOf(sample)) {
-            i8 => self.writei8(channel, frame, sample),
             u8 => self.writeu8(channel, frame, sample),
             i16 => self.writei16(channel, frame, sample),
-            u16 => self.writeu16(channel, frame, sample),
             i24 => self.writei24(channel, frame, sample),
-            u24 => self.writeu24(channel, frame, sample),
             i32 => self.writei32(channel, frame, sample),
-            u32 => self.writeu32(channel, frame, sample),
             f32 => self.writef32(channel, frame, sample),
             f64 => self.writef64(channel, frame, sample),
             else => @compileError("invalid sample type"),
         }
     }
 
-    pub inline fn writei8(self: *Player, channel: usize, frame: usize, sample: i8) void {
-        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
-        switch (self.format) {
-            .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = sample,
-            .u8 => @panic("TODO"),
-            .i16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = sample,
-            .u16 => @panic("TODO"),
-            .i24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = sample,
-            .u24 => @panic("TODO"),
-            .i24_3b => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
-            .u24_3b => @panic("TODO"),
-            .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
-            .u32 => @panic("TODO"),
-            .f32 => @panic("TODO"),
-            .f64 => @panic("TODO"),
-        }
-    }
-
     pub inline fn writeu8(self: *Player, channel: usize, frame: usize, sample: u8) void {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
-            .i8 => @panic("TODO"),
             .u8 => bytesAsValue(u8, ptr[0..@sizeOf(u8)]).* = sample,
             .i16 => @panic("TODO"),
-            .u16 => bytesAsValue(u16, ptr[0..@sizeOf(u16)]).* = sample,
             .i24 => @panic("TODO"),
-            .u24 => bytesAsValue(u24, ptr[0..@sizeOf(u24)]).* = sample,
             .i24_3b => @panic("TODO"),
-            .u24_3b => bytesAsValue(u32, ptr[0..@sizeOf(u32)]).* = sample,
             .i32 => @panic("TODO"),
-            .u32 => bytesAsValue(u32, ptr[0..@sizeOf(u32)]).* = sample,
             .f32 => @panic("TODO"),
             .f64 => @panic("TODO"),
         }
@@ -346,34 +318,11 @@ pub const Player = struct {
     pub inline fn writei16(self: *Player, channel: usize, frame: usize, sample: i16) void {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
-            .i8 => @panic("TODO"),
             .u8 => @panic("TODO"),
             .i16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = sample,
-            .u16 => @panic("TODO"),
             .i24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = sample,
-            .u24 => @panic("TODO"),
             .i24_3b => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
-            .u24_3b => @panic("TODO"),
             .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
-            .u32 => @panic("TODO"),
-            .f32 => @panic("TODO"),
-            .f64 => @panic("TODO"),
-        }
-    }
-
-    pub inline fn writeu16(self: *Player, channel: usize, frame: usize, sample: u16) void {
-        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
-        switch (self.format) {
-            .i8 => @panic("TODO"),
-            .u8 => @panic("TODO"),
-            .i16 => @panic("TODO"),
-            .u16 => bytesAsValue(u16, ptr[0..@sizeOf(u16)]).* = sample,
-            .i24 => @panic("TODO"),
-            .u24 => bytesAsValue(u24, ptr[0..@sizeOf(u24)]).* = sample,
-            .i24_3b => @panic("TODO"),
-            .u24_3b => bytesAsValue(u32, ptr[0..@sizeOf(u32)]).* = sample,
-            .i32 => @panic("TODO"),
-            .u32 => bytesAsValue(u32, ptr[0..@sizeOf(u32)]).* = sample,
             .f32 => @panic("TODO"),
             .f64 => @panic("TODO"),
         }
@@ -382,34 +331,11 @@ pub const Player = struct {
     pub inline fn writei24(self: *Player, channel: usize, frame: usize, sample: i24) void {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
-            .i8 => @panic("TODO"),
             .u8 => @panic("TODO"),
             .i16 => @panic("TODO"),
-            .u16 => @panic("TODO"),
             .i24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = sample,
-            .u24 => @panic("TODO"),
             .i24_3b => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
-            .u24_3b => @panic("TODO"),
             .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
-            .u32 => @panic("TODO"),
-            .f32 => @panic("TODO"),
-            .f64 => @panic("TODO"),
-        }
-    }
-
-    pub inline fn writeu24(self: *Player, channel: usize, frame: usize, sample: u24) void {
-        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
-        switch (self.format) {
-            .i8 => @panic("TODO"),
-            .u8 => @panic("TODO"),
-            .i16 => @panic("TODO"),
-            .u16 => @panic("TODO"),
-            .i24 => @panic("TODO"),
-            .u24 => bytesAsValue(u24, ptr[0..@sizeOf(u24)]).* = sample,
-            .i24_3b => @panic("TODO"),
-            .u24_3b => bytesAsValue(u32, ptr[0..@sizeOf(u32)]).* = sample,
-            .i32 => @panic("TODO"),
-            .u32 => bytesAsValue(u32, ptr[0..@sizeOf(u32)]).* = sample,
             .f32 => @panic("TODO"),
             .f64 => @panic("TODO"),
         }
@@ -418,34 +344,11 @@ pub const Player = struct {
     pub inline fn writei32(self: *Player, channel: usize, frame: usize, sample: i32) void {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
-            .i8 => @panic("TODO"),
             .u8 => @panic("TODO"),
             .i16 => @panic("TODO"),
-            .u16 => @panic("TODO"),
             .i24 => @panic("TODO"),
-            .u24 => @panic("TODO"),
             .i24_3b => @panic("TODO"),
-            .u24_3b => @panic("TODO"),
             .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
-            .u32 => @panic("TODO"),
-            .f32 => @panic("TODO"),
-            .f64 => @panic("TODO"),
-        }
-    }
-
-    pub inline fn writeu32(self: *Player, channel: usize, frame: usize, sample: u32) void {
-        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
-        switch (self.format) {
-            .i8 => @panic("TODO"),
-            .u8 => @panic("TODO"),
-            .i16 => @panic("TODO"),
-            .u16 => @panic("TODO"),
-            .i24 => @panic("TODO"),
-            .u24 => @panic("TODO"),
-            .i24_3b => @panic("TODO"),
-            .u24_3b => @panic("TODO"),
-            .i32 => @panic("TODO"),
-            .u32 => bytesAsValue(u32, ptr[0..@sizeOf(u32)]).* = sample,
             .f32 => @panic("TODO"),
             .f64 => @panic("TODO"),
         }
@@ -454,16 +357,11 @@ pub const Player = struct {
     pub inline fn writef32(self: *Player, channel: usize, frame: usize, sample: f32) void {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
-            .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = f32ToSigned(i8, sample),
             .u8 => @panic("TODO"),
             .i16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = f32ToSigned(i16, sample),
-            .u16 => @panic("TODO"),
             .i24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = f32ToSigned(i24, sample),
-            .u24 => @panic("TODO"),
             .i24_3b => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = f32ToSigned(i24, sample),
-            .u24_3b => @panic("TODO"),
             .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = f32ToSigned(i32, sample),
-            .u32 => @panic("TODO"),
             .f32 => bytesAsValue(f32, ptr[0..@sizeOf(f32)]).* = sample,
             .f64 => bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = sample,
         }
@@ -472,16 +370,11 @@ pub const Player = struct {
     pub inline fn writef64(self: *Player, channel: usize, frame: usize, sample: f64) void {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
-            .i8 => @panic("TODO"),
             .u8 => @panic("TODO"),
             .i16 => @panic("TODO"),
-            .u16 => @panic("TODO"),
             .i24 => @panic("TODO"),
-            .u24 => @panic("TODO"),
             .i24_3b => @panic("TODO"),
-            .u24_3b => @panic("TODO"),
             .i32 => @panic("TODO"),
-            .u32 => @panic("TODO"),
             .f32 => @panic("TODO"),
             .f64 => bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = sample,
         }
@@ -580,103 +473,39 @@ pub const Channel = struct {
 
 pub const ChannelId = enum {
     front_center,
-    front_right,
     front_left,
-    front_right_center,
+    front_right,
     front_left_center,
-    front_right_wide,
-    front_left_wide,
-    front_center_high,
-    front_right_high,
-    front_left_high,
+    front_right_center,
     back_center,
-    back_right,
-    back_left,
-    side_right,
     side_left,
+    side_right,
     top_center,
     top_front_center,
-    top_front_right,
     top_front_left,
+    top_front_right,
     top_back_center,
-    top_back_right,
     top_back_left,
-    back_right_center,
-    back_left_center,
-    top_front_right_center,
-    top_front_left_center,
-    top_side_right,
-    top_side_left,
-    right_lfe,
-    left_lfe,
+    top_back_right,
     lfe,
-    lfe2,
-    bottom_center,
-    bottom_left_center,
-    bottom_right_center,
-    // Mid/side recording
-    msmid,
-    msside,
-    // first order ambisonic channels
-    ambisonic_w,
-    ambisonic_x,
-    ambisonic_y,
-    ambisonic_z,
-    // X-Y Recording
-    xyx,
-    xyy,
-    // other channel ids
-    headphones_right,
-    headphones_left,
-    click_track,
-    foreign_language,
-    hearing_impaired,
-    narration,
-    haptic,
-    dialog_centric_mix,
-    // AUX
-    aux,
-    aux0,
-    aux1,
-    aux2,
-    aux3,
-    aux4,
-    aux5,
-    aux6,
-    aux7,
-    aux8,
-    aux9,
-    aux10,
-    aux11,
-    aux12,
-    aux13,
-    aux14,
-    aux15,
 };
 
 pub const Format = enum {
-    i8,
     u8,
     i16,
-    u16,
     i24,
-    u24,
     i24_3b,
-    u24_3b,
     i32,
-    u32,
     f32,
     f64,
 
     pub fn bytesPerSample(self: Format) u4 {
         return switch (self) {
-            .i8, .u8 => 1,
-            .i16, .u16 => 2,
-            .i24, .u24 => 3,
+            .u8 => 1,
+            .i16 => 2,
+            .i24 => 3,
             .i24_3b,
-            .u24_3b,
             .i32,
-            .u32,
             .f32,
             => 4,
             .f64 => 8,

@@ -16,7 +16,7 @@ pub fn main() !void {
     try p.start();
 
     try p.setVolume(0.7);
-    try a.wait();
+    // try a.wait();
     while (true) {}
 }
 

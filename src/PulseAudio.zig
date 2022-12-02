@@ -263,7 +263,7 @@ pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
     const sample_spec = c.pa_sample_spec{
-        .format = try toPAFormat(player.format),
+        .format = toPAFormat(player.format) catch unreachable,
         .rate = player.sample_rate,
         .channels = @intCast(u5, player.device.channels.len),
     };
@@ -528,49 +528,14 @@ pub fn fromPAChannelPos(pos: c.pa_channel_position_t) ChannelId {
         c.PA_CHANNEL_POSITION_FRONT_RIGHT => .front_right, // PA_CHANNEL_POSITION_RIGHT
         c.PA_CHANNEL_POSITION_FRONT_CENTER => .front_center, // PA_CHANNEL_POSITION_CENTER
         c.PA_CHANNEL_POSITION_REAR_CENTER => .back_center,
-        c.PA_CHANNEL_POSITION_REAR_LEFT => .back_left,
-        c.PA_CHANNEL_POSITION_REAR_RIGHT => .back_right,
         c.PA_CHANNEL_POSITION_LFE => .lfe, // PA_CHANNEL_POSITION_SUBWOOFER
         c.PA_CHANNEL_POSITION_FRONT_LEFT_OF_CENTER => .front_left_center,
         c.PA_CHANNEL_POSITION_FRONT_RIGHT_OF_CENTER => .front_right_center,
         c.PA_CHANNEL_POSITION_SIDE_LEFT => .side_left,
         c.PA_CHANNEL_POSITION_SIDE_RIGHT => .side_right,
 
-        c.PA_CHANNEL_POSITION_AUX0 => .aux0,
-        c.PA_CHANNEL_POSITION_AUX1 => .aux1,
-        c.PA_CHANNEL_POSITION_AUX2 => .aux2,
-        c.PA_CHANNEL_POSITION_AUX3 => .aux3,
-        c.PA_CHANNEL_POSITION_AUX4 => .aux4,
-        c.PA_CHANNEL_POSITION_AUX5 => .aux5,
-        c.PA_CHANNEL_POSITION_AUX6 => .aux6,
-        c.PA_CHANNEL_POSITION_AUX7 => .aux7,
-        c.PA_CHANNEL_POSITION_AUX8 => .aux8,
-        c.PA_CHANNEL_POSITION_AUX9 => .aux9,
-        c.PA_CHANNEL_POSITION_AUX10 => .aux10,
-        c.PA_CHANNEL_POSITION_AUX11 => .aux11,
-        c.PA_CHANNEL_POSITION_AUX12 => .aux12,
-        c.PA_CHANNEL_POSITION_AUX13 => .aux13,
-        c.PA_CHANNEL_POSITION_AUX14 => .aux14,
-        c.PA_CHANNEL_POSITION_AUX15 => .aux15,
-
-        // let's keep this unreachable for now, since i don't see why someone should use > 15 AUX
-        c.PA_CHANNEL_POSITION_AUX16,
-        c.PA_CHANNEL_POSITION_AUX17,
-        c.PA_CHANNEL_POSITION_AUX18,
-        c.PA_CHANNEL_POSITION_AUX19,
-        c.PA_CHANNEL_POSITION_AUX20,
-        c.PA_CHANNEL_POSITION_AUX21,
-        c.PA_CHANNEL_POSITION_AUX22,
-        c.PA_CHANNEL_POSITION_AUX23,
-        c.PA_CHANNEL_POSITION_AUX24,
-        c.PA_CHANNEL_POSITION_AUX25,
-        c.PA_CHANNEL_POSITION_AUX26,
-        c.PA_CHANNEL_POSITION_AUX27,
-        c.PA_CHANNEL_POSITION_AUX28,
-        c.PA_CHANNEL_POSITION_AUX29,
-        c.PA_CHANNEL_POSITION_AUX30,
-        c.PA_CHANNEL_POSITION_AUX31,
-        => unreachable,
+        // TODO: .front_center?
+        c.PA_CHANNEL_POSITION_AUX0...c.PA_CHANNEL_POSITION_AUX31 => unreachable,
 
         c.PA_CHANNEL_POSITION_TOP_CENTER => .top_center,
         c.PA_CHANNEL_POSITION_TOP_FRONT_LEFT => .top_front_left,
@@ -593,13 +558,7 @@ pub fn toPAFormat(format: Format) !c.pa_sample_format_t {
         .i32 => if (is_little) c.PA_SAMPLE_S32LE else c.PA_SAMPLE_S32BE,
         .f32 => if (is_little) c.PA_SAMPLE_FLOAT32LE else c.PA_SAMPLE_FLOAT32BE,
 
-        .i8,
-        .u16,
-        .u24,
-        .u24_3b,
-        .u32,
-        .f64,
-        => error.IncompatibleBackend,
+        .f64 => error.IncompatibleBackend,
     };
 }
 
@@ -617,8 +576,6 @@ fn toPAChannelPos(channel_id: ChannelId) !c.pa_channel_position_t {
         .front_right => c.PA_CHANNEL_POSITION_FRONT_RIGHT,
         .front_center => c.PA_CHANNEL_POSITION_FRONT_CENTER,
         .lfe => c.PA_CHANNEL_POSITION_LFE,
-        .back_left => c.PA_CHANNEL_POSITION_REAR_LEFT,
-        .back_right => c.PA_CHANNEL_POSITION_REAR_RIGHT,
         .front_left_center => c.PA_CHANNEL_POSITION_FRONT_LEFT_OF_CENTER,
         .front_right_center => c.PA_CHANNEL_POSITION_FRONT_RIGHT_OF_CENTER,
         .back_center => c.PA_CHANNEL_POSITION_REAR_CENTER,
@@ -631,24 +588,5 @@ fn toPAChannelPos(channel_id: ChannelId) !c.pa_channel_position_t {
         .top_back_left => c.PA_CHANNEL_POSITION_TOP_REAR_LEFT,
         .top_back_center => c.PA_CHANNEL_POSITION_TOP_REAR_CENTER,
         .top_back_right => c.PA_CHANNEL_POSITION_TOP_REAR_RIGHT,
-
-        .aux0 => c.PA_CHANNEL_POSITION_AUX0,
-        .aux1 => c.PA_CHANNEL_POSITION_AUX1,
-        .aux2 => c.PA_CHANNEL_POSITION_AUX2,
-        .aux3 => c.PA_CHANNEL_POSITION_AUX3,
-        .aux4 => c.PA_CHANNEL_POSITION_AUX4,
-        .aux5 => c.PA_CHANNEL_POSITION_AUX5,
-        .aux6 => c.PA_CHANNEL_POSITION_AUX6,
-        .aux7 => c.PA_CHANNEL_POSITION_AUX7,
-        .aux8 => c.PA_CHANNEL_POSITION_AUX8,
-        .aux9 => c.PA_CHANNEL_POSITION_AUX9,
-        .aux10 => c.PA_CHANNEL_POSITION_AUX10,
-        .aux11 => c.PA_CHANNEL_POSITION_AUX11,
-        .aux12 => c.PA_CHANNEL_POSITION_AUX12,
-        .aux13 => c.PA_CHANNEL_POSITION_AUX13,
-        .aux14 => c.PA_CHANNEL_POSITION_AUX14,
-        .aux15 => c.PA_CHANNEL_POSITION_AUX15,
-
-        else => error.IncompatibleBackend,
     };
 }
