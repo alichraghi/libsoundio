@@ -232,7 +232,7 @@ fn deviceInfoOp(self: *PulseAudio, info: anytype, aim: Device.Aim) !void {
             break :blk channels;
         },
         .formats = available_formats,
-        .rate_range = .{
+        .sample_rate = .{
             .min = info.*.sample_spec.rate,
             .max = info.*.sample_spec.rate,
         },
@@ -558,7 +558,7 @@ pub fn toPAFormat(format: Format) !c.pa_sample_format_t {
         .i32 => if (is_little) c.PA_SAMPLE_S32LE else c.PA_SAMPLE_S32BE,
         .f32 => if (is_little) c.PA_SAMPLE_FLOAT32LE else c.PA_SAMPLE_FLOAT32BE,
 
-        .f64 => error.IncompatibleBackend,
+        .f64, .i8 => error.IncompatibleBackend,
     };
 }
 

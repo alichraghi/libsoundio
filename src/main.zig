@@ -2,13 +2,16 @@ const builtin = @import("builtin");
 const std = @import("std");
 const bytesAsValue = std.mem.bytesAsValue;
 
+const is_little = @import("builtin").cpu.arch.endian() == .Little;
+
 const PulseAudio = if (builtin.os.tag == .linux) @import("PulseAudio.zig") else void;
 const Alsa = if (builtin.os.tag == .linux) @import("Alsa.zig") else void;
 const WASApi = if (builtin.os.tag == .windows) @import("WASApi.zig") else void;
 const Dummy = @import("Dummy.zig");
 
 comptime {
-    std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDeclsRecursive(SysAudio);
+    std.testing.refAllDeclsRecursive(@import("util.zig"));
 }
 
 const SysAudio = @This();
@@ -131,19 +134,17 @@ pub fn devicesList(self: SysAudio) []const Device {
 }
 
 pub fn getDevice(self: SysAudio, aim: Device.Aim, index: ?usize) ?Device {
-    switch (self.data) {
-        inline else => |b| {
-            return b.devices_info.get(index orelse return b.devices_info.default(aim));
-        },
-    }
+    return switch (self.data) {
+        inline else => |b| b.devices_info.get(index orelse return b.devices_info.default(aim)),
+    };
 }
 
 pub const CreateStreamError = error{
     OutOfMemory,
     SystemResources,
+    OpeningDevice,
     IncompatibleBackend,
     IncompatibleDevice,
-    OpeningDevice,
 };
 
 pub const PlayerOptions = struct {
@@ -171,7 +172,7 @@ pub fn createPlayer(self: SysAudio, device: Device, options: PlayerOptions) Crea
 
             break :blk device.preferredFormat();
         },
-        .sample_rate = device.rate_range.clamp(options.sample_rate),
+        .sample_rate = device.sample_rate.clamp(options.sample_rate),
     };
     switch (self.data) {
         inline else => |b| try b.openPlayer(&player, device),
@@ -189,6 +190,7 @@ pub const Player = struct {
     userdata: ?*anyopaque,
     device: Device,
     format: Format,
+    /// samples per second
     sample_rate: u32,
 
     backend_data: PlayerBackendData(),
@@ -298,7 +300,10 @@ pub const Player = struct {
             i32 => self.writei32(channel, frame, sample),
             f32 => self.writef32(channel, frame, sample),
             f64 => self.writef64(channel, frame, sample),
-            else => @compileError("invalid sample type"),
+            else => @compileError(
+                \\invalid sample type. supported types are:
+                \\u8, i8, i16, i24, i32, f32, f32, f64
+            ),
         }
     }
 
@@ -306,62 +311,94 @@ pub const Player = struct {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
             .u8 => bytesAsValue(u8, ptr[0..@sizeOf(u8)]).* = sample,
-            .i16 => @panic("TODO"),
-            .i24 => @panic("TODO"),
+            .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = unsignedToSigned(i8, sample),
+            .i16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = unsignedToSigned(i16, sample),
+            .i24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = unsignedToSigned(i24, sample),
             .i24_3b => @panic("TODO"),
-            .i32 => @panic("TODO"),
-            .f32 => @panic("TODO"),
-            .f64 => @panic("TODO"),
+            .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = unsignedToSigned(i32, sample),
+            .f32 => bytesAsValue(f32, ptr[0..@sizeOf(f32)]).* = unsignedToFloat(f32, sample),
+            .f64 => bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = unsignedToFloat(f64, sample),
         }
+    }
+
+    fn unsignedToSigned(comptime T: type, sample: anytype) T {
+        const half = 1 << (@bitSizeOf(@TypeOf(sample)) - 1);
+        const trunc = @bitSizeOf(T) - @bitSizeOf(@TypeOf(sample));
+        return @intCast(T, sample -% half) << trunc;
+    }
+
+    fn unsignedToFloat(comptime T: type, sample: anytype) T {
+        const max_int = std.math.maxInt(@TypeOf(sample)) + 1.0;
+        return (@intToFloat(T, sample) - max_int) * 1.0 / max_int;
     }
 
     pub inline fn writei16(self: *Player, channel: usize, frame: usize, sample: i16) void {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
-            .u8 => @panic("TODO"),
+            .u8 => bytesAsValue(u8, ptr[0..@sizeOf(u8)]).* = signedToUnsigned(u8, sample),
+            .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = signedToSigned(i8, sample),
             .i16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = sample,
             .i24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = sample,
-            .i24_3b => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
+            .i24_3b => @panic("TODO"),
             .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
-            .f32 => @panic("TODO"),
-            .f64 => @panic("TODO"),
+            .f32 => bytesAsValue(f32, ptr[0..@sizeOf(f32)]).* = signedToFloat(f32, sample),
+            .f64 => bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = signedToFloat(f64, sample),
         }
     }
 
     pub inline fn writei24(self: *Player, channel: usize, frame: usize, sample: i24) void {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
-            .u8 => @panic("TODO"),
-            .i16 => @panic("TODO"),
+            .u8 => bytesAsValue(u8, ptr[0..@sizeOf(u8)]).* = signedToUnsigned(u8, sample),
+            .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = signedToSigned(i8, sample),
+            .i16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = signedToSigned(i16, sample),
             .i24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = sample,
-            .i24_3b => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
+            .i24_3b => @panic("TODO"),
             .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
-            .f32 => @panic("TODO"),
-            .f64 => @panic("TODO"),
+            .f32 => bytesAsValue(f32, ptr[0..@sizeOf(f32)]).* = signedToFloat(f32, sample),
+            .f64 => bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = signedToFloat(f64, sample),
         }
     }
 
     pub inline fn writei32(self: *Player, channel: usize, frame: usize, sample: i32) void {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
-            .u8 => @panic("TODO"),
-            .i16 => @panic("TODO"),
-            .i24 => @panic("TODO"),
+            .u8 => bytesAsValue(u8, ptr[0..@sizeOf(u8)]).* = signedToUnsigned(u8, sample),
+            .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = signedToSigned(i8, sample),
+            .i16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = signedToSigned(i16, sample),
+            .i24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = signedToSigned(i24, sample),
             .i24_3b => @panic("TODO"),
             .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = sample,
-            .f32 => @panic("TODO"),
-            .f64 => @panic("TODO"),
+            .f32 => bytesAsValue(f32, ptr[0..@sizeOf(f32)]).* = signedToFloat(f32, sample),
+            .f64 => bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = signedToFloat(f64, sample),
         }
+    }
+
+    fn signedToSigned(comptime T: type, sample: anytype) T {
+        const trunc = @bitSizeOf(@TypeOf(sample)) - @bitSizeOf(T);
+        return @intCast(T, sample >> trunc);
+    }
+
+    fn signedToUnsigned(comptime T: type, sample: anytype) T {
+        const half = 1 << (@bitSizeOf(T) - 1);
+        const trunc = @bitSizeOf(@TypeOf(sample)) - @bitSizeOf(T);
+        return @intCast(T, (sample >> trunc) + half);
+    }
+
+    fn signedToFloat(comptime T: type, sample: anytype) T {
+        const max_int = std.math.maxInt(@TypeOf(sample)) + 1.0;
+        return @intToFloat(T, sample) * 1.0 / max_int;
     }
 
     pub inline fn writef32(self: *Player, channel: usize, frame: usize, sample: f32) void {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
-            .u8 => @panic("TODO"),
-            .i16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = f32ToSigned(i16, sample),
-            .i24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = f32ToSigned(i24, sample),
-            .i24_3b => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = f32ToSigned(i24, sample),
-            .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = f32ToSigned(i32, sample),
+            .u8 => bytesAsValue(u8, ptr[0..@sizeOf(u8)]).* = floatToUnsigned(u8, sample),
+            .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = floatToSigned(i8, sample),
+            .i16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = floatToSigned(i16, sample),
+            .i24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = floatToSigned(i24, sample),
+            .i24_3b => @panic("TODO"),
+            .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = floatToSigned(i32, sample),
             .f32 => bytesAsValue(f32, ptr[0..@sizeOf(f32)]).* = sample,
             .f64 => bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = sample,
         }
@@ -370,20 +407,37 @@ pub const Player = struct {
     pub inline fn writef64(self: *Player, channel: usize, frame: usize, sample: f64) void {
         var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
         switch (self.format) {
-            .u8 => @panic("TODO"),
-            .i16 => @panic("TODO"),
-            .i24 => @panic("TODO"),
+            .u8 => bytesAsValue(u8, ptr[0..@sizeOf(u8)]).* = floatToUnsigned(u8, sample),
+            .i8 => bytesAsValue(i8, ptr[0..@sizeOf(i8)]).* = floatToSigned(i8, sample),
+            .i16 => bytesAsValue(i16, ptr[0..@sizeOf(i16)]).* = floatToSigned(i16, sample),
+            .i24 => bytesAsValue(i24, ptr[0..@sizeOf(i24)]).* = floatToSigned(i24, sample),
             .i24_3b => @panic("TODO"),
-            .i32 => @panic("TODO"),
-            .f32 => @panic("TODO"),
+            .i32 => bytesAsValue(i32, ptr[0..@sizeOf(i32)]).* = floatToSigned(i32, sample),
+            .f32 => bytesAsValue(f32, ptr[0..@sizeOf(f32)]).* = sample,
             .f64 => bytesAsValue(f64, ptr[0..@sizeOf(f64)]).* = sample,
         }
     }
 
-    fn f32ToSigned(comptime T: type, sample: f32) T {
-        const range = @intToFloat(f64, std.math.maxInt(T) - std.math.minInt(T));
-        return @floatToInt(T, sample * range / 2.0);
+    fn floatToSigned(comptime T: type, sample: f64) T {
+        return @floatToInt(T, sample * std.math.maxInt(T));
     }
+
+    fn floatToUnsigned(comptime T: type, sample: f64) T {
+        const half = 1 << @bitSizeOf(T) - 1;
+        return @floatToInt(T, sample * (half - 1) + half);
+    }
+
+    // TODO: must be tested
+    // fn f32Toi24_3b(sample: f32) i32 {
+    //     const scaled = sample *  std.math.maxInt(i32);
+    //     if (comptime is_little) {
+    //         return @floatToInt(i32, scaled);
+    //     } else {
+    //         var res: [4]u8 = undefined;
+    //         std.mem.writeIntSliceBig(i32, &res, @floatToInt(i32, res));
+    //         return @bitCast(i32, res);
+    //     }
+    // }
 };
 
 pub const Device = struct {
@@ -397,7 +451,7 @@ pub const Device = struct {
     aim: Aim,
     channels: []Channel,
     formats: []const Format,
-    rate_range: Range(u32),
+    sample_rate: Range(u32),
 
     pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
         return switch (current_backend.?) {
@@ -408,7 +462,9 @@ pub const Device = struct {
     pub fn preferredFormat(self: Device) Format {
         var best: Format = self.formats[0];
         for (self.formats) |fmt| {
-            if (fmt.bytesPerSample() > best.bytesPerSample()) {
+            if (fmt.bytesPerSample() >= best.bytesPerSample()) {
+                if (fmt == .i24_3b and best == .i24)
+                    continue;
                 best = fmt;
             }
         }
@@ -492,6 +548,7 @@ pub const ChannelId = enum {
 
 pub const Format = enum {
     u8,
+    i8,
     i16,
     i24,
     i24_3b,
@@ -501,7 +558,7 @@ pub const Format = enum {
 
     pub fn bytesPerSample(self: Format) u4 {
         return switch (self) {
-            .u8 => 1,
+            .u8, .i8 => 1,
             .i16 => 2,
             .i24 => 3,
             .i24_3b,
@@ -512,8 +569,8 @@ pub const Format = enum {
         };
     }
 
-    pub fn bytesPerFrame(self: Format, channel_count: u5) u8 {
-        return self.bytesPerSample() * channel_count;
+    pub fn bytesPerFrame(self: Format, ch_count: u5) u8 {
+        return self.bytesPerSample() * ch_count;
     }
 };
 

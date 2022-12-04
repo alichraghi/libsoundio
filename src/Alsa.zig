@@ -33,80 +33,75 @@ const DeviceWatcher = struct {
 };
 
 pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
+    _ = c.snd_lib_error_set_handler(@ptrCast(c.snd_lib_error_handler_t, &util.doNothing));
+
     var self = try allocator.create(Alsa);
     errdefer allocator.destroy(self);
-
-    var device_watcher: ?DeviceWatcher = null;
-    if (options.watch_devices) {
-        const notify_fd = std.os.inotify_init1(std.os.linux.IN.NONBLOCK) catch |err| switch (err) {
-            error.ProcessFdQuotaExceeded,
-            error.SystemFdQuotaExceeded,
-            error.SystemResources,
-            => return error.SystemResources,
-            error.Unexpected => unreachable,
-        };
-        errdefer std.os.close(notify_fd);
-
-        const notify_wd = std.os.inotify_add_watch(
-            notify_fd,
-            "/dev/snd",
-            std.os.linux.IN.CREATE | std.os.linux.IN.DELETE,
-        ) catch |err| switch (err) {
-            error.AccessDenied => return error.AccessDenied,
-            error.UserResourceLimitReached,
-            error.NotDir,
-            error.FileNotFound,
-            error.SystemResources,
-            => return error.SystemResources,
-            error.NameTooLong,
-            error.WatchAlreadyExists,
-            error.Unexpected,
-            => unreachable,
-        };
-        errdefer std.os.inotify_rm_watch(notify_fd, notify_wd);
-
-        // used to wakeup poll
-        const notify_pipe_fd = std.os.pipe2(std.os.O.NONBLOCK) catch |err| switch (err) {
-            error.ProcessFdQuotaExceeded,
-            error.SystemFdQuotaExceeded,
-            => return error.SystemResources,
-            error.Unexpected => unreachable,
-        };
-        errdefer {
-            std.os.close(notify_pipe_fd[0]);
-            std.os.close(notify_pipe_fd[1]);
-        }
-
-        device_watcher = .{
-            .thread = std.Thread.spawn(.{}, deviceEventsLoop, .{self}) catch |err| switch (err) {
-                error.ThreadQuotaExceeded,
-                error.SystemResources,
-                error.LockedMemoryLimitExceeded,
-                => return error.SystemResources,
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Unexpected => unreachable,
-            },
-            .mutex = .{},
-            .cond = .{},
-            .aborted = .{ .value = false },
-            .scan_queued = .{ .value = false },
-            .notify_fd = notify_fd,
-            .notify_wd = notify_wd,
-            .notify_pipe_fd = notify_pipe_fd,
-        };
-    }
-
-    // zig fmt: off
-    _ = c.snd_lib_error_set_handler(@ptrCast(
-            c.snd_lib_error_handler_t,
-            &struct { fn e() callconv(.C) void {} }.e,
-        ));
-    // zig fmt: on
-
     self.* = .{
         .allocator = allocator,
         .devices_info = DevicesInfo.init(),
-        .device_watcher = device_watcher,
+        .device_watcher = blk: {
+            if (options.watch_devices) {
+                const notify_fd = std.os.inotify_init1(std.os.linux.IN.NONBLOCK) catch |err| switch (err) {
+                    error.ProcessFdQuotaExceeded,
+                    error.SystemFdQuotaExceeded,
+                    error.SystemResources,
+                    => return error.SystemResources,
+                    error.Unexpected => unreachable,
+                };
+                errdefer std.os.close(notify_fd);
+
+                const notify_wd = std.os.inotify_add_watch(
+                    notify_fd,
+                    "/dev/snd",
+                    std.os.linux.IN.CREATE | std.os.linux.IN.DELETE,
+                ) catch |err| switch (err) {
+                    error.AccessDenied => return error.AccessDenied,
+                    error.UserResourceLimitReached,
+                    error.NotDir,
+                    error.FileNotFound,
+                    error.SystemResources,
+                    => return error.SystemResources,
+                    error.NameTooLong,
+                    error.WatchAlreadyExists,
+                    error.Unexpected,
+                    => unreachable,
+                };
+                errdefer std.os.inotify_rm_watch(notify_fd, notify_wd);
+
+                // used to wakeup poll
+                const notify_pipe_fd = std.os.pipe2(std.os.O.NONBLOCK) catch |err| switch (err) {
+                    error.ProcessFdQuotaExceeded,
+                    error.SystemFdQuotaExceeded,
+                    => return error.SystemResources,
+                    error.Unexpected => unreachable,
+                };
+                errdefer {
+                    std.os.close(notify_pipe_fd[0]);
+                    std.os.close(notify_pipe_fd[1]);
+                }
+
+                break :blk .{
+                    .thread = std.Thread.spawn(.{}, deviceEventsLoop, .{self}) catch |err| switch (err) {
+                        error.ThreadQuotaExceeded,
+                        error.SystemResources,
+                        error.LockedMemoryLimitExceeded,
+                        => return error.SystemResources,
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.Unexpected => unreachable,
+                    },
+                    .mutex = .{},
+                    .cond = .{},
+                    .aborted = .{ .value = false },
+                    .scan_queued = .{ .value = false },
+                    .notify_fd = notify_fd,
+                    .notify_wd = notify_wd,
+                    .notify_pipe_fd = notify_pipe_fd,
+                };
+            }
+
+            break :blk null;
+        },
     };
     return self;
 }
@@ -198,7 +193,6 @@ pub fn flush(self: *Alsa) !void {
     if (self.device_watcher) |*dw| {
         dw.mutex.lock();
         defer dw.mutex.unlock();
-
         dw.scan_queued.store(false, .Release);
     }
     try self.refreshDevices();
@@ -221,18 +215,14 @@ pub fn wakeUp(self: *Alsa) void {
     std.debug.assert(self.device_watcher != null);
     var dw = &self.device_watcher.?;
 
-    dw.lock();
-    defer dw.unlock();
+    dw.mutex.lock();
+    defer dw.mutex.unlock();
     dw.scan_queued.store(true, .Release);
     dw.cond.signal();
 }
 
 fn refreshDevices(self: *Alsa) !void {
     self.devices_info.clear(self.allocator);
-
-    var card_info: ?*c.snd_ctl_card_info_t = null;
-    _ = c.snd_ctl_card_info_malloc(&card_info);
-    defer c.snd_ctl_card_info_free(card_info);
 
     var pcm_info: ?*c.snd_pcm_info_t = null;
     _ = c.snd_pcm_info_malloc(&pcm_info);
@@ -254,18 +244,13 @@ fn refreshDevices(self: *Alsa) !void {
         };
         defer _ = c.snd_ctl_close(ctl);
 
-        if (c.snd_ctl_card_info(ctl, card_info) < 0)
-            return error.SystemResources;
-        const card_name = c.snd_ctl_card_info_get_name(card_info);
-
         var dev_idx: c_int = -1;
         if (c.snd_ctl_pcm_next_device(ctl, &dev_idx) < 0)
             return error.SystemResources;
-        if (dev_idx < 0) break;
 
         c.snd_pcm_info_set_device(pcm_info, @intCast(c_uint, dev_idx));
         c.snd_pcm_info_set_subdevice(pcm_info, 0);
-        const dev_name = c.snd_pcm_info_get_name(pcm_info);
+        const name = std.mem.span(c.snd_pcm_info_get_name(pcm_info) orelse continue);
 
         for (&[_]Device.Aim{ .playback, .capture }) |aim| {
             const snd_stream = aimToStream(aim);
@@ -358,7 +343,7 @@ fn refreshDevices(self: *Alsa) !void {
 
                     break :blk fmt_arr.toOwnedSlice();
                 },
-                .rate_range = blk: {
+                .sample_rate = blk: {
                     var rate_min: c_uint = 0;
                     var rate_max: c_uint = 0;
                     if (c.snd_pcm_hw_params_get_rate_min(params, &rate_min, null) < 0)
@@ -371,7 +356,7 @@ fn refreshDevices(self: *Alsa) !void {
                     };
                 },
                 .id = try self.allocator.dupeZ(u8, id),
-                .name = try std.fmt.allocPrintZ(self.allocator, "{s} {s}", .{ card_name, dev_name }),
+                .name = try self.allocator.dupeZ(u8, name),
             };
 
             try self.devices_info.list.append(self.allocator, device);
@@ -626,6 +611,7 @@ pub fn aimToStream(aim: Device.Aim) c_uint {
 pub fn toPCM_FORMAT(format: Format) !c.snd_pcm_format_t {
     return switch (format) {
         .u8 => c.SND_PCM_FORMAT_U8,
+        .i8 => c.SND_PCM_FORMAT_S8,
         .i16 => if (is_little) c.SND_PCM_FORMAT_S16_LE else c.SND_PCM_FORMAT_S16_BE,
         .i24 => if (is_little) c.SND_PCM_FORMAT_S24_3LE else c.SND_PCM_FORMAT_S24_3BE,
         .i24_3b => if (is_little) c.SND_PCM_FORMAT_S24_LE else c.SND_PCM_FORMAT_S24_BE,

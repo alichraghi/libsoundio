@@ -6,7 +6,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var a = try sysaudio.connect(null, allocator, .{ .watch_devices = false });
+    var a = try sysaudio.connect(.PulseAudio, allocator, .{ .watch_devices = false });
     defer a.disconnect();
     try a.flush();
     const device = a.getDevice(.playback, null) orelse return error.NoDevice;
@@ -15,7 +15,7 @@ pub fn main() !void {
     defer p.deinit();
     try p.start();
 
-    try p.setVolume(0.7);
+    try p.setVolume(1.0);
     // try a.wait();
     while (true) {}
 }

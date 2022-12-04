@@ -17,7 +17,7 @@ const dummy_playback = Device{
     .aim = .playback,
     .channels = undefined,
     .formats = std.meta.tags(Format),
-    .rate_range = .{
+    .sample_rate = .{
         .min = min_sample_rate,
         .max = max_sample_rate,
     },
@@ -29,7 +29,7 @@ const dummy_capture = Device{
     .aim = .capture,
     .channels = undefined,
     .formats = std.meta.tags(Format),
-    .rate_range = .{
+    .sample_rate = .{
         .min = min_sample_rate,
         .max = max_sample_rate,
     },

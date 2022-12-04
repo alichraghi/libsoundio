@@ -336,7 +336,7 @@ fn refreshDevices(self: *WASApi) !void {
                 }
                 break :blk chn_arr.toOwnedSlice();
             },
-            .rate_range = .{
+            .sample_rate = .{
                 .min = wf.Format.nSamplesPerSec,
                 .max = wf.Format.nSamplesPerSec,
             },

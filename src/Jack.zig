@@ -133,7 +133,7 @@ pub fn refreshDevices(self: *Jack) !void {
                 device.channels.append(.{
                     .id = parseChannelId(channel_name) orelse continue,
                 }) catch continue;
-                device.rate_range = .{
+                device.sample_rate = .{
                     .min = std.math.clamp(self.sample_rate, min_sample_rate, max_sample_rate),
                     .max = std.math.clamp(self.sample_rate, min_sample_rate, max_sample_rate),
                 };

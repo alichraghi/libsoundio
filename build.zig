@@ -22,10 +22,13 @@ pub fn build(b: *std.build.Builder) void {
     link(sine_wave);
     sine_wave.install();
 
-    const main_tests = b.addTest("src/util.zig");
+    const main_tests = b.addTest("src/main.zig");
     link(main_tests);
     main_tests.setTarget(target);
     main_tests.setBuildMode(mode);
+
+    const main_tests_step = b.step("test", "Run library tests");
+    main_tests_step.dependOn(&main_tests.step);
 
     const sine_wave_step = b.step("sine_wave", "Run library tests");
     sine_wave_step.dependOn(&sine_wave.run().step);
