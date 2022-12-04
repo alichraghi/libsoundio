@@ -24,8 +24,8 @@ pub const default_latency = 500 * std.time.us_per_ms; // μs
 
 var current_backend: ?Backend = null;
 
-pub const Backend = std.meta.Tag(BackendType);
-pub const BackendType = switch (builtin.os.tag) {
+pub const Backend = std.meta.Tag(BackendData);
+pub const BackendData = switch (builtin.os.tag) {
     .linux,
     .kfreebsd,
     .freebsd,
@@ -50,7 +50,7 @@ pub const BackendType = switch (builtin.os.tag) {
     },
 };
 
-data: BackendType,
+data: BackendData,
 
 pub const ConnectError = error{
     OutOfMemory,
@@ -68,32 +68,32 @@ pub const ConnectOptions = struct {
 pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SysAudio {
     std.debug.assert(current_backend == null);
 
-    var data: ?BackendType = null;
-    if (backend) |b| {
-        data = @unionInit(
-            BackendType,
-            @tagName(b),
-            try @field(SysAudio, @tagName(b)).connect(allocator, options),
-        );
-    } else {
-        var first_err: ConnectError!void = {};
+    var data: BackendData = blk: {
+        if (backend) |b| {
+            break :blk @unionInit(
+                BackendData,
+                @tagName(b),
+                try @field(SysAudio, @tagName(b)).connect(allocator, options),
+            );
+        } else {
+            var first_err: ConnectError!void = {};
 
-        inline for (std.meta.fields(Backend)) |b, i| {
-            if (@field(SysAudio, b.name).connect(allocator, options) catch |err| blk: {
-                if (i == 0) first_err = err;
-                break :blk null;
-            }) |d| {
-                data = @unionInit(BackendType, b.name, d);
-                break;
+            inline for (std.meta.fields(Backend)) |b, i| {
+                if (@field(SysAudio, b.name).connect(allocator, options) catch |err| fblk: {
+                    if (i == 0) first_err = err;
+                    break :fblk null;
+                }) |d| {
+                    break :blk @unionInit(BackendData, b.name, d);
+                }
             }
-        }
 
-        if (data == null)
             try first_err;
-    }
+            unreachable;
+        }
+    };
 
-    current_backend = std.meta.activeTag(data.?);
-    return .{ .data = data.? };
+    current_backend = std.meta.activeTag(data);
+    return .{ .data = data };
 }
 
 pub fn disconnect(self: SysAudio) void {
@@ -196,8 +196,8 @@ pub const Player = struct {
     backend_data: PlayerBackendData(),
 
     fn PlayerBackendData() type {
-        var fields: [std.meta.fields(BackendType).len]std.builtin.Type.UnionField = undefined;
-        for (std.meta.fields(BackendType)) |b, i| {
+        var fields: [std.meta.fields(BackendData).len]std.builtin.Type.UnionField = undefined;
+        for (std.meta.fields(BackendData)) |b, i| {
             fields[i] = std.builtin.Type.UnionField{
                 .name = b.name,
                 .field_type = @field(SysAudio, b.name).PlayerData,
