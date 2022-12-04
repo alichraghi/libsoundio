@@ -37,25 +37,15 @@ const dummy_capture = Device{
 
 allocator: std.mem.Allocator,
 devices_info: DevicesInfo,
-device_watcher: ?DeviceWatcher,
-
-const DeviceWatcher = struct {
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
-    scan_queued: std.atomic.Atomic(bool),
-};
 
 pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Dummy {
+    _ = options;
+
     var self = try allocator.create(Dummy);
     errdefer allocator.destroy(self);
     self.* = .{
         .allocator = allocator,
         .devices_info = DevicesInfo.init(),
-        .device_watcher = if (options.watch_devices) .{
-            .mutex = .{},
-            .cond = .{},
-            .scan_queued = .{ .value = false },
-        } else null,
     };
 
     try self.devices_info.list.append(self.allocator, dummy_playback);
@@ -79,35 +69,8 @@ pub fn disconnect(self: *Dummy) void {
     self.allocator.destroy(self);
 }
 
-pub fn flush(self: *Dummy) !void {
-    if (self.device_watcher) |*dw| {
-        dw.mutex.lock();
-        defer dw.mutex.unlock();
-        dw.scan_queued.store(false, .Release);
-    }
-}
-
-pub fn wait(self: *Dummy) !void {
-    std.debug.assert(self.device_watcher != null);
-    var dw = &self.device_watcher.?;
-
-    dw.mutex.lock();
-    defer dw.mutex.unlock();
-
-    while (!dw.scan_queued.load(.Acquire))
-        dw.cond.wait(&dw.mutex);
-
-    dw.scan_queued.store(false, .Release);
-}
-
-pub fn wakeUp(self: *Dummy) void {
-    std.debug.assert(self.device_watcher != null);
-    var dw = &self.device_watcher.?;
-
-    dw.mutex.lock();
-    defer dw.mutex.unlock();
-    dw.scan_queued.store(true, .Release);
-    dw.cond.signal();
+pub fn refresh(self: *Dummy) !void {
+    _ = self;
 }
 
 pub const PlayerData = struct {
@@ -171,7 +134,7 @@ fn playerLoop(self: *Player) void {
         bd.cond.timedWait(&bd.mutex, default_latency * std.time.ns_per_us) catch {};
         if (bd.paused.load(.Unordered))
             continue;
-        self.writeFn(self, {}, bps);
+        self.writeFn(self, bps);
     }
 }
 
@@ -204,7 +167,6 @@ pub fn playerSetVolume(self: *Player, volume: f32) !void {
 
 pub fn playerVolume(self: *Player) !f32 {
     var bd = &self.backend_data.Dummy;
-
     return bd.volume;
 }
 

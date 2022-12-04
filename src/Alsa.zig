@@ -5,6 +5,7 @@ const Channel = @import("main.zig").Channel;
 const ChannelId = @import("main.zig").ChannelId;
 const ConnectOptions = @import("main.zig").ConnectOptions;
 const Device = @import("main.zig").Device;
+const DeviceChangeFn = @import("main.zig").DeviceChangeFn;
 const DevicesInfo = @import("main.zig").DevicesInfo;
 const Format = @import("main.zig").Format;
 const Player = @import("main.zig").Player;
@@ -22,11 +23,10 @@ devices_info: DevicesInfo,
 device_watcher: ?DeviceWatcher,
 
 const DeviceWatcher = struct {
+    deviceChangeFn: DeviceChangeFn,
+    userdata: ?*anyopaque,
     thread: std.Thread,
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
     aborted: std.atomic.Atomic(bool),
-    scan_queued: std.atomic.Atomic(bool),
     notify_fd: std.os.fd_t,
     notify_wd: std.os.fd_t,
     notify_pipe_fd: [2]std.os.fd_t,
@@ -41,7 +41,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
         .allocator = allocator,
         .devices_info = DevicesInfo.init(),
         .device_watcher = blk: {
-            if (options.watch_devices) {
+            if (options.deviceChangeFn != null) {
                 const notify_fd = std.os.inotify_init1(std.os.linux.IN.NONBLOCK) catch |err| switch (err) {
                     error.ProcessFdQuotaExceeded,
                     error.SystemFdQuotaExceeded,
@@ -82,6 +82,8 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
                 }
 
                 break :blk .{
+                    .deviceChangeFn = options.deviceChangeFn.?,
+                    .userdata = options.userdata,
                     .thread = std.Thread.spawn(.{}, deviceEventsLoop, .{self}) catch |err| switch (err) {
                         error.ThreadQuotaExceeded,
                         error.SystemResources,
@@ -90,10 +92,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.Unexpected => unreachable,
                     },
-                    .mutex = .{},
-                    .cond = .{},
                     .aborted = .{ .value = false },
-                    .scan_queued = .{ .value = false },
                     .notify_fd = notify_fd,
                     .notify_wd = notify_wd,
                     .notify_pipe_fd = notify_pipe_fd,
@@ -178,50 +177,14 @@ fn deviceEventsLoop(self: *Alsa) void {
                     if (util.hasFlag(evt.mask, std.os.linux.IN.ISDIR) or !std.mem.startsWith(u8, evt_name, "pcm"))
                         continue;
 
-                    dw.mutex.lock();
-                    defer dw.mutex.unlock();
-
-                    dw.scan_queued.store(true, .Release);
-                    dw.cond.signal();
+                    dw.deviceChangeFn(dw.userdata);
                 }
             }
         }
     }
 }
 
-pub fn flush(self: *Alsa) !void {
-    if (self.device_watcher) |*dw| {
-        dw.mutex.lock();
-        defer dw.mutex.unlock();
-        dw.scan_queued.store(false, .Release);
-    }
-    try self.refreshDevices();
-}
-
-pub fn wait(self: *Alsa) !void {
-    std.debug.assert(self.device_watcher != null);
-    var dw = &self.device_watcher.?;
-
-    dw.mutex.lock();
-    defer dw.mutex.unlock();
-    while (!dw.scan_queued.load(.Acquire))
-        dw.cond.wait(&dw.mutex);
-
-    dw.scan_queued.store(false, .Release);
-    try self.refreshDevices();
-}
-
-pub fn wakeUp(self: *Alsa) void {
-    std.debug.assert(self.device_watcher != null);
-    var dw = &self.device_watcher.?;
-
-    dw.mutex.lock();
-    defer dw.mutex.unlock();
-    dw.scan_queued.store(true, .Release);
-    dw.cond.signal();
-}
-
-fn refreshDevices(self: *Alsa) !void {
+pub fn refresh(self: *Alsa) !void {
     self.devices_info.clear(self.allocator);
 
     var pcm_info: ?*c.snd_pcm_info_t = null;
@@ -518,15 +481,16 @@ fn playerLoop(self: *Player) void {
         ch.*.ptr = bd.sample_buffer.ptr + i * self.bytesPerSample();
     }
 
-    var err: error{WriteFailed}!void = {};
     while (!bd.aborted.load(.Unordered)) {
         var frames_left = bd.period_size;
         while (frames_left > 0) {
-            self.writeFn(self, err, frames_left);
+            self.writeFn(self, frames_left);
             const n = c.snd_pcm_writei(bd.pcm, bd.sample_buffer.ptr, frames_left);
             if (n < 0) {
-                if (c.snd_pcm_recover(bd.pcm, @intCast(c_int, n), 1) < 0)
-                    err = error.WriteFailed;
+                if (c.snd_pcm_recover(bd.pcm, @intCast(c_int, n), 1) < 0) {
+                    if (std.debug.runtime_safety) unreachable;
+                    return;
+                }
                 return;
             }
             frames_left -= @intCast(c_uint, n);

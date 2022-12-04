@@ -3,6 +3,7 @@ const c = @cImport(@cInclude("pulse/pulseaudio.h"));
 const Channel = @import("main.zig").Channel;
 const ChannelId = @import("main.zig").ChannelId;
 const ConnectOptions = @import("main.zig").ConnectOptions;
+const DeviceChangeFn = @import("main.zig").DeviceChangeFn;
 const Device = @import("main.zig").Device;
 const DevicesInfo = @import("main.zig").DevicesInfo;
 const Format = @import("main.zig").Format;
@@ -17,27 +18,23 @@ const PulseAudio = @This();
 allocator: std.mem.Allocator,
 devices_info: DevicesInfo,
 app_name: [:0]const u8,
+deviceChangeFn: ?DeviceChangeFn,
+userdata: ?*anyopaque,
 main_loop: *c.pa_threaded_mainloop,
 ctx: *c.pa_context,
 ctx_state: c.pa_context_state_t,
 default_sink: ?[:0]const u8,
 default_source: ?[:0]const u8,
-scan_queued: ?std.atomic.Atomic(bool),
 
 pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAudio {
     const main_loop = c.pa_threaded_mainloop_new() orelse
         return error.OutOfMemory;
     errdefer c.pa_threaded_mainloop_free(main_loop);
-
     var main_loop_api = c.pa_threaded_mainloop_get_api(main_loop);
 
     const ctx = c.pa_context_new_with_proplist(main_loop_api, options.app_name.ptr, null) orelse
         return error.OutOfMemory;
     errdefer c.pa_context_unref(ctx);
-
-    if (c.pa_context_connect(ctx, null, 0, null) != 0)
-        return error.ConnectionRefused;
-    errdefer c.pa_context_disconnect(ctx);
 
     var self = try allocator.create(PulseAudio);
     errdefer allocator.destroy(self);
@@ -45,14 +42,18 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAud
         .allocator = allocator,
         .devices_info = DevicesInfo.init(),
         .app_name = options.app_name,
+        .deviceChangeFn = options.deviceChangeFn,
+        .userdata = options.userdata,
         .main_loop = main_loop,
         .ctx = ctx,
         .ctx_state = c.PA_CONTEXT_UNCONNECTED,
         .default_sink = null,
         .default_source = null,
-        .scan_queued = if (options.watch_devices) .{ .value = false } else null,
     };
 
+    if (c.pa_context_connect(ctx, null, 0, null) != 0)
+        return error.ConnectionRefused;
+    errdefer c.pa_context_disconnect(ctx);
     c.pa_context_set_state_callback(ctx, contextStateOp, self);
 
     if (c.pa_threaded_mainloop_start(main_loop) != 0)
@@ -86,10 +87,11 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAud
             else => unreachable,
         }
     }
+
     // subscribe to events
-    if (options.watch_devices) {
+    if (options.deviceChangeFn != null) {
         c.pa_context_set_subscribe_callback(ctx, subscribeOp, self);
-        const events = c.PA_SUBSCRIPTION_MASK_SINK | c.PA_SUBSCRIPTION_MASK_SOURCE | c.PA_SUBSCRIPTION_MASK_SERVER;
+        const events = c.PA_SUBSCRIPTION_MASK_SINK | c.PA_SUBSCRIPTION_MASK_SOURCE;
         const subscribe_op = c.pa_context_subscribe(ctx, events, null, self) orelse
             return error.OutOfMemory;
         c.pa_operation_unref(subscribe_op);
@@ -100,9 +102,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAud
 
 fn subscribeOp(_: ?*c.pa_context, _: c.pa_subscription_event_type_t, _: u32, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
-
-    self.scan_queued.?.store(true, .Unordered);
-    c.pa_threaded_mainloop_signal(self.main_loop, 0);
+    self.deviceChangeFn.?(self.userdata);
 }
 
 fn contextStateOp(ctx: ?*c.pa_context, userdata: ?*anyopaque) callconv(.C) void {
@@ -123,33 +123,10 @@ pub fn disconnect(self: *PulseAudio) void {
     self.allocator.destroy(self);
 }
 
-pub fn flush(self: *PulseAudio) !void {
+pub fn refresh(self: *PulseAudio) !void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
-    try self.refreshDevices();
-}
 
-pub fn wait(self: *PulseAudio) !void {
-    std.debug.assert(self.scan_queued != null);
-
-    c.pa_threaded_mainloop_lock(self.main_loop);
-    defer c.pa_threaded_mainloop_unlock(self.main_loop);
-    while (!self.scan_queued.?.load(.Acquire))
-        c.pa_threaded_mainloop_wait(self.main_loop);
-    self.scan_queued.?.store(false, .Release);
-    try self.refreshDevices();
-}
-
-pub fn wakeUp(self: *PulseAudio) void {
-    std.debug.assert(self.scan_queued != null);
-
-    c.pa_threaded_mainloop_lock(self.main_loop);
-    defer c.pa_threaded_mainloop_unlock(self.main_loop);
-    self.scan_queued.?.store(true, .Release);
-    c.pa_threaded_mainloop_signal(self.main_loop, 0);
-}
-
-fn refreshDevices(self: *PulseAudio) !void {
     self.devices_info.clear(self.allocator);
 
     const list_sink_op = c.pa_context_get_sink_info_list(self.ctx, sinkInfoOp, self);
@@ -369,7 +346,6 @@ fn playbackStreamWriteOp(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque)
     var bd = &self.backend_data.PulseAudio;
 
     var frames_left = nbytes;
-    var err: error{WriteFailed}!void = {};
     while (frames_left > 0) {
         var chunk_size = frames_left;
         if (c.pa_stream_begin_write(
@@ -379,18 +355,22 @@ fn playbackStreamWriteOp(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque)
                 @alignCast(@alignOf([*c]?*anyopaque), &bd.write_ptr),
             ),
             &chunk_size,
-        ) != 0)
-            err = error.WriteFailed;
+        ) != 0) {
+            if (std.debug.runtime_safety) unreachable;
+            return;
+        }
 
         for (self.device.channels) |*ch, i| {
             ch.*.ptr = bd.write_ptr + self.bytesPerSample() * i;
         }
 
         const frames = chunk_size / self.bytesPerFrame();
-        self.writeFn(self, err, frames);
+        self.writeFn(self, frames);
 
-        if (c.pa_stream_write(bd.stream, bd.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0)
-            err = error.WriteFailed;
+        if (c.pa_stream_write(bd.stream, bd.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0) {
+            if (std.debug.runtime_safety) unreachable;
+            return;
+        }
 
         frames_left -= chunk_size;
     }

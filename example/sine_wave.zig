@@ -6,9 +6,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var a = try sysaudio.connect(.PulseAudio, allocator, .{ .watch_devices = false });
+    var a = try sysaudio.connect(.Alsa, allocator, .{ .deviceChangeFn = deviceChange });
     defer a.disconnect();
-    try a.flush();
+    try a.refresh();
     const device = a.getDevice(.playback, null) orelse return error.NoDevice;
 
     var p = try a.createPlayer(device, .{ .writeFn = writeCallback });
@@ -23,8 +23,7 @@ pub fn main() !void {
 const pitch = 440.0;
 const radians_per_second = pitch * 2.0 * std.math.pi;
 var seconds_offset: f32 = 0.0;
-fn writeCallback(self_opaque: *anyopaque, err: sysaudio.Player.WriteError!void, n_frame: usize) void {
-    err catch unreachable;
+fn writeCallback(self_opaque: *anyopaque, n_frame: usize) void {
     var self = @ptrCast(*sysaudio.Player, @alignCast(@alignOf(sysaudio.Player), self_opaque));
 
     const seconds_per_frame = 1.0 / @intToFloat(f32, self.sample_rate);
@@ -34,4 +33,9 @@ fn writeCallback(self_opaque: *anyopaque, err: sysaudio.Player.WriteError!void, 
         self.writeAll(frame, sample);
     }
     seconds_offset = @mod(seconds_offset + seconds_per_frame * @intToFloat(f32, n_frame), 1.0);
+}
+
+fn deviceChange(self: ?*anyopaque) void {
+    _ = self;
+    std.debug.print("Device change detected!\n", .{});
 }

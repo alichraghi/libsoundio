@@ -55,10 +55,17 @@ pub const ConnectError = error{
     ConnectionRefused,
 };
 
+pub const DeviceChangeFn = *const fn (self: ?*anyopaque) void;
 pub const ConnectOptions = struct {
     app_name: [:0]const u8 = "Mach Game",
-    watch_devices: bool = false,
+    deviceChangeFn: ?DeviceChangeFn = null,
+    userdata: ?*anyopaque = null,
 };
+
+// pub const ConnectOptions = struct {
+//     app_name: [:0]const u8 = "Mach Game",
+//     watch_devices: bool = false,
+// };
 
 /// must be called in the main thread
 pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SysAudio {
@@ -99,27 +106,15 @@ pub fn disconnect(self: SysAudio) void {
     current_backend = null;
 }
 
-pub const FlushError = error{
+pub const RefreshError = error{
     OutOfMemory,
     OpeningDevice,
     SystemResources,
 };
 
-pub fn flush(self: SysAudio) FlushError!void {
+pub fn refresh(self: SysAudio) RefreshError!void {
     return switch (self.data) {
-        inline else => |b| b.flush(),
-    };
-}
-
-pub fn wait(self: SysAudio) FlushError!void {
-    return switch (self.data) {
-        inline else => |b| b.wait(),
-    };
-}
-
-pub fn wakeUp(self: SysAudio) void {
-    return switch (self.data) {
-        inline else => |b| b.wakeUp(),
+        inline else => |b| b.refresh(),
     };
 }
 
@@ -179,8 +174,7 @@ pub fn createPlayer(self: SysAudio, device: Device, options: PlayerOptions) Crea
 pub const Player = struct {
     // TODO: `*Player` instead `*anyopaque`
     // https://github.com/ziglang/zig/issues/12325
-    pub const WriteError = error{WriteFailed};
-    pub const WriteFn = *const fn (self: *anyopaque, err: WriteError!void, frame_count_max: usize) void;
+    pub const WriteFn = *const fn (self: *anyopaque, frame_count_max: usize) void;
 
     writeFn: WriteFn,
     userdata: ?*anyopaque,
