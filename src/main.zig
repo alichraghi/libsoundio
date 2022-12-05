@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const util = @import("util.zig");
 
 const PulseAudio = if (builtin.os.tag == .linux) @import("PulseAudio.zig") else void;
 const Alsa = if (builtin.os.tag == .linux) @import("Alsa.zig") else void;
@@ -8,7 +9,6 @@ const Dummy = @import("Dummy.zig");
 
 comptime {
     std.testing.refAllDeclsRecursive(SysAudio);
-    std.testing.refAllDeclsRecursive(@import("util.zig"));
 }
 
 pub const max_channels = 32;
@@ -50,8 +50,8 @@ data: BackendData,
 
 pub const ConnectError = error{
     OutOfMemory,
-    SystemResources,
     AccessDenied,
+    SystemResources,
     ConnectionRefused,
 };
 
@@ -62,12 +62,6 @@ pub const ConnectOptions = struct {
     userdata: ?*anyopaque = null,
 };
 
-// pub const ConnectOptions = struct {
-//     app_name: [:0]const u8 = "Mach Game",
-//     watch_devices: bool = false,
-// };
-
-/// must be called in the main thread
 pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SysAudio {
     std.debug.assert(current_backend == null);
 
@@ -108,8 +102,8 @@ pub fn disconnect(self: SysAudio) void {
 
 pub const RefreshError = error{
     OutOfMemory,
-    OpeningDevice,
     SystemResources,
+    OpeningDevice,
 };
 
 pub fn refresh(self: SysAudio) RefreshError!void {
@@ -118,15 +112,15 @@ pub fn refresh(self: SysAudio) RefreshError!void {
     };
 }
 
-pub fn devicesList(self: SysAudio) []const Device {
+pub fn devices(self: SysAudio) []const Device {
     return switch (self.data) {
-        inline else => |b| b.devices_info.list.items,
+        inline else => |b| b.devices(),
     };
 }
 
-pub fn getDevice(self: SysAudio, aim: Device.Aim, index: ?usize) ?Device {
+pub fn defaultDevice(self: SysAudio, aim: Device.Aim) ?Device {
     return switch (self.data) {
-        inline else => |b| b.devices_info.get(index orelse return b.devices_info.default(aim)),
+        inline else => |b| b.defaultDevice(aim),
     };
 }
 
@@ -139,16 +133,17 @@ pub const CreateStreamError = error{
 };
 
 pub const PlayerOptions = struct {
-    writeFn: Player.WriteFn,
     format: ?Format = null,
     sample_rate: u32 = default_sample_rate,
     userdata: ?*anyopaque = null,
 };
 
-pub fn createPlayer(self: SysAudio, device: Device, options: PlayerOptions) CreateStreamError!Player {
+pub fn createPlayer(self: SysAudio, device: Device, writeFn: Player.WriteFn, options: PlayerOptions) CreateStreamError!Player {
+    std.debug.assert(device.aim == .playback);
+
     var player = Player{
         .backend_data = undefined,
-        .writeFn = options.writeFn,
+        .writeFn = writeFn,
         .userdata = options.userdata,
         .device = device,
         .format = blk: {
@@ -165,16 +160,18 @@ pub fn createPlayer(self: SysAudio, device: Device, options: PlayerOptions) Crea
         },
         .sample_rate = device.sample_rate.clamp(options.sample_rate),
     };
+
     switch (self.data) {
         inline else => |b| try b.openPlayer(&player, device),
     }
+
     return player;
 }
 
 pub const Player = struct {
-    // TODO: `*Player` instead `*anyopaque`
+    // TODO: `Player` instead `*const anyopaque`
     // https://github.com/ziglang/zig/issues/12325
-    pub const WriteFn = *const fn (self: *anyopaque, frame_count_max: usize) void;
+    pub const WriteFn = *const fn (self: *const anyopaque, frame_count_max: usize) void;
 
     writeFn: WriteFn,
     userdata: ?*anyopaque,
@@ -284,12 +281,12 @@ pub const Player = struct {
 
     pub fn write(self: *Player, channel: usize, frame: usize, sample: anytype) void {
         switch (@TypeOf(sample)) {
-            u8 => self.writeu8(channel, frame, sample),
-            i16 => self.writei16(channel, frame, sample),
-            i24 => self.writei24(channel, frame, sample),
-            i32 => self.writei32(channel, frame, sample),
-            f32 => self.writef32(channel, frame, sample),
-            f64 => self.writef64(channel, frame, sample),
+            u8 => self.writeU8(channel, frame, sample),
+            i16 => self.writeI16(channel, frame, sample),
+            i24 => self.writeI24(channel, frame, sample),
+            i32 => self.writeI32(channel, frame, sample),
+            f32 => self.writeF32(channel, frame, sample),
+            f64 => self.writeF64(channel, frame, sample),
             else => @compileError(
                 \\invalid sample type. supported types are:
                 \\u8, i8, i16, i24, i32, f32, f32, f64
@@ -302,13 +299,13 @@ pub const Player = struct {
         std.mem.bytesAsValue(@TypeOf(sample), ptr[0..@sizeOf(@TypeOf(sample))]).* = sample;
     }
 
-    pub fn writeu8(self: *Player, channel: usize, frame: usize, sample: u8) void {
+    pub fn writeU8(self: *Player, channel: usize, frame: usize, sample: u8) void {
         switch (self.format) {
             .u8 => self.writeRaw(channel, frame, sample),
             .i8 => self.writeRaw(channel, frame, unsignedToSigned(i8, sample)),
             .i16 => self.writeRaw(channel, frame, unsignedToSigned(i16, sample)),
             .i24 => self.writeRaw(channel, frame, unsignedToSigned(i24, sample)),
-            .i24_3b => @panic("TODO"),
+            .i24_4b => @panic("TODO"),
             .i32 => self.writeRaw(channel, frame, unsignedToSigned(i32, sample)),
             .f32 => self.writeRaw(channel, frame, unsignedToFloat(f32, sample)),
             .f64 => self.writeRaw(channel, frame, unsignedToFloat(f64, sample)),
@@ -326,39 +323,39 @@ pub const Player = struct {
         return (@intToFloat(T, sample) - max_int) * 1.0 / max_int;
     }
 
-    pub fn writei16(self: *Player, channel: usize, frame: usize, sample: i16) void {
+    pub fn writeI16(self: *Player, channel: usize, frame: usize, sample: i16) void {
         switch (self.format) {
             .u8 => self.writeRaw(channel, frame, signedToUnsigned(u8, sample)),
             .i8 => self.writeRaw(channel, frame, signedToSigned(i8, sample)),
             .i16 => self.writeRaw(channel, frame, sample),
             .i24 => self.writeRaw(channel, frame, sample),
-            .i24_3b => @panic("TODO"),
+            .i24_4b => @panic("TODO"),
             .i32 => self.writeRaw(channel, frame, sample),
             .f32 => self.writeRaw(channel, frame, signedToFloat(f32, sample)),
             .f64 => self.writeRaw(channel, frame, signedToFloat(f64, sample)),
         }
     }
 
-    pub fn writei24(self: *Player, channel: usize, frame: usize, sample: i24) void {
+    pub fn writeI24(self: *Player, channel: usize, frame: usize, sample: i24) void {
         switch (self.format) {
             .u8 => self.writeRaw(channel, frame, signedToUnsigned(u8, sample)),
             .i8 => self.writeRaw(channel, frame, signedToSigned(i8, sample)),
             .i16 => self.writeRaw(channel, frame, signedToSigned(i16, sample)),
             .i24 => self.writeRaw(channel, frame, sample),
-            .i24_3b => @panic("TODO"),
+            .i24_4b => @panic("TODO"),
             .i32 => self.writeRaw(channel, frame, sample),
             .f32 => self.writeRaw(channel, frame, signedToFloat(f32, sample)),
             .f64 => self.writeRaw(channel, frame, signedToFloat(f64, sample)),
         }
     }
 
-    pub fn writei32(self: *Player, channel: usize, frame: usize, sample: i32) void {
+    pub fn writeI32(self: *Player, channel: usize, frame: usize, sample: i32) void {
         switch (self.format) {
             .u8 => self.writeRaw(channel, frame, signedToUnsigned(u8, sample)),
             .i8 => self.writeRaw(channel, frame, signedToSigned(i8, sample)),
             .i16 => self.writeRaw(channel, frame, signedToSigned(i16, sample)),
             .i24 => self.writeRaw(channel, frame, signedToSigned(i24, sample)),
-            .i24_3b => @panic("TODO"),
+            .i24_4b => @panic("TODO"),
             .i32 => self.writeRaw(channel, frame, sample),
             .f32 => self.writeRaw(channel, frame, signedToFloat(f32, sample)),
             .f64 => self.writeRaw(channel, frame, signedToFloat(f64, sample)),
@@ -381,26 +378,26 @@ pub const Player = struct {
         return @intToFloat(T, sample) * 1.0 / max_int;
     }
 
-    pub fn writef32(self: *Player, channel: usize, frame: usize, sample: f32) void {
+    pub fn writeF32(self: *Player, channel: usize, frame: usize, sample: f32) void {
         switch (self.format) {
             .u8 => self.writeRaw(channel, frame, floatToUnsigned(u8, sample)),
             .i8 => self.writeRaw(channel, frame, floatToSigned(i8, sample)),
             .i16 => self.writeRaw(channel, frame, floatToSigned(i16, sample)),
             .i24 => self.writeRaw(channel, frame, floatToSigned(i24, sample)),
-            .i24_3b => @panic("TODO"),
+            .i24_4b => @panic("TODO"),
             .i32 => self.writeRaw(channel, frame, floatToSigned(i32, sample)),
             .f32 => self.writeRaw(channel, frame, sample),
             .f64 => self.writeRaw(channel, frame, sample),
         }
     }
 
-    pub fn writef64(self: *Player, channel: usize, frame: usize, sample: f64) void {
+    pub fn writeF64(self: *Player, channel: usize, frame: usize, sample: f64) void {
         switch (self.format) {
             .u8 => self.writeRaw(channel, frame, floatToUnsigned(u8, sample)),
             .i8 => self.writeRaw(channel, frame, floatToSigned(i8, sample)),
             .i16 => self.writeRaw(channel, frame, floatToSigned(i16, sample)),
             .i24 => self.writeRaw(channel, frame, floatToSigned(i24, sample)),
-            .i24_3b => @panic("TODO"),
+            .i24_4b => @panic("TODO"),
             .i32 => self.writeRaw(channel, frame, floatToSigned(i32, sample)),
             .f32 => self.writeRaw(channel, frame, sample),
             .f64 => self.writeRaw(channel, frame, sample),
@@ -417,7 +414,7 @@ pub const Player = struct {
     }
 
     // TODO: must be tested
-    // fn f32Toi24_3b(sample: f32) i32 {
+    // fn f32Toi24_4b(sample: f32) i32 {
     //     const scaled = sample *  std.math.maxInt(i32);
     //     if (builtin.cpu.arch.endian() == .Little) {
     //         return @floatToInt(i32, scaled);
@@ -440,7 +437,7 @@ pub const Device = struct {
     aim: Aim,
     channels: []Channel,
     formats: []const Format,
-    sample_rate: Range(u32),
+    sample_rate: util.Range(u32),
 
     pub fn deinit(self: Device, allocator: std.mem.Allocator) void {
         return switch (current_backend.?) {
@@ -452,62 +449,12 @@ pub const Device = struct {
         var best: Format = self.formats[0];
         for (self.formats) |fmt| {
             if (fmt.bytesPerSample() >= best.bytesPerSample()) {
-                if (fmt == .i24_3b and best == .i24)
+                if (fmt == .i24_4b and best == .i24)
                     continue;
                 best = fmt;
             }
         }
         return best;
-    }
-};
-
-pub const DevicesInfo = struct {
-    list: std.ArrayListUnmanaged(Device),
-    default_output: ?usize,
-    default_input: ?usize,
-
-    pub fn init() DevicesInfo {
-        return .{
-            .list = .{},
-            .default_output = null,
-            .default_input = null,
-        };
-    }
-
-    pub fn deinit(self: *DevicesInfo, allocator: std.mem.Allocator) void {
-        for (self.list.items) |device|
-            device.deinit(allocator);
-        self.list.deinit(allocator);
-    }
-
-    pub fn clear(self: *DevicesInfo, allocator: std.mem.Allocator) void {
-        self.default_output = null;
-        self.default_input = null;
-        for (self.list.items) |device|
-            device.deinit(allocator);
-        self.list.clearAndFree(allocator);
-    }
-
-    pub fn get(self: DevicesInfo, i: usize) Device {
-        return self.list.items[i];
-    }
-
-    pub fn default(self: DevicesInfo, aim: Device.Aim) ?Device {
-        return self.get(self.defaultIndex(aim) orelse return null);
-    }
-
-    pub fn setDefault(self: *DevicesInfo, aim: Device.Aim, i: usize) void {
-        switch (aim) {
-            .playback => self.default_output = i,
-            .capture => self.default_input = i,
-        }
-    }
-
-    pub fn defaultIndex(self: DevicesInfo, aim: Device.Aim) ?usize {
-        return switch (aim) {
-            .playback => self.default_output,
-            .capture => self.default_input,
-        };
     }
 };
 
@@ -540,7 +487,7 @@ pub const Format = enum {
     i8,
     i16,
     i24,
-    i24_3b,
+    i24_4b,
     i32,
     f32,
     f64,
@@ -550,7 +497,7 @@ pub const Format = enum {
             .u8, .i8 => 1,
             .i16 => 2,
             .i24 => 3,
-            .i24_3b,
+            .i24_4b,
             .i32,
             .f32,
             => 4,
@@ -562,16 +509,3 @@ pub const Format = enum {
         return self.bytesPerSample() * ch_count;
     }
 };
-
-pub fn Range(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        min: T,
-        max: T,
-
-        pub fn clamp(self: Self, val: T) T {
-            return std.math.clamp(val, self.min, self.max);
-        }
-    };
-}

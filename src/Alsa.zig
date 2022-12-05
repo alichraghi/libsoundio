@@ -1,29 +1,18 @@
 const std = @import("std");
 const c = @cImport(@cInclude("asoundlib.h"));
+const main = @import("main.zig");
 const util = @import("util.zig");
-const Channel = @import("main.zig").Channel;
-const ChannelId = @import("main.zig").ChannelId;
-const ConnectOptions = @import("main.zig").ConnectOptions;
-const Device = @import("main.zig").Device;
-const DeviceChangeFn = @import("main.zig").DeviceChangeFn;
-const DevicesInfo = @import("main.zig").DevicesInfo;
-const Format = @import("main.zig").Format;
-const Player = @import("main.zig").Player;
-const Range = @import("main.zig").Range;
-const default_latency = @import("main.zig").default_latency;
-const max_channels = @import("main.zig").max_channels;
 const inotify_event = std.os.linux.inotify_event;
-
 const is_little = @import("builtin").cpu.arch.endian() == .Little;
 
 const Alsa = @This();
 
 allocator: std.mem.Allocator,
-devices_info: DevicesInfo,
+devices_info: util.DevicesInfo,
 device_watcher: ?DeviceWatcher,
 
 const DeviceWatcher = struct {
-    deviceChangeFn: DeviceChangeFn,
+    deviceChangeFn: main.DeviceChangeFn,
     userdata: ?*anyopaque,
     thread: std.Thread,
     aborted: std.atomic.Atomic(bool),
@@ -32,14 +21,14 @@ const DeviceWatcher = struct {
     notify_pipe_fd: [2]std.os.fd_t,
 };
 
-pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
+pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !*Alsa {
     _ = c.snd_lib_error_set_handler(@ptrCast(c.snd_lib_error_handler_t, &util.doNothing));
 
     var self = try allocator.create(Alsa);
     errdefer allocator.destroy(self);
     self.* = .{
         .allocator = allocator,
-        .devices_info = DevicesInfo.init(),
+        .devices_info = util.DevicesInfo.init(),
         .device_watcher = blk: {
             if (options.deviceChangeFn != null) {
                 const notify_fd = std.os.inotify_init1(std.os.linux.IN.NONBLOCK) catch |err| switch (err) {
@@ -69,7 +58,6 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*Alsa {
                 };
                 errdefer std.os.inotify_rm_watch(notify_fd, notify_wd);
 
-                // used to wakeup poll
                 const notify_pipe_fd = std.os.pipe2(std.os.O.NONBLOCK) catch |err| switch (err) {
                     error.ProcessFdQuotaExceeded,
                     error.SystemFdQuotaExceeded,
@@ -109,7 +97,6 @@ pub fn disconnect(self: *Alsa) void {
     if (self.device_watcher) |*dw| {
         dw.aborted.store(true, .Unordered);
 
-        // wake up thread
         _ = std.os.write(dw.notify_pipe_fd[1], "a") catch {};
         dw.thread.join();
 
@@ -123,7 +110,7 @@ pub fn disconnect(self: *Alsa) void {
     self.allocator.destroy(self);
 }
 
-fn deviceEventsLoop(self: *Alsa) void {
+fn deviceEventsLoop(self: Alsa) void {
     var dw = &self.device_watcher.?;
     var last_crash: ?i64 = null;
     var buf: [2048]u8 = undefined;
@@ -215,7 +202,7 @@ pub fn refresh(self: *Alsa) !void {
         c.snd_pcm_info_set_subdevice(pcm_info, 0);
         const name = std.mem.span(c.snd_pcm_info_get_name(pcm_info) orelse continue);
 
-        for (&[_]Device.Aim{ .playback, .capture }) |aim| {
+        for (&[_]main.Device.Aim{ .playback, .capture }) |aim| {
             const snd_stream = aimToStream(aim);
             c.snd_pcm_info_set_stream(pcm_info, snd_stream);
             const err = c.snd_ctl_pcm_info(ctl, pcm_info);
@@ -245,7 +232,7 @@ pub fn refresh(self: *Alsa) !void {
             if (c.snd_pcm_hw_params_can_pause(params) == 0)
                 continue;
 
-            const device = Device{
+            const device = main.Device{
                 .aim = aim,
                 .channels = blk: {
                     const chmap = c.snd_pcm_query_chmaps(pcm);
@@ -255,9 +242,9 @@ pub fn refresh(self: *Alsa) !void {
                         if (chmap[0] == null) continue;
 
                         const n_ch = chmap[0][0].map.channels;
-                        if (n_ch <= 0 or n_ch > max_channels) continue;
+                        if (n_ch <= 0 or n_ch > main.max_channels) continue;
 
-                        var channels = try self.allocator.alloc(Channel, n_ch);
+                        var channels = try self.allocator.alloc(main.Channel, n_ch);
                         for (channels) |*ch, i|
                             ch.*.id = fromCHMAP(chmap[0][0].map.pos()[i]);
                         break :blk channels;
@@ -294,8 +281,8 @@ pub fn refresh(self: *Alsa) !void {
                     c.snd_pcm_format_mask_set(fmt_mask, c.SND_PCM_FORMAT_FLOAT64_BE);
                     c.snd_pcm_hw_params_get_format_mask(params, fmt_mask);
 
-                    var fmt_arr = std.ArrayList(Format).init(self.allocator);
-                    inline for (std.meta.tags(Format)) |format| {
+                    var fmt_arr = std.ArrayList(main.Format).init(self.allocator);
+                    inline for (std.meta.tags(main.Format)) |format| {
                         if (c.snd_pcm_format_mask_test(
                             fmt_mask,
                             toPCM_FORMAT(format) catch unreachable,
@@ -334,6 +321,14 @@ pub fn refresh(self: *Alsa) !void {
     }
 }
 
+pub fn devices(self: Alsa) []const main.Device {
+    return self.devices_info.list.items;
+}
+
+pub fn defaultDevice(self: Alsa, aim: main.Device.Aim) ?main.Device {
+    return self.devices_info.default(aim);
+}
+
 pub const PlayerData = struct {
     allocator: std.mem.Allocator,
     thread: std.Thread,
@@ -345,10 +340,10 @@ pub const PlayerData = struct {
     selem: *c.snd_mixer_selem_id_t,
     mixer_elm: *c.snd_mixer_elem_t,
     period_size: c_ulong,
-    vol_range: Range(c_long),
+    vol_range: util.Range(c_long),
 };
 
-pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
+pub fn openPlayer(self: Alsa, player: *main.Player, device: main.Device) !void {
     const format = toPCM_FORMAT(player.format) catch unreachable;
     var pcm: ?*c.snd_pcm_t = null;
     var mixer: ?*c.snd_mixer_t = null;
@@ -372,7 +367,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
             @intCast(c_uint, player.device.channels.len),
             player.sample_rate,
             1,
-            default_latency,
+            main.default_latency,
         )) < 0)
             return error.OpeningDevice;
         errdefer _ = c.snd_pcm_hw_free(pcm);
@@ -447,7 +442,7 @@ pub fn openPlayer(self: *Alsa, player: *Player, device: Device) !void {
     };
 }
 
-pub fn playerDeinit(self: *Player) void {
+pub fn playerDeinit(self: *main.Player) void {
     var bd = &self.backend_data.Alsa;
 
     bd.aborted.store(true, .Unordered);
@@ -461,7 +456,7 @@ pub fn playerDeinit(self: *Player) void {
     bd.allocator.free(bd.sample_buffer);
 }
 
-pub fn playerStart(self: *Player) !void {
+pub fn playerStart(self: *main.Player) !void {
     var bd = &self.backend_data.Alsa;
 
     bd.thread = std.Thread.spawn(.{}, playerLoop, .{self}) catch |err| switch (err) {
@@ -474,7 +469,7 @@ pub fn playerStart(self: *Player) !void {
     };
 }
 
-fn playerLoop(self: *Player) void {
+fn playerLoop(self: *main.Player) void {
     var bd = &self.backend_data.Alsa;
 
     for (self.device.channels) |*ch, i| {
@@ -498,7 +493,7 @@ fn playerLoop(self: *Player) void {
     }
 }
 
-pub fn playerPlay(self: *Player) !void {
+pub fn playerPlay(self: *main.Player) !void {
     const bd = &self.backend_data.Alsa;
 
     if (c.snd_pcm_state(bd.pcm) == c.SND_PCM_STATE_PAUSED) {
@@ -507,7 +502,7 @@ pub fn playerPlay(self: *Player) !void {
     }
 }
 
-pub fn playerPause(self: *Player) !void {
+pub fn playerPause(self: *main.Player) !void {
     const bd = &self.backend_data.Alsa;
 
     if (c.snd_pcm_state(bd.pcm) != c.SND_PCM_STATE_PAUSED) {
@@ -516,13 +511,13 @@ pub fn playerPause(self: *Player) !void {
     }
 }
 
-pub fn playerPaused(self: *Player) bool {
+pub fn playerPaused(self: *main.Player) bool {
     const bd = &self.backend_data.Alsa;
 
     return c.snd_pcm_state(bd.pcm) == c.SND_PCM_STATE_PAUSED;
 }
 
-pub fn playerSetVolume(self: *Player, volume: f32) !void {
+pub fn playerSetVolume(self: *main.Player, volume: f32) !void {
     var bd = &self.backend_data.Alsa;
 
     bd.mutex.lock();
@@ -536,7 +531,7 @@ pub fn playerSetVolume(self: *Player, volume: f32) !void {
         return error.CannotSetVolume;
 }
 
-pub fn playerVolume(self: *Player) !f32 {
+pub fn playerVolume(self: *main.Player) !f32 {
     var bd = &self.backend_data.Alsa;
 
     bd.mutex.lock();
@@ -558,34 +553,34 @@ pub fn playerVolume(self: *Player) !f32 {
     return @intToFloat(f32, volume) / @intToFloat(f32, bd.vol_range.max - bd.vol_range.min);
 }
 
-pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
+pub fn deviceDeinit(self: main.Device, allocator: std.mem.Allocator) void {
     allocator.free(self.id);
     allocator.free(self.name);
     allocator.free(self.formats);
     allocator.free(self.channels);
 }
 
-pub fn aimToStream(aim: Device.Aim) c_uint {
+pub fn aimToStream(aim: main.Device.Aim) c_uint {
     return switch (aim) {
         .playback => c.SND_PCM_STREAM_PLAYBACK,
         .capture => c.SND_PCM_STREAM_CAPTURE,
     };
 }
 
-pub fn toPCM_FORMAT(format: Format) !c.snd_pcm_format_t {
+pub fn toPCM_FORMAT(format: main.Format) !c.snd_pcm_format_t {
     return switch (format) {
         .u8 => c.SND_PCM_FORMAT_U8,
         .i8 => c.SND_PCM_FORMAT_S8,
         .i16 => if (is_little) c.SND_PCM_FORMAT_S16_LE else c.SND_PCM_FORMAT_S16_BE,
         .i24 => if (is_little) c.SND_PCM_FORMAT_S24_3LE else c.SND_PCM_FORMAT_S24_3BE,
-        .i24_3b => if (is_little) c.SND_PCM_FORMAT_S24_LE else c.SND_PCM_FORMAT_S24_BE,
+        .i24_4b => if (is_little) c.SND_PCM_FORMAT_S24_LE else c.SND_PCM_FORMAT_S24_BE,
         .i32 => if (is_little) c.SND_PCM_FORMAT_S32_LE else c.SND_PCM_FORMAT_S32_BE,
         .f32 => if (is_little) c.SND_PCM_FORMAT_FLOAT_LE else c.SND_PCM_FORMAT_FLOAT_BE,
         .f64 => if (is_little) c.SND_PCM_FORMAT_FLOAT64_LE else c.SND_PCM_FORMAT_FLOAT64_BE,
     };
 }
 
-pub fn fromCHMAP(pos: c_uint) ChannelId {
+pub fn fromCHMAP(pos: c_uint) main.ChannelId {
     return switch (pos) {
         c.SND_CHMAP_UNKNOWN, c.SND_CHMAP_NA => unreachable, // TODO
         c.SND_CHMAP_MONO, c.SND_CHMAP_FC => .front_center,
@@ -609,7 +604,7 @@ pub fn fromCHMAP(pos: c_uint) ChannelId {
     };
 }
 
-pub fn toCHMAP(pos: ChannelId) c_uint {
+pub fn toCHMAP(pos: main.ChannelId) c_uint {
     return switch (pos) {
         .front_center => c.SND_CHMAP_FC,
         .front_left => c.SND_CHMAP_FL,

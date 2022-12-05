@@ -6,12 +6,12 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var a = try sysaudio.connect(.Alsa, allocator, .{ .deviceChangeFn = deviceChange });
+    var a = try sysaudio.connect(.Dummy, allocator, .{ .deviceChangeFn = deviceChange });
     defer a.disconnect();
     try a.refresh();
-    const device = a.getDevice(.playback, null) orelse return error.NoDevice;
+    const device = a.defaultDevice(.playback) orelse return error.NoDevice;
 
-    var p = try a.createPlayer(device, .{ .writeFn = writeCallback });
+    var p = try a.createPlayer(device, writeCallback, .{});
     defer p.deinit();
     try p.start();
 

@@ -12,22 +12,13 @@ const win32 = struct {
     usingnamespace @import("win32").ui.shell.properties_system;
     usingnamespace @import("win32").zig;
 };
+const main = @import("main.zig");
 const util = @import("util.zig");
-const Channel = @import("main.zig").Channel;
-const ChannelId = @import("main.zig").ChannelId;
-const ConnectOptions = @import("main.zig").ConnectOptions;
-const Device = @import("main.zig").Device;
-const DevicesInfo = @import("main.zig").DevicesInfo;
-const Format = @import("main.zig").Format;
-const Player = @import("main.zig").Player;
-const default_latency = @import("main.zig").default_latency;
-const min_sample_rate = @import("main.zig").min_sample_rate;
-const max_sample_rate = @import("main.zig").max_sample_rate;
 
 const WASApi = @This();
 
 allocator: std.mem.Allocator,
-devices_info: DevicesInfo,
+devices_info: util.DevicesInfo,
 enumerator: ?*win32.IMMDeviceEnumerator,
 device_watcher: ?DeviceWatcher,
 
@@ -38,7 +29,7 @@ const DeviceWatcher = struct {
     notif_client: win32.IMMNotificationClient,
 };
 
-pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*WASApi {
+pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !*WASApi {
     _ = win32.COINIT.initFlags(.{ .APARTMENTTHREADED = 1, .DISABLE_OLE1DDE = 1 });
     var hr = win32.CoInitialize(null);
     switch (hr) {
@@ -56,7 +47,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*WASApi {
     errdefer allocator.destroy(self);
     self.* = .{
         .allocator = allocator,
-        .devices_info = DevicesInfo.init(),
+        .devices_info = util.DevicesInfo.init(),
         .enumerator = blk: {
             var enumerator: ?*win32.IMMDeviceEnumerator = null;
 
@@ -206,42 +197,7 @@ pub fn disconnect(self: *WASApi) void {
     self.allocator.destroy(self);
 }
 
-pub fn flush(self: *WASApi) !void {
-    if (self.device_watcher) |*dw| {
-        dw.mutex.lock();
-        defer dw.mutex.unlock();
-
-        dw.scan_queued.store(false, .Release);
-    }
-    try self.refreshDevices();
-}
-
-pub fn wait(self: *WASApi) !void {
-    std.debug.assert(self.device_watcher != null);
-    var dw = &self.device_watcher.?;
-
-    dw.mutex.lock();
-    defer dw.mutex.unlock();
-
-    while (!dw.scan_queued.load(.Acquire))
-        dw.cond.wait(&dw.mutex);
-
-    dw.scan_queued.store(false, .Release);
-    try self.refreshDevices();
-}
-
-pub fn wakeUp(self: *WASApi) void {
-    std.debug.assert(self.device_watcher != null);
-    var dw = &self.device_watcher.?;
-
-    dw.mutex.lock();
-    defer dw.mutex.unlock();
-
-    dw.scan_queued.store(true, .Release);
-    dw.cond.signal();
-}
-
-fn refreshDevices(self: *WASApi) !void {
+pub fn refresh(self: *WASApi) !void {
     var hr: win32.HRESULT = win32.S_OK;
 
     var collection: ?*win32.IMMDeviceCollection = null;
@@ -302,7 +258,7 @@ fn refreshDevices(self: *WASApi) !void {
         );
         defer win32.CoTaskMemFree(variant.Anonymous.Anonymous.Anonymous.blob.pBlobData);
 
-        var device = Device{
+        var device = main.Device{
             .aim = blk: {
                 var endpoint: ?*win32.IMMEndpoint = null;
                 hr = imm_device.?.IUnknown_QueryInterface(win32.IID_IMMEndpoint, @ptrCast(?*?*anyopaque, &endpoint));
@@ -328,7 +284,7 @@ fn refreshDevices(self: *WASApi) !void {
                 };
             },
             .channels = blk: {
-                var chn_arr = std.ArrayList(Channel).init(self.allocator);
+                var chn_arr = std.ArrayList(main.Channel).init(self.allocator);
                 var channel = win32.SPEAKER_FRONT_LEFT;
                 while (channel < win32.SPEAKER_RESERVED) : (channel <<= 1) {
                     if (util.hasFlag(wf.dwChannelMask, channel))
@@ -337,8 +293,8 @@ fn refreshDevices(self: *WASApi) !void {
                 break :blk chn_arr.toOwnedSlice();
             },
             .sample_rate = .{
-                .min = wf.Format.nSamplesPerSec,
-                .max = wf.Format.nSamplesPerSec,
+                .min = wf.main.Format.nSamplesPerSec,
+                .max = wf.main.Format.nSamplesPerSec,
             },
             .formats = blk: {
                 var audio_client: ?*win32.IAudioClient = null;
@@ -353,9 +309,9 @@ fn refreshDevices(self: *WASApi) !void {
                     else => return error.OpeningDevice,
                 }
 
-                var fmt_arr = std.ArrayList(Format).init(self.allocator);
+                var fmt_arr = std.ArrayList(main.Format).init(self.allocator);
                 var closest_match: ?*win32.WAVEFORMATEX = null;
-                for (std.meta.tags(Format)) |format| {
+                for (std.meta.tags(main.Format)) |format| {
                     setWaveFormatFormat(wf, format) catch continue;
                     if (audio_client.?.IAudioClient_IsFormatSupported(
                         .SHARED,
@@ -443,7 +399,15 @@ fn refreshDevices(self: *WASApi) !void {
     }
 }
 
-fn fromWASApiChannel(speaker: u32) ChannelId {
+pub fn devices(self: WASApi) []const main.Device {
+    return self.devices_info.list.items;
+}
+
+pub fn defaultDevice(self: WASApi, aim: main.Device.Aim) ?main.Device {
+    return self.devices_info.default(aim);
+}
+
+fn fromWASApiChannel(speaker: u32) main.ChannelId {
     return switch (speaker) {
         win32.SPEAKER_FRONT_LEFT => .front_left,
         win32.SPEAKER_FRONT_RIGHT => .front_right,
@@ -467,41 +431,41 @@ fn fromWASApiChannel(speaker: u32) ChannelId {
     };
 }
 
-fn setWaveFormatFormat(wf: *WAVEFORMATEXTENSIBLE, format: Format) !void {
+fn setWaveFormatFormat(wf: *WAVEFORMATEXTENSIBLE, format: main.Format) !void {
     switch (format) {
         .u8 => {
             wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_PCM.*;
-            wf.Format.wBitsPerSample = 8;
+            wf.main.Format.wBitsPerSample = 8;
             wf.Samples.wValidBitsPerSample = 8;
         },
         .i16 => {
             wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_PCM.*;
-            wf.Format.wBitsPerSample = 16;
+            wf.main.Format.wBitsPerSample = 16;
             wf.Samples.wValidBitsPerSample = 16;
         },
         .i24 => {
             wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_PCM.*;
-            wf.Format.wBitsPerSample = 24;
+            wf.main.Format.wBitsPerSample = 24;
             wf.Samples.wValidBitsPerSample = 24;
         },
-        .i24_3b => {
+        .i24_4b => {
             wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_PCM.*;
-            wf.Format.wBitsPerSample = 32;
+            wf.main.Format.wBitsPerSample = 32;
             wf.Samples.wValidBitsPerSample = 24;
         },
         .i32 => {
             wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_PCM.*;
-            wf.Format.wBitsPerSample = 32;
+            wf.main.Format.wBitsPerSample = 32;
             wf.Samples.wValidBitsPerSample = 32;
         },
         .f32 => {
             wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT.*;
-            wf.Format.wBitsPerSample = 32;
+            wf.main.Format.wBitsPerSample = 32;
             wf.Samples.wValidBitsPerSample = 32;
         },
         .f64 => {
             wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT.*;
-            wf.Format.wBitsPerSample = 64;
+            wf.main.Format.wBitsPerSample = 64;
             wf.Samples.wValidBitsPerSample = 64;
         },
         else => return error.InvalidFormat,
@@ -518,7 +482,7 @@ pub const PlayerData = struct {
     volume: f32,
 };
 
-pub fn openPlayer(self: *WASApi, player: *Player, device: Device) !void {
+pub fn openPlayer(self: *WASApi, player: *main.Player, device: main.Device) !void {
     _ = device;
     player.backend_data = .{
         .WASApi = .{
@@ -533,7 +497,7 @@ pub fn openPlayer(self: *WASApi, player: *Player, device: Device) !void {
     };
 }
 
-pub fn playerDeinit(self: *Player) void {
+pub fn playerDeinit(self: *main.Player) void {
     var bd = &self.backend_data.WASApi;
 
     bd.aborted.store(true, .Unordered);
@@ -541,7 +505,7 @@ pub fn playerDeinit(self: *Player) void {
     bd.thread.join();
 }
 
-pub fn playerStart(self: *Player) !void {
+pub fn playerStart(self: *main.Player) !void {
     var bd = &self.backend_data.WASApi;
 
     bd.thread = std.Thread.spawn(.{}, playerLoop, .{self}) catch |err| switch (err) {
@@ -554,7 +518,7 @@ pub fn playerStart(self: *Player) !void {
     };
 }
 
-fn playerLoop(self: *Player) void {
+fn playerLoop(self: *main.Player) void {
     var bd = &self.backend_data.WASApi;
 
     const buf_size = @as(u11, 1024);
@@ -566,14 +530,14 @@ fn playerLoop(self: *Player) void {
     while (!bd.aborted.load(.Unordered)) {
         bd.mutex.lock();
         defer bd.mutex.unlock();
-        bd.cond.timedWait(&bd.mutex, default_latency * std.time.ns_per_us) catch {};
+        bd.cond.timedWait(&bd.mutex, main.default_latency * std.time.ns_per_us) catch {};
         if (bd.paused.load(.Unordered))
             continue;
         self.writeFn(self, {}, bps);
     }
 }
 
-pub fn playerPlay(self: *Player) !void {
+pub fn playerPlay(self: *main.Player) !void {
     var bd = &self.backend_data.WASApi;
     bd.mutex.lock();
     defer bd.mutex.unlock();
@@ -581,32 +545,32 @@ pub fn playerPlay(self: *Player) !void {
     bd.cond.signal();
 }
 
-pub fn playerPause(self: *Player) !void {
+pub fn playerPause(self: *main.Player) !void {
     const bd = &self.backend_data.WASApi;
     bd.mutex.lock();
     defer bd.mutex.unlock();
     bd.paused.store(true, .Unordered);
 }
 
-pub fn playerPaused(self: *Player) bool {
+pub fn playerPaused(self: *main.Player) bool {
     const bd = &self.backend_data.WASApi;
     bd.mutex.lock();
     defer bd.mutex.unlock();
     return bd.paused.load(.Unordered);
 }
 
-pub fn playerSetVolume(self: *Player, volume: f32) !void {
+pub fn playerSetVolume(self: *main.Player, volume: f32) !void {
     var bd = &self.backend_data.WASApi;
     bd.volume = volume;
 }
 
-pub fn playerVolume(self: *Player) !f32 {
+pub fn playerVolume(self: *main.Player) !f32 {
     var bd = &self.backend_data.WASApi;
 
     return bd.volume;
 }
 
-pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
+pub fn deviceDeinit(self: main.Device, allocator: std.mem.Allocator) void {
     allocator.free(self.id);
     allocator.free(self.name);
     allocator.free(self.formats);

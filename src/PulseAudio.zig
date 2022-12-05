@@ -1,32 +1,27 @@
 const std = @import("std");
 const c = @cImport(@cInclude("pulse/pulseaudio.h"));
-const Channel = @import("main.zig").Channel;
-const ChannelId = @import("main.zig").ChannelId;
-const ConnectOptions = @import("main.zig").ConnectOptions;
-const DeviceChangeFn = @import("main.zig").DeviceChangeFn;
-const Device = @import("main.zig").Device;
-const DevicesInfo = @import("main.zig").DevicesInfo;
-const Format = @import("main.zig").Format;
-const Player = @import("main.zig").Player;
-const min_sample_rate = @import("main.zig").min_sample_rate;
-const max_sample_rate = @import("main.zig").max_sample_rate;
-
+const main = @import("main.zig");
+const util = @import("util.zig");
 const is_little = @import("builtin").cpu.arch.endian() == .Little;
 
 const PulseAudio = @This();
 
 allocator: std.mem.Allocator,
-devices_info: DevicesInfo,
+devices_info: util.DevicesInfo,
 app_name: [:0]const u8,
-deviceChangeFn: ?DeviceChangeFn,
-userdata: ?*anyopaque,
 main_loop: *c.pa_threaded_mainloop,
 ctx: *c.pa_context,
 ctx_state: c.pa_context_state_t,
 default_sink: ?[:0]const u8,
 default_source: ?[:0]const u8,
+device_watcher: ?DeviceWatcher,
 
-pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAudio {
+const DeviceWatcher = struct {
+    deviceChangeFn: main.DeviceChangeFn,
+    userdata: ?*anyopaque,
+};
+
+pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !*PulseAudio {
     const main_loop = c.pa_threaded_mainloop_new() orelse
         return error.OutOfMemory;
     errdefer c.pa_threaded_mainloop_free(main_loop);
@@ -40,15 +35,17 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAud
     errdefer allocator.destroy(self);
     self.* = PulseAudio{
         .allocator = allocator,
-        .devices_info = DevicesInfo.init(),
+        .devices_info = util.DevicesInfo.init(),
         .app_name = options.app_name,
-        .deviceChangeFn = options.deviceChangeFn,
-        .userdata = options.userdata,
         .main_loop = main_loop,
         .ctx = ctx,
         .ctx_state = c.PA_CONTEXT_UNCONNECTED,
         .default_sink = null,
         .default_source = null,
+        .device_watcher = if (options.deviceChangeFn) |dcf| .{
+            .deviceChangeFn = dcf,
+            .userdata = options.userdata,
+        } else null,
     };
 
     if (c.pa_context_connect(ctx, null, 0, null) != 0)
@@ -102,7 +99,7 @@ pub fn connect(allocator: std.mem.Allocator, options: ConnectOptions) !*PulseAud
 
 fn subscribeOp(_: ?*c.pa_context, _: c.pa_subscription_event_type_t, _: u32, userdata: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*PulseAudio, @alignCast(@alignOf(*PulseAudio), userdata.?));
-    self.deviceChangeFn.?(self.userdata);
+    self.device_watcher.?.deviceChangeFn(self.device_watcher.?.userdata);
 }
 
 fn contextStateOp(ctx: ?*c.pa_context, userdata: ?*anyopaque) callconv(.C) void {
@@ -189,21 +186,21 @@ fn sourceInfoOp(_: ?*c.pa_context, info: [*c]const c.pa_source_info, eol: c_int,
     self.deviceInfoOp(info, .capture) catch return;
 }
 
-fn deviceInfoOp(self: *PulseAudio, info: anytype, aim: Device.Aim) !void {
+fn deviceInfoOp(self: *PulseAudio, info: anytype, aim: main.Device.Aim) !void {
     var id = try self.allocator.dupeZ(u8, std.mem.span(info.*.name));
     errdefer self.allocator.free(id);
     var name = try self.allocator.dupeZ(u8, std.mem.span(info.*.description));
     errdefer self.allocator.free(name);
 
-    if (info.*.sample_spec.rate < min_sample_rate or
-        info.*.sample_spec.rate > max_sample_rate)
+    if (info.*.sample_spec.rate < main.min_sample_rate or
+        info.*.sample_spec.rate > main.max_sample_rate)
         return;
 
-    var device = Device{
+    var device = main.Device{
         .aim = aim,
         .channels = blk: {
             // TODO: check channels count
-            var channels = try self.allocator.alloc(Channel, info.*.channel_map.channels);
+            var channels = try self.allocator.alloc(main.Channel, info.*.channel_map.channels);
             for (channels) |*ch, i|
                 ch.*.id = fromPAChannelPos(info.*.channel_map.map[i]);
             break :blk channels;
@@ -218,6 +215,14 @@ fn deviceInfoOp(self: *PulseAudio, info: anytype, aim: Device.Aim) !void {
     };
 
     try self.devices_info.list.append(self.allocator, device);
+}
+
+pub fn devices(self: PulseAudio) []const main.Device {
+    return self.devices_info.list.items;
+}
+
+pub fn defaultDevice(self: PulseAudio, aim: main.Device.Aim) ?main.Device {
+    return self.devices_info.default(aim);
 }
 
 const StreamStatus = enum(u8) {
@@ -235,7 +240,7 @@ pub const PlayerData = struct {
     volume: f32,
 };
 
-pub fn openPlayer(self: *PulseAudio, player: *Player, device: Device) !void {
+pub fn openPlayer(self: *PulseAudio, player: *main.Player, device: main.Device) !void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
@@ -314,7 +319,7 @@ fn playbackStreamStateOp(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(
     }
 }
 
-pub fn playerDeinit(self: *Player) void {
+pub fn playerDeinit(self: *main.Player) void {
     var bd = &self.backend_data.PulseAudio;
 
     c.pa_threaded_mainloop_lock(bd.main_loop);
@@ -328,7 +333,7 @@ pub fn playerDeinit(self: *Player) void {
     c.pa_stream_unref(bd.stream);
 }
 
-pub fn playerStart(self: *Player) !void {
+pub fn playerStart(self: *main.Player) !void {
     var bd = &self.backend_data.PulseAudio;
 
     c.pa_threaded_mainloop_lock(bd.main_loop);
@@ -342,7 +347,7 @@ pub fn playerStart(self: *Player) !void {
 }
 
 fn playbackStreamWriteOp(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
-    var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
+    var self = @ptrCast(*main.Player, @alignCast(@alignOf(*main.Player), userdata.?));
     var bd = &self.backend_data.PulseAudio;
 
     var frames_left = nbytes;
@@ -376,7 +381,7 @@ fn playbackStreamWriteOp(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque)
     }
 }
 
-pub fn playerPlay(self: *Player) !void {
+pub fn playerPlay(self: *main.Player) !void {
     var bd = &self.backend_data.PulseAudio;
 
     c.pa_threaded_mainloop_lock(bd.main_loop);
@@ -389,7 +394,7 @@ pub fn playerPlay(self: *Player) !void {
     }
 }
 
-pub fn playerPause(self: *Player) !void {
+pub fn playerPause(self: *main.Player) !void {
     var bd = &self.backend_data.PulseAudio;
 
     c.pa_threaded_mainloop_lock(bd.main_loop);
@@ -402,7 +407,7 @@ pub fn playerPause(self: *Player) !void {
     }
 }
 
-pub fn playerPaused(self: *Player) bool {
+pub fn playerPaused(self: *main.Player) bool {
     var bd = &self.backend_data.PulseAudio;
 
     c.pa_threaded_mainloop_lock(bd.main_loop);
@@ -411,7 +416,7 @@ pub fn playerPaused(self: *Player) bool {
     return c.pa_stream_is_corked(bd.stream) > 0;
 }
 
-pub fn playerSetVolume(self: *Player, volume: f32) !void {
+pub fn playerSetVolume(self: *main.Player, volume: f32) !void {
     var bd = &self.backend_data.PulseAudio;
 
     c.pa_threaded_mainloop_lock(bd.main_loop);
@@ -444,7 +449,7 @@ fn successOp(_: ?*c.pa_context, success: c_int, userdata: ?*anyopaque) callconv(
     }
 }
 
-pub fn playerVolume(self: *Player) !f32 {
+pub fn playerVolume(self: *main.Player) !f32 {
     var bd = &self.backend_data.PulseAudio;
 
     c.pa_threaded_mainloop_lock(bd.main_loop);
@@ -474,7 +479,7 @@ fn sinkInputInfoOp(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol:
     bd.volume = @intToFloat(f32, info.*.volume.values[0]) / @intToFloat(f32, c.PA_VOLUME_NORM);
 }
 
-pub fn deviceDeinit(self: Device, allocator: std.mem.Allocator) void {
+pub fn deviceDeinit(self: main.Device, allocator: std.mem.Allocator) void {
     allocator.free(self.id);
     allocator.free(self.name);
     allocator.free(self.channels);
@@ -495,13 +500,13 @@ fn performOperation(main_loop: *c.pa_threaded_mainloop, op: ?*c.pa_operation) vo
     }
 }
 
-pub const available_formats = &[_]Format{
+pub const available_formats = &[_]main.Format{
     .u8,  .i16,
-    .i24, .i24_3b,
+    .i24, .i24_4b,
     .i32, .f32,
 };
 
-pub fn fromPAChannelPos(pos: c.pa_channel_position_t) ChannelId {
+pub fn fromPAChannelPos(pos: c.pa_channel_position_t) main.ChannelId {
     return switch (pos) {
         c.PA_CHANNEL_POSITION_MONO => .front_center,
         c.PA_CHANNEL_POSITION_FRONT_LEFT => .front_left, // PA_CHANNEL_POSITION_LEFT
@@ -529,12 +534,12 @@ pub fn fromPAChannelPos(pos: c.pa_channel_position_t) ChannelId {
     };
 }
 
-pub fn toPAFormat(format: Format) !c.pa_sample_format_t {
+pub fn toPAFormat(format: main.Format) !c.pa_sample_format_t {
     return switch (format) {
         .u8 => c.PA_SAMPLE_U8,
         .i16 => if (is_little) c.PA_SAMPLE_S16LE else c.PA_SAMPLE_S16BE,
         .i24 => if (is_little) c.PA_SAMPLE_S24LE else c.PA_SAMPLE_S24LE,
-        .i24_3b => if (is_little) c.PA_SAMPLE_S24_32LE else c.PA_SAMPLE_S24_32BE,
+        .i24_4b => if (is_little) c.PA_SAMPLE_S24_32LE else c.PA_SAMPLE_S24_32BE,
         .i32 => if (is_little) c.PA_SAMPLE_S32LE else c.PA_SAMPLE_S32BE,
         .f32 => if (is_little) c.PA_SAMPLE_FLOAT32LE else c.PA_SAMPLE_FLOAT32BE,
 
@@ -542,7 +547,7 @@ pub fn toPAFormat(format: Format) !c.pa_sample_format_t {
     };
 }
 
-pub fn toPAChannelMap(channels: []const Channel) !c.pa_channel_map {
+pub fn toPAChannelMap(channels: []const main.Channel) !c.pa_channel_map {
     var channel_map: c.pa_channel_map = undefined;
     channel_map.channels = @intCast(u5, channels.len);
     for (channels) |ch, i|
@@ -550,7 +555,7 @@ pub fn toPAChannelMap(channels: []const Channel) !c.pa_channel_map {
     return channel_map;
 }
 
-fn toPAChannelPos(channel_id: ChannelId) !c.pa_channel_position_t {
+fn toPAChannelPos(channel_id: main.ChannelId) !c.pa_channel_position_t {
     return switch (channel_id) {
         .front_left => c.PA_CHANNEL_POSITION_FRONT_LEFT,
         .front_right => c.PA_CHANNEL_POSITION_FRONT_RIGHT,
