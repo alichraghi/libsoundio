@@ -21,7 +21,7 @@ const DeviceWatcher = struct {
     notify_pipe_fd: [2]std.os.fd_t,
 };
 
-pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !*Alsa {
+pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !main.BackendData {
     _ = c.snd_lib_error_set_handler(@ptrCast(c.snd_lib_error_handler_t, &util.doNothing));
 
     var self = try allocator.create(Alsa);
@@ -90,7 +90,8 @@ pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !*Als
             break :blk null;
         },
     };
-    return self;
+
+    return .{ .Alsa = self };
 }
 
 pub fn disconnect(self: *Alsa) void {
@@ -106,11 +107,13 @@ pub fn disconnect(self: *Alsa) void {
         std.os.close(dw.notify_fd);
     }
 
-    self.devices_info.deinit(self.allocator);
+    for (self.devices_info.list.items) |d|
+        freeDevice(self.allocator, d);
+    self.devices_info.list.deinit(self.allocator);
     self.allocator.destroy(self);
 }
 
-fn deviceEventsLoop(self: Alsa) void {
+fn deviceEventsLoop(self: *Alsa) void {
     var dw = &self.device_watcher.?;
     var last_crash: ?i64 = null;
     var buf: [2048]u8 = undefined;
@@ -172,6 +175,8 @@ fn deviceEventsLoop(self: Alsa) void {
 }
 
 pub fn refresh(self: *Alsa) !void {
+    for (self.devices_info.list.items) |d|
+        freeDevice(self.allocator, d);
     self.devices_info.clear(self.allocator);
 
     var pcm_info: ?*c.snd_pcm_info_t = null;
@@ -329,21 +334,7 @@ pub fn defaultDevice(self: Alsa, aim: main.Device.Aim) ?main.Device {
     return self.devices_info.default(aim);
 }
 
-pub const PlayerData = struct {
-    allocator: std.mem.Allocator,
-    thread: std.Thread,
-    mutex: std.Thread.Mutex,
-    aborted: std.atomic.Atomic(bool),
-    sample_buffer: []u8,
-    pcm: *c.snd_pcm_t,
-    mixer: *c.snd_mixer_t,
-    selem: *c.snd_mixer_selem_id_t,
-    mixer_elm: *c.snd_mixer_elem_t,
-    period_size: c_ulong,
-    vol_range: util.Range(c_long),
-};
-
-pub fn openPlayer(self: Alsa, player: *main.Player, device: main.Device) !void {
+pub fn createPlayer(self: Alsa, player: *main.Player, device: main.Device) !void {
     const format = toPCM_FORMAT(player.format) catch unreachable;
     var pcm: ?*c.snd_pcm_t = null;
     var mixer: ?*c.snd_mixer_t = null;
@@ -422,7 +413,7 @@ pub fn openPlayer(self: Alsa, player: *main.Player, device: main.Device) !void {
             return error.OpeningDevice;
     }
 
-    player.backend_data = .{
+    player.data = .{
         .Alsa = .{
             .allocator = self.allocator,
             .mutex = .{},
@@ -442,122 +433,122 @@ pub fn openPlayer(self: Alsa, player: *main.Player, device: main.Device) !void {
     };
 }
 
-pub fn playerDeinit(self: *main.Player) void {
-    var bd = &self.backend_data.Alsa;
+pub const Player = struct {
+    allocator: std.mem.Allocator,
+    thread: std.Thread,
+    mutex: std.Thread.Mutex,
+    aborted: std.atomic.Atomic(bool),
+    sample_buffer: []u8,
+    pcm: *c.snd_pcm_t,
+    mixer: *c.snd_mixer_t,
+    selem: *c.snd_mixer_selem_id_t,
+    mixer_elm: *c.snd_mixer_elem_t,
+    period_size: c_ulong,
+    vol_range: util.Range(c_long),
 
-    bd.aborted.store(true, .Unordered);
-    bd.thread.join();
+    pub fn deinit(self: *Player) void {
+        self.aborted.store(true, .Unordered);
+        self.thread.join();
 
-    _ = c.snd_mixer_close(bd.mixer);
-    c.snd_mixer_selem_id_free(bd.selem);
-    _ = c.snd_pcm_close(bd.pcm);
-    _ = c.snd_pcm_hw_free(bd.pcm);
+        _ = c.snd_mixer_close(self.mixer);
+        c.snd_mixer_selem_id_free(self.selem);
+        _ = c.snd_pcm_close(self.pcm);
+        _ = c.snd_pcm_hw_free(self.pcm);
 
-    bd.allocator.free(bd.sample_buffer);
-}
-
-pub fn playerStart(self: *main.Player) !void {
-    var bd = &self.backend_data.Alsa;
-
-    bd.thread = std.Thread.spawn(.{}, playerLoop, .{self}) catch |err| switch (err) {
-        error.ThreadQuotaExceeded,
-        error.SystemResources,
-        error.LockedMemoryLimitExceeded,
-        => return error.SystemResources,
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Unexpected => unreachable,
-    };
-}
-
-fn playerLoop(self: *main.Player) void {
-    var bd = &self.backend_data.Alsa;
-
-    for (self.device.channels) |*ch, i| {
-        ch.*.ptr = bd.sample_buffer.ptr + i * self.bytesPerSample();
+        self.allocator.free(self.sample_buffer);
     }
 
-    while (!bd.aborted.load(.Unordered)) {
-        var frames_left = bd.period_size;
-        while (frames_left > 0) {
-            self.writeFn(self, frames_left);
-            const n = c.snd_pcm_writei(bd.pcm, bd.sample_buffer.ptr, frames_left);
-            if (n < 0) {
-                if (c.snd_pcm_recover(bd.pcm, @intCast(c_int, n), 1) < 0) {
-                    if (std.debug.runtime_safety) unreachable;
+    pub fn start(self: *Player) !void {
+        self.thread = std.Thread.spawn(.{}, writeLoop, .{self}) catch |err| switch (err) {
+            error.ThreadQuotaExceeded,
+            error.SystemResources,
+            error.LockedMemoryLimitExceeded,
+            => return error.SystemResources,
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Unexpected => unreachable,
+        };
+    }
+
+    fn writeLoop(self: *const Player) void {
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const main.Player.BackendData(), self));
+
+        for (parent.device.channels) |*ch, i| {
+            ch.*.ptr = self.sample_buffer.ptr + i * parent.bytesPerSample();
+        }
+
+        while (!self.aborted.load(.Unordered)) {
+            var frames_left = self.period_size;
+            while (frames_left > 0) {
+                parent.writeFn(parent, frames_left);
+                const n = c.snd_pcm_writei(self.pcm, self.sample_buffer.ptr, frames_left);
+                if (n < 0) {
+                    if (c.snd_pcm_recover(self.pcm, @intCast(c_int, n), 1) < 0) {
+                        if (std.debug.runtime_safety) unreachable;
+                        return;
+                    }
                     return;
                 }
-                return;
+                frames_left -= @intCast(c_uint, n);
             }
-            frames_left -= @intCast(c_uint, n);
-        }
-    }
-}
-
-pub fn playerPlay(self: *main.Player) !void {
-    const bd = &self.backend_data.Alsa;
-
-    if (c.snd_pcm_state(bd.pcm) == c.SND_PCM_STATE_PAUSED) {
-        if (c.snd_pcm_pause(bd.pcm, 0) < 0)
-            return error.CannotPlay;
-    }
-}
-
-pub fn playerPause(self: *main.Player) !void {
-    const bd = &self.backend_data.Alsa;
-
-    if (c.snd_pcm_state(bd.pcm) != c.SND_PCM_STATE_PAUSED) {
-        if (c.snd_pcm_pause(bd.pcm, 1) < 0)
-            return error.CannotPause;
-    }
-}
-
-pub fn playerPaused(self: *main.Player) bool {
-    const bd = &self.backend_data.Alsa;
-
-    return c.snd_pcm_state(bd.pcm) == c.SND_PCM_STATE_PAUSED;
-}
-
-pub fn playerSetVolume(self: *main.Player, volume: f32) !void {
-    var bd = &self.backend_data.Alsa;
-
-    bd.mutex.lock();
-    defer bd.mutex.unlock();
-
-    const dist = @intToFloat(f32, bd.vol_range.max - bd.vol_range.min);
-    if (c.snd_mixer_selem_set_playback_volume_all(
-        bd.mixer_elm,
-        @floatToInt(c_long, dist * volume) + bd.vol_range.min,
-    ) < 0)
-        return error.CannotSetVolume;
-}
-
-pub fn playerVolume(self: *main.Player) !f32 {
-    var bd = &self.backend_data.Alsa;
-
-    bd.mutex.lock();
-    defer bd.mutex.unlock();
-
-    var volume: c_long = 0;
-    var channel: c_int = 0;
-
-    while (channel < c.SND_MIXER_SCHN_LAST) : (channel += 1) {
-        if (c.snd_mixer_selem_has_playback_channel(bd.mixer_elm, channel) == 1) {
-            if (c.snd_mixer_selem_get_playback_volume(bd.mixer_elm, channel, &volume) == 0)
-                break;
         }
     }
 
-    if (channel == c.SND_MIXER_SCHN_LAST)
-        return error.CannotGetVolume;
+    pub fn play(self: Player) !void {
+        if (c.snd_pcm_state(self.pcm) == c.SND_PCM_STATE_PAUSED) {
+            if (c.snd_pcm_pause(self.pcm, 0) < 0)
+                return error.CannotPlay;
+        }
+    }
 
-    return @intToFloat(f32, volume) / @intToFloat(f32, bd.vol_range.max - bd.vol_range.min);
-}
+    pub fn pause(self: Player) !void {
+        if (c.snd_pcm_state(self.pcm) != c.SND_PCM_STATE_PAUSED) {
+            if (c.snd_pcm_pause(self.pcm, 1) < 0)
+                return error.CannotPause;
+        }
+    }
 
-pub fn deviceDeinit(self: main.Device, allocator: std.mem.Allocator) void {
-    allocator.free(self.id);
-    allocator.free(self.name);
-    allocator.free(self.formats);
-    allocator.free(self.channels);
+    pub fn paused(self: Player) bool {
+        return c.snd_pcm_state(self.pcm) == c.SND_PCM_STATE_PAUSED;
+    }
+
+    pub fn setVolume(self: *Player, vol: f32) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const dist = @intToFloat(f32, self.vol_range.max - self.vol_range.min);
+        if (c.snd_mixer_selem_set_playback_volume_all(
+            self.mixer_elm,
+            @floatToInt(c_long, dist * vol) + self.vol_range.min,
+        ) < 0)
+            return error.CannotSetVolume;
+    }
+
+    pub fn volume(self: *Player) !f32 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var vol: c_long = 0;
+        var channel: c_int = 0;
+
+        while (channel < c.SND_MIXER_SCHN_LAST) : (channel += 1) {
+            if (c.snd_mixer_selem_has_playback_channel(self.mixer_elm, channel) == 1) {
+                if (c.snd_mixer_selem_get_playback_volume(self.mixer_elm, channel, &vol) == 0)
+                    break;
+            }
+        }
+
+        if (channel == c.SND_MIXER_SCHN_LAST)
+            return error.CannotGetVolume;
+
+        return @intToFloat(f32, vol) / @intToFloat(f32, self.vol_range.max - self.vol_range.min);
+    }
+};
+
+fn freeDevice(allocator: std.mem.Allocator, device: main.Device) void {
+    allocator.free(device.id);
+    allocator.free(device.name);
+    allocator.free(device.formats);
+    allocator.free(device.channels);
 }
 
 pub fn aimToStream(aim: main.Device.Aim) c_uint {

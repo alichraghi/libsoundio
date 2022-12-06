@@ -21,7 +21,7 @@ const DeviceWatcher = struct {
     userdata: ?*anyopaque,
 };
 
-pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !*PulseAudio {
+pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !main.BackendData {
     const main_loop = c.pa_threaded_mainloop_new() orelse
         return error.OutOfMemory;
     errdefer c.pa_threaded_mainloop_free(main_loop);
@@ -94,7 +94,7 @@ pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !*Pul
         c.pa_operation_unref(subscribe_op);
     }
 
-    return self;
+    return .{ .PulseAudio = self };
 }
 
 fn subscribeOp(_: ?*c.pa_context, _: c.pa_subscription_event_type_t, _: u32, userdata: ?*anyopaque) callconv(.C) void {
@@ -116,7 +116,9 @@ pub fn disconnect(self: *PulseAudio) void {
     c.pa_context_unref(self.ctx);
     c.pa_threaded_mainloop_stop(self.main_loop);
     c.pa_threaded_mainloop_free(self.main_loop);
-    self.devices_info.deinit(self.allocator);
+    for (self.devices_info.list.items) |d|
+        freeDevice(self.allocator, d);
+    self.devices_info.list.deinit(self.allocator);
     self.allocator.destroy(self);
 }
 
@@ -124,6 +126,8 @@ pub fn refresh(self: *PulseAudio) !void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
+    for (self.devices_info.list.items) |d|
+        freeDevice(self.allocator, d);
     self.devices_info.clear(self.allocator);
 
     const list_sink_op = c.pa_context_get_sink_info_list(self.ctx, sinkInfoOp, self);
@@ -231,16 +235,7 @@ const StreamStatus = enum(u8) {
     failure,
 };
 
-pub const PlayerData = struct {
-    main_loop: *c.pa_threaded_mainloop,
-    ctx: *c.pa_context,
-    stream: *c.pa_stream,
-    status: std.atomic.Atomic(StreamStatus),
-    write_ptr: [*]u8,
-    volume: f32,
-};
-
-pub fn openPlayer(self: *PulseAudio, player: *main.Player, device: main.Device) !void {
+pub fn createPlayer(self: *PulseAudio, player: *main.Player, device: main.Device) !void {
     c.pa_threaded_mainloop_lock(self.main_loop);
     defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
@@ -257,19 +252,19 @@ pub fn openPlayer(self: *PulseAudio, player: *main.Player, device: main.Device) 
         return error.OutOfMemory;
     errdefer c.pa_stream_unref(stream);
 
-    player.backend_data = .{
+    player.data = .{
         .PulseAudio = .{
             .main_loop = self.main_loop,
             .ctx = self.ctx,
             .stream = stream.?,
             .status = std.atomic.Atomic(StreamStatus).init(.unknown),
             .write_ptr = undefined,
-            .volume = 1.0,
+            ._volume = 1.0,
         },
     };
-    var bd = &player.backend_data.PulseAudio;
+    var bd = &player.data.PulseAudio;
 
-    c.pa_stream_set_state_callback(bd.stream, playbackStreamStateOp, bd);
+    c.pa_stream_set_state_callback(bd.stream, streamStateOp, bd);
 
     const buf_attr = c.pa_buffer_attr{
         .maxlength = std.math.maxInt(u32),
@@ -292,15 +287,15 @@ pub fn openPlayer(self: *PulseAudio, player: *main.Player, device: main.Device) 
 
     while (true) {
         switch (bd.status.load(.Unordered)) {
-            .unknown => c.pa_threaded_mainloop_wait(self.main_loop),
+            .unknown => c.pa_threaded_mainloop_wait(bd.main_loop),
             .ready => break,
             .failure => return error.OpeningDevice,
         }
     }
 }
 
-fn playbackStreamStateOp(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
-    var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
+fn streamStateOp(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
+    var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
 
     switch (c.pa_stream_get_state(stream)) {
         c.PA_STREAM_UNCONNECTED,
@@ -308,181 +303,177 @@ fn playbackStreamStateOp(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(
         c.PA_STREAM_TERMINATED,
         => {},
         c.PA_STREAM_READY => {
-            bd.status.store(.ready, .Unordered);
-            c.pa_threaded_mainloop_signal(bd.main_loop, 0);
+            self.status.store(.ready, .Unordered);
+            c.pa_threaded_mainloop_signal(self.main_loop, 0);
         },
         c.PA_STREAM_FAILED => {
-            bd.status.store(.failure, .Unordered);
-            c.pa_threaded_mainloop_signal(bd.main_loop, 0);
+            self.status.store(.failure, .Unordered);
+            c.pa_threaded_mainloop_signal(self.main_loop, 0);
         },
         else => unreachable,
     }
 }
 
-pub fn playerDeinit(self: *main.Player) void {
-    var bd = &self.backend_data.PulseAudio;
+pub const Player = struct {
+    main_loop: *c.pa_threaded_mainloop,
+    ctx: *c.pa_context,
+    stream: *c.pa_stream,
+    status: std.atomic.Atomic(StreamStatus),
+    write_ptr: [*]u8,
+    _volume: f32,
 
-    c.pa_threaded_mainloop_lock(bd.main_loop);
-    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
+    pub fn deinit(self: *Player) void {
+        c.pa_threaded_mainloop_lock(self.main_loop);
+        defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
-    c.pa_stream_set_write_callback(bd.stream, null, null);
-    c.pa_stream_set_state_callback(bd.stream, null, null);
-    c.pa_stream_set_underflow_callback(bd.stream, null, null);
-    c.pa_stream_set_overflow_callback(bd.stream, null, null);
-    _ = c.pa_stream_disconnect(bd.stream);
-    c.pa_stream_unref(bd.stream);
-}
-
-pub fn playerStart(self: *main.Player) !void {
-    var bd = &self.backend_data.PulseAudio;
-
-    c.pa_threaded_mainloop_lock(bd.main_loop);
-    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
-
-    const op = c.pa_stream_cork(bd.stream, 0, null, null) orelse
-        return error.CannotPlay;
-    c.pa_operation_unref(op);
-
-    c.pa_stream_set_write_callback(bd.stream, playbackStreamWriteOp, self);
-}
-
-fn playbackStreamWriteOp(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
-    var self = @ptrCast(*main.Player, @alignCast(@alignOf(*main.Player), userdata.?));
-    var bd = &self.backend_data.PulseAudio;
-
-    var frames_left = nbytes;
-    while (frames_left > 0) {
-        var chunk_size = frames_left;
-        if (c.pa_stream_begin_write(
-            bd.stream,
-            @ptrCast(
-                [*c]?*anyopaque,
-                @alignCast(@alignOf([*c]?*anyopaque), &bd.write_ptr),
-            ),
-            &chunk_size,
-        ) != 0) {
-            if (std.debug.runtime_safety) unreachable;
-            return;
-        }
-
-        for (self.device.channels) |*ch, i| {
-            ch.*.ptr = bd.write_ptr + self.bytesPerSample() * i;
-        }
-
-        const frames = chunk_size / self.bytesPerFrame();
-        self.writeFn(self, frames);
-
-        if (c.pa_stream_write(bd.stream, bd.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0) {
-            if (std.debug.runtime_safety) unreachable;
-            return;
-        }
-
-        frames_left -= chunk_size;
+        c.pa_stream_set_write_callback(self.stream, null, null);
+        c.pa_stream_set_state_callback(self.stream, null, null);
+        c.pa_stream_set_underflow_callback(self.stream, null, null);
+        c.pa_stream_set_overflow_callback(self.stream, null, null);
+        _ = c.pa_stream_disconnect(self.stream);
+        c.pa_stream_unref(self.stream);
     }
-}
 
-pub fn playerPlay(self: *main.Player) !void {
-    var bd = &self.backend_data.PulseAudio;
+    pub fn start(self: *Player) !void {
+        c.pa_threaded_mainloop_lock(self.main_loop);
+        defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
-    c.pa_threaded_mainloop_lock(bd.main_loop);
-    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
-
-    if (c.pa_stream_is_corked(bd.stream) > 0) {
-        const op = c.pa_stream_cork(bd.stream, 0, null, null) orelse
+        const op = c.pa_stream_cork(self.stream, 0, null, null) orelse
             return error.CannotPlay;
         c.pa_operation_unref(op);
-    }
-}
 
-pub fn playerPause(self: *main.Player) !void {
-    var bd = &self.backend_data.PulseAudio;
-
-    c.pa_threaded_mainloop_lock(bd.main_loop);
-    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
-
-    if (c.pa_stream_is_corked(bd.stream) == 0) {
-        const op = c.pa_stream_cork(bd.stream, 1, null, null) orelse
-            return error.CannotPause;
-        c.pa_operation_unref(op);
-    }
-}
-
-pub fn playerPaused(self: *main.Player) bool {
-    var bd = &self.backend_data.PulseAudio;
-
-    c.pa_threaded_mainloop_lock(bd.main_loop);
-    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
-
-    return c.pa_stream_is_corked(bd.stream) > 0;
-}
-
-pub fn playerSetVolume(self: *main.Player, volume: f32) !void {
-    var bd = &self.backend_data.PulseAudio;
-
-    c.pa_threaded_mainloop_lock(bd.main_loop);
-    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
-
-    var v: c.pa_cvolume = undefined;
-    _ = c.pa_cvolume_init(&v);
-    v.channels = @intCast(u5, self.device.channels.len);
-    for (self.device.channels) |_, i| {
-        _ = c.pa_cvolume_set(&v, @intCast(c_uint, i), c.pa_sw_volume_from_linear(volume));
+        c.pa_stream_set_write_callback(self.stream, playbackStreamWriteOp, self);
     }
 
-    performOperation(
-        bd.main_loop,
-        c.pa_context_set_sink_input_volume(
-            bd.ctx,
-            c.pa_stream_get_index(bd.stream),
-            &v,
-            successOp,
-            bd,
-        ),
-    );
-}
+    fn playbackStreamWriteOp(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
+        var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const main.Player.BackendData(), self));
+        var frames_left = nbytes;
+        while (frames_left > 0) {
+            var chunk_size = frames_left;
+            if (c.pa_stream_begin_write(
+                self.stream,
+                @ptrCast(
+                    [*c]?*anyopaque,
+                    @alignCast(@alignOf([*c]?*anyopaque), &self.write_ptr),
+                ),
+                &chunk_size,
+            ) != 0) {
+                if (std.debug.runtime_safety) unreachable;
+                return;
+            }
 
-fn successOp(_: ?*c.pa_context, success: c_int, userdata: ?*anyopaque) callconv(.C) void {
-    var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
+            for (parent.device.channels) |*ch, i| {
+                ch.*.ptr = self.write_ptr + parent.format.bytesPerSample() * i;
+            }
 
-    if (success == 1) {
-        c.pa_threaded_mainloop_signal(bd.main_loop, 0);
-    }
-}
+            const frames = chunk_size / parent.format.bytesPerFrame(@intCast(u5, parent.device.channels.len));
+            parent.writeFn(parent, frames);
 
-pub fn playerVolume(self: *main.Player) !f32 {
-    var bd = &self.backend_data.PulseAudio;
+            if (c.pa_stream_write(self.stream, self.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0) {
+                if (std.debug.runtime_safety) unreachable;
+                return;
+            }
 
-    c.pa_threaded_mainloop_lock(bd.main_loop);
-    defer c.pa_threaded_mainloop_unlock(bd.main_loop);
-
-    performOperation(
-        bd.main_loop,
-        c.pa_context_get_sink_input_info(
-            bd.ctx,
-            c.pa_stream_get_index(bd.stream),
-            sinkInputInfoOp,
-            bd,
-        ),
-    );
-
-    return bd.volume;
-}
-
-fn sinkInputInfoOp(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
-    var bd = @ptrCast(*PlayerData, @alignCast(@alignOf(*PlayerData), userdata.?));
-
-    if (eol != 0) {
-        c.pa_threaded_mainloop_signal(bd.main_loop, 0);
-        return;
+            frames_left -= chunk_size;
+        }
     }
 
-    bd.volume = @intToFloat(f32, info.*.volume.values[0]) / @intToFloat(f32, c.PA_VOLUME_NORM);
-}
+    pub fn play(self: *Player) !void {
+        c.pa_threaded_mainloop_lock(self.main_loop);
+        defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
-pub fn deviceDeinit(self: main.Device, allocator: std.mem.Allocator) void {
-    allocator.free(self.id);
-    allocator.free(self.name);
-    allocator.free(self.channels);
+        if (c.pa_stream_is_corked(self.stream) > 0) {
+            const op = c.pa_stream_cork(self.stream, 0, null, null) orelse
+                return error.CannotPlay;
+            c.pa_operation_unref(op);
+        }
+    }
+
+    pub fn pause(self: *Player) !void {
+        c.pa_threaded_mainloop_lock(self.main_loop);
+        defer c.pa_threaded_mainloop_unlock(self.main_loop);
+
+        if (c.pa_stream_is_corked(self.stream) == 0) {
+            const op = c.pa_stream_cork(self.stream, 1, null, null) orelse
+                return error.CannotPause;
+            c.pa_operation_unref(op);
+        }
+    }
+
+    pub fn paused(self: *Player) bool {
+        c.pa_threaded_mainloop_lock(self.main_loop);
+        defer c.pa_threaded_mainloop_unlock(self.main_loop);
+
+        return c.pa_stream_is_corked(self.stream) > 0;
+    }
+
+    pub fn setVolume(self: *Player, vol: f32) !void {
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const main.Player.BackendData(), self));
+
+        c.pa_threaded_mainloop_lock(self.main_loop);
+        defer c.pa_threaded_mainloop_unlock(self.main_loop);
+
+        var v: c.pa_cvolume = undefined;
+        _ = c.pa_cvolume_init(&v);
+        v.channels = @intCast(u5, parent.device.channels.len);
+        for (parent.device.channels) |_, i| {
+            _ = c.pa_cvolume_set(&v, @intCast(c_uint, i), c.pa_sw_volume_from_linear(vol));
+        }
+
+        performOperation(
+            self.main_loop,
+            c.pa_context_set_sink_input_volume(
+                self.ctx,
+                c.pa_stream_get_index(self.stream),
+                &v,
+                successOp,
+                self,
+            ),
+        );
+    }
+
+    fn successOp(_: ?*c.pa_context, success: c_int, userdata: ?*anyopaque) callconv(.C) void {
+        var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
+
+        if (success == 1) {
+            c.pa_threaded_mainloop_signal(self.main_loop, 0);
+        }
+    }
+
+    pub fn volume(self: *Player) !f32 {
+        c.pa_threaded_mainloop_lock(self.main_loop);
+        defer c.pa_threaded_mainloop_unlock(self.main_loop);
+
+        performOperation(
+            self.main_loop,
+            c.pa_context_get_sink_input_info(
+                self.ctx,
+                c.pa_stream_get_index(self.stream),
+                sinkInputInfoOp,
+                self,
+            ),
+        );
+
+        return self._volume;
+    }
+
+    fn sinkInputInfoOp(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
+        var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
+
+        if (eol != 0) {
+            c.pa_threaded_mainloop_signal(self.main_loop, 0);
+            return;
+        }
+
+        self.volume = @intToFloat(f32, info.*.volume.values[0]) / @intToFloat(f32, c.PA_VOLUME_NORM);
+    }
+};
+
+fn freeDevice(allocator: std.mem.Allocator, device: main.Device) void {
+    allocator.free(device.id);
+    allocator.free(device.name);
+    allocator.free(device.channels);
 }
 
 fn performOperation(main_loop: *c.pa_threaded_mainloop, op: ?*c.pa_operation) void {

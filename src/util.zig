@@ -15,17 +15,9 @@ pub const DevicesInfo = struct {
         };
     }
 
-    pub fn deinit(self: *DevicesInfo, allocator: std.mem.Allocator) void {
-        for (self.list.items) |device|
-            device.deinit(allocator);
-        self.list.deinit(allocator);
-    }
-
     pub fn clear(self: *DevicesInfo, allocator: std.mem.Allocator) void {
         self.default_output = null;
         self.default_input = null;
-        for (self.list.items) |device|
-            device.deinit(allocator);
         self.list.clearAndFree(allocator);
     }
 

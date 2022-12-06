@@ -31,7 +31,7 @@ const dummy_capture = main.Device{
 allocator: std.mem.Allocator,
 devices_info: util.DevicesInfo,
 
-pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !*Dummy {
+pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !main.BackendData {
     _ = options;
 
     var self = try allocator.create(Dummy);
@@ -54,11 +54,13 @@ pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !*Dum
     self.devices_info.setDefault(.playback, 0);
     self.devices_info.setDefault(.capture, 1);
 
-    return self;
+    return .{ .Dummy = self };
 }
 
 pub fn disconnect(self: *Dummy) void {
-    self.devices_info.deinit(self.allocator);
+    for (self.devices_info.list.items) |d|
+        freeDevice(self.allocator, d);
+    self.devices_info.list.deinit(self.allocator);
     self.allocator.destroy(self);
 }
 
@@ -74,103 +76,94 @@ pub fn defaultDevice(self: Dummy, aim: main.Device.Aim) ?main.Device {
     return self.devices_info.default(aim);
 }
 
-pub const PlayerData = struct {
-    allocator: std.mem.Allocator,
-    thread: std.Thread,
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
-    aborted: std.atomic.Atomic(bool),
-    paused: std.atomic.Atomic(bool),
-    volume: f32,
-};
-
-pub fn openPlayer(self: *Dummy, player: *main.Player, device: main.Device) !void {
+pub fn createPlayer(self: *Dummy, player: *main.Player, device: main.Device) !void {
     _ = device;
-    player.backend_data = .{
+    player.data = .{
         .Dummy = .{
             .allocator = self.allocator,
             .mutex = .{},
             .cond = .{},
             .aborted = .{ .value = false },
             .paused = .{ .value = false },
-            .volume = 1.0,
+            ._volume = 1.0,
             .thread = undefined,
         },
     };
 }
 
-pub fn playerDeinit(self: *main.Player) void {
-    var bd = &self.backend_data.Dummy;
+pub const Player = struct {
+    allocator: std.mem.Allocator,
+    thread: std.Thread,
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
+    aborted: std.atomic.Atomic(bool),
+    paused: std.atomic.Atomic(bool),
+    _volume: f32,
 
-    bd.aborted.store(true, .Unordered);
-    bd.cond.signal();
-    bd.thread.join();
-}
-
-pub fn playerStart(self: *main.Player) !void {
-    var bd = &self.backend_data.Dummy;
-
-    bd.thread = std.Thread.spawn(.{}, playerLoop, .{self}) catch |err| switch (err) {
-        error.ThreadQuotaExceeded,
-        error.SystemResources,
-        error.LockedMemoryLimitExceeded,
-        => return error.SystemResources,
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Unexpected => unreachable,
-    };
-}
-
-fn playerLoop(self: *main.Player) void {
-    var bd = &self.backend_data.Dummy;
-
-    const buf_size = @as(u11, 1024);
-    const bps = buf_size / self.bytesPerSample();
-    var buf: [1024]u8 = undefined;
-
-    self.device.channels[0].ptr = &buf;
-
-    while (!bd.aborted.load(.Unordered)) {
-        bd.mutex.lock();
-        defer bd.mutex.unlock();
-        bd.cond.timedWait(&bd.mutex, main.default_latency * std.time.ns_per_us) catch {};
-        if (bd.paused.load(.Unordered))
-            continue;
-        self.writeFn(self, bps);
+    pub fn deinit(self: *Player) void {
+        self.aborted.store(true, .Unordered);
+        self.cond.signal();
+        self.thread.join();
     }
-}
 
-pub fn playerPlay(self: *main.Player) !void {
-    var bd = &self.backend_data.Dummy;
-    bd.mutex.lock();
-    defer bd.mutex.unlock();
-    bd.paused.store(false, .Unordered);
-    bd.cond.signal();
-}
+    pub fn start(self: *Player) !void {
+        self.thread = std.Thread.spawn(.{}, writeLoop, .{self}) catch |err| switch (err) {
+            error.ThreadQuotaExceeded,
+            error.SystemResources,
+            error.LockedMemoryLimitExceeded,
+            => return error.SystemResources,
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Unexpected => unreachable,
+        };
+    }
 
-pub fn playerPause(self: *main.Player) !void {
-    const bd = &self.backend_data.Dummy;
-    bd.mutex.lock();
-    defer bd.mutex.unlock();
-    bd.paused.store(true, .Unordered);
-}
+    fn writeLoop(self: *Player) void {
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const main.Player.BackendData(), self));
 
-pub fn playerPaused(self: *main.Player) bool {
-    const bd = &self.backend_data.Dummy;
-    bd.mutex.lock();
-    defer bd.mutex.unlock();
-    return bd.paused.load(.Unordered);
-}
+        const buf_size = @as(u11, 1024);
+        const bps = buf_size / parent.bytesPerSample();
+        var buf: [1024]u8 = undefined;
 
-pub fn playerSetVolume(self: *main.Player, volume: f32) !void {
-    var bd = &self.backend_data.Dummy;
-    bd.volume = volume;
-}
+        parent.device.channels[0].ptr = &buf;
 
-pub fn playerVolume(self: *main.Player) !f32 {
-    var bd = &self.backend_data.Dummy;
-    return bd.volume;
-}
+        while (!self.aborted.load(.Unordered)) {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.cond.timedWait(&self.mutex, main.default_latency * std.time.ns_per_us) catch {};
+            if (self.paused.load(.Unordered))
+                continue;
+            parent.writeFn(parent, bps);
+        }
+    }
 
-pub fn deviceDeinit(self: main.Device, allocator: std.mem.Allocator) void {
-    allocator.free(self.channels);
+    pub fn play(self: *Player) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.paused.store(false, .Unordered);
+        self.cond.signal();
+    }
+
+    pub fn pause(self: *Player) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.paused.store(true, .Unordered);
+    }
+
+    pub fn paused(self: *Player) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.paused.load(.Unordered);
+    }
+
+    pub fn setVolume(self: *Player, vol: f32) !void {
+        self._volume = vol;
+    }
+
+    pub fn volume(self: *Player) !f32 {
+        return self._volume;
+    }
+};
+
+fn freeDevice(allocator: std.mem.Allocator, device: main.Device) void {
+    allocator.free(device.channels);
 }
