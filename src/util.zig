@@ -25,18 +25,18 @@ pub const DevicesInfo = struct {
         return self.list.items[i];
     }
 
-    pub fn default(self: DevicesInfo, aim: main.Device.Aim) ?main.Device {
+    pub fn default(self: DevicesInfo, aim: main.Device.Mode) ?main.Device {
         return self.get(self.defaultIndex(aim) orelse return null);
     }
 
-    pub fn setDefault(self: *DevicesInfo, aim: main.Device.Aim, i: usize) void {
+    pub fn setDefault(self: *DevicesInfo, aim: main.Device.Mode, i: usize) void {
         switch (aim) {
             .playback => self.default_output = i,
             .capture => self.default_input = i,
         }
     }
 
-    pub fn defaultIndex(self: DevicesInfo, aim: main.Device.Aim) ?usize {
+    pub fn defaultIndex(self: DevicesInfo, aim: main.Device.Mode) ?usize {
         return switch (aim) {
             .playback => self.default_output,
             .capture => self.default_input,

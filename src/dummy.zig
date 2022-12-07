@@ -1,13 +1,12 @@
 const std = @import("std");
 const main = @import("main.zig");
+const backends = @import("backends.zig");
 const util = @import("util.zig");
-
-const Dummy = @This();
 
 const dummy_playback = main.Device{
     .id = "dummy-playback",
-    .name = "Dummy main.Device",
-    .aim = .playback,
+    .name = "Dummy Device",
+    .mode = .playback,
     .channels = undefined,
     .formats = std.meta.tags(main.Format),
     .sample_rate = .{
@@ -18,8 +17,8 @@ const dummy_playback = main.Device{
 
 const dummy_capture = main.Device{
     .id = "dummy-capture",
-    .name = "Dummy main.Device",
-    .aim = .capture,
+    .name = "Dummy Device",
+    .mode = .capture,
     .channels = undefined,
     .formats = std.meta.tags(main.Format),
     .sample_rate = .{
@@ -28,68 +27,70 @@ const dummy_capture = main.Device{
     },
 };
 
-allocator: std.mem.Allocator,
-devices_info: util.DevicesInfo,
+pub const Context = struct {
+    allocator: std.mem.Allocator,
+    devices_info: util.DevicesInfo,
 
-pub fn connect(allocator: std.mem.Allocator, options: main.ConnectOptions) !main.BackendData {
-    _ = options;
+    pub fn init(allocator: std.mem.Allocator, options: main.Context.Options) !backends.BackendContext {
+        _ = options;
 
-    var self = try allocator.create(Dummy);
-    errdefer allocator.destroy(self);
-    self.* = .{
-        .allocator = allocator,
-        .devices_info = util.DevicesInfo.init(),
-    };
+        var self = try allocator.create(Context);
+        errdefer allocator.destroy(self);
+        self.* = .{
+            .allocator = allocator,
+            .devices_info = util.DevicesInfo.init(),
+        };
 
-    try self.devices_info.list.append(self.allocator, dummy_playback);
-    try self.devices_info.list.append(self.allocator, dummy_capture);
-    self.devices_info.list.items[0].channels = try allocator.alloc(main.Channel, 1);
-    self.devices_info.list.items[0].channels[0] = .{
-        .id = .front_center,
-    };
-    self.devices_info.list.items[1].channels = try allocator.alloc(main.Channel, 1);
-    self.devices_info.list.items[1].channels[0] = .{
-        .id = .front_center,
-    };
-    self.devices_info.setDefault(.playback, 0);
-    self.devices_info.setDefault(.capture, 1);
+        try self.devices_info.list.append(self.allocator, dummy_playback);
+        try self.devices_info.list.append(self.allocator, dummy_capture);
+        self.devices_info.list.items[0].channels = try allocator.alloc(main.Channel, 1);
+        self.devices_info.list.items[0].channels[0] = .{
+            .id = .front_center,
+        };
+        self.devices_info.list.items[1].channels = try allocator.alloc(main.Channel, 1);
+        self.devices_info.list.items[1].channels[0] = .{
+            .id = .front_center,
+        };
+        self.devices_info.setDefault(.playback, 0);
+        self.devices_info.setDefault(.capture, 1);
 
-    return .{ .Dummy = self };
-}
+        return .{ .dummy = self };
+    }
 
-pub fn disconnect(self: *Dummy) void {
-    for (self.devices_info.list.items) |d|
-        freeDevice(self.allocator, d);
-    self.devices_info.list.deinit(self.allocator);
-    self.allocator.destroy(self);
-}
+    pub fn deinit(self: *Context) void {
+        for (self.devices_info.list.items) |d|
+            freeDevice(self.allocator, d);
+        self.devices_info.list.deinit(self.allocator);
+        self.allocator.destroy(self);
+    }
 
-pub fn refresh(self: *Dummy) !void {
-    _ = self;
-}
+    pub fn refresh(self: *Context) !void {
+        _ = self;
+    }
 
-pub fn devices(self: Dummy) []const main.Device {
-    return self.devices_info.list.items;
-}
+    pub fn devices(self: Context) []const main.Device {
+        return self.devices_info.list.items;
+    }
 
-pub fn defaultDevice(self: Dummy, aim: main.Device.Aim) ?main.Device {
-    return self.devices_info.default(aim);
-}
+    pub fn defaultDevice(self: Context, aim: main.Device.Mode) ?main.Device {
+        return self.devices_info.default(aim);
+    }
 
-pub fn createPlayer(self: *Dummy, player: *main.Player, device: main.Device) !void {
-    _ = device;
-    player.data = .{
-        .Dummy = .{
-            .allocator = self.allocator,
-            .mutex = .{},
-            .cond = .{},
-            .aborted = .{ .value = false },
-            ._paused = .{ .value = false },
-            ._volume = 1.0,
-            .thread = undefined,
-        },
-    };
-}
+    pub fn createPlayer(self: *Context, player: *main.Player, device: main.Device) !void {
+        _ = device;
+        player.data = .{
+            .dummy = .{
+                .allocator = self.allocator,
+                .mutex = .{},
+                .cond = .{},
+                .aborted = .{ .value = false },
+                ._paused = .{ .value = false },
+                ._volume = 1.0,
+                .thread = undefined,
+            },
+        };
+    }
+};
 
 pub const Player = struct {
     allocator: std.mem.Allocator,
@@ -118,7 +119,7 @@ pub const Player = struct {
     }
 
     fn writeLoop(self: *Player) void {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const main.Player.BackendData(), self));
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
 
         const buf_size = @as(u11, 1024);
         const bps = buf_size / parent.bytesPerSample();

@@ -1,53 +1,46 @@
-const std = @import("std");
 const builtin = @import("builtin");
+const std = @import("std");
 
-pub const PulseAudio = if (isUnix()) @import("PulseAudio.zig") else void;
-pub const Alsa = if (isUnix()) @import("Alsa.zig") else void;
-pub const WASApi = if (isWindows()) @import("WASApi.zig") else void;
-pub const Dummy = @import("Dummy.zig");
-
-pub const Backend = std.meta.Tag(BackendData);
-pub const BackendData = if (isUnix()) union(enum) {
-    PulseAudio: *PulseAudio,
-    Alsa: *Alsa,
-    Dummy: *Dummy,
-} else if (isApple()) union(enum) {
-    Dummy: *Dummy,
-} else if (isWindows()) union(enum) {
-    WASApi: *WASApi,
-    Dummy: *Dummy,
-} else union(enum) {
-    Dummy: *Dummy,
+pub const Backend = std.meta.Tag(BackendContext);
+pub const BackendContext = switch (builtin.os.tag) {
+    .linux => union(enum) {
+        // pulseaudio: *@import("pulseaudio.zig").Context,
+        alsa: *@import("alsa.zig").Context,
+        dummy: *@import("dummy.zig").Context,
+    },
+    .freebsd, .netbsd, .openbsd, .solaris => union(enum) {
+        pulseaudio: *@import("pulseaudio.zig").Context,
+        dummy: *@import("dummy.zig").Context,
+    },
+    .macos, .ios, .watchos, .tvos => union(enum) {
+        dummy: *@import("dummy.zig").Context,
+    },
+    .windows => union(enum) {
+        wasapi: *@import("wasapi.zig").Context,
+        dummy: *@import("dummy.zig").Context,
+    },
+    else => union(enum) {
+        dummy: *@import("dummy.zig").Context,
+    },
 };
-
-// ignores macos, ios, ...
-fn isUnix() bool {
-    return switch (builtin.os.tag) {
-        .linux,
-        .dragonfly,
-        .freebsd,
-        .kfreebsd,
-        .netbsd,
-        .openbsd,
-        .minix,
-        .fuchsia,
-        .solaris,
-        => true,
-        else => false,
-    };
-}
-
-fn isApple() bool {
-    return switch (builtin.os.tag) {
-        .macos,
-        .ios,
-        .watchos,
-        .tvos,
-        => true,
-        else => false,
-    };
-}
-
-fn isWindows() bool {
-    return builtin.os.tag == .windows;
-}
+pub const BackendPlayer = switch (builtin.os.tag) {
+    .linux => union(enum) {
+        // pulseaudio: @import("pulseaudio.zig").Player,
+        alsa: @import("alsa.zig").Player,
+        dummy: @import("dummy.zig").Player,
+    },
+    .freebsd, .netbsd, .openbsd, .solaris => union(enum) {
+        pulseaudio: @import("pulseaudio.zig").Player,
+        dummy: @import("dummy.zig").Player,
+    },
+    .macos, .ios, .watchos, .tvos => union(enum) {
+        dummy: @import("dummy.zig").Player,
+    },
+    .windows => union(enum) {
+        wasapi: @import("wasapi.zig").Player,
+        dummy: @import("dummy.zig").Player,
+    },
+    else => union(enum) {
+        dummy: @import("dummy.zig").Player,
+    },
+};

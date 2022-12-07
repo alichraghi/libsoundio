@@ -1,12 +1,7 @@
+const builtin = @import("builtin");
 const std = @import("std");
-const backends = @import("backends.zig");
 const util = @import("util.zig");
-const Player = @import("player.zig").Player;
-const Backend = backends.Backend;
-const BackendData = backends.BackendData;
-
-pub usingnamespace @import("player.zig");
-pub usingnamespace @import("backends.zig");
+const backends = @import("backends.zig");
 
 pub const max_channels = 32;
 pub const min_sample_rate = 8_000; // Hz
@@ -14,16 +9,8 @@ pub const max_sample_rate = 5_644_800; // Hz
 pub const default_sample_rate = 44_100; // Hz
 pub const default_latency = 500 * std.time.us_per_ms; // μs
 
-const SysAudio = @This();
-
-data: BackendData,
-
+pub const Backend = backends.Backend;
 pub const DeviceChangeFn = *const fn (self: ?*anyopaque) void;
-pub const ConnectOptions = struct {
-    app_name: [:0]const u8 = "Mach Game",
-    deviceChangeFn: ?DeviceChangeFn = null,
-    userdata: ?*anyopaque = null,
-};
 pub const ConnectError = error{
     OutOfMemory,
     AccessDenied,
@@ -31,104 +18,358 @@ pub const ConnectError = error{
     ConnectionRefused,
 };
 
-pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SysAudio {
-    var data: BackendData = blk: {
-        if (backend) |b| {
-            break :blk try @field(backends, @tagName(b)).connect(allocator, options);
-        } else {
-            inline for (std.meta.fields(Backend)) |b, i| {
-                if (@field(backends, b.name).connect(allocator, options)) |d| {
-                    break :blk d;
-                } else |err| {
-                    if (i == std.meta.fields(Backend).len - 1)
-                        return err;
+pub const Context = struct {
+    pub const Options = struct {
+        app_name: [:0]const u8 = "Mach Game",
+        deviceChangeFn: ?DeviceChangeFn = null,
+        userdata: ?*anyopaque = null,
+    };
+
+    data: backends.BackendContext,
+
+    pub fn init(comptime backend: ?Backend, allocator: std.mem.Allocator, options: Options) ConnectError!Context {
+        var data: backends.BackendContext = blk: {
+            if (backend) |b| {
+                break :blk try @typeInfo(
+                    std.meta.fieldInfo(backends.BackendContext, b).field_type,
+                ).Pointer.child.init(allocator, options);
+            } else {
+                inline for (std.meta.fields(Backend)) |b, i| {
+                    if (@typeInfo(
+                        std.meta.fieldInfo(backends.BackendContext, @intToEnum(Backend, b.value)).field_type,
+                    ).Pointer.child.init(allocator, options)) |d| {
+                        break :blk d;
+                    } else |err| {
+                        if (i == std.meta.fields(Backend).len - 1)
+                            return err;
+                    }
                 }
+                unreachable;
             }
-            unreachable;
+        };
+
+        return .{ .data = data };
+    }
+
+    pub fn deinit(self: Context) void {
+        switch (self.data) {
+            inline else => |b| b.deinit(),
         }
-    };
-
-    return .{ .data = data };
-}
-
-pub fn disconnect(self: SysAudio) void {
-    switch (self.data) {
-        inline else => |b| b.disconnect(),
     }
-}
 
-pub const RefreshError = error{
-    OutOfMemory,
-    SystemResources,
-    OpeningDevice,
-};
-
-pub fn refresh(self: SysAudio) RefreshError!void {
-    return switch (self.data) {
-        inline else => |b| b.refresh(),
+    pub const RefreshError = error{
+        OutOfMemory,
+        SystemResources,
+        OpeningDevice,
     };
-}
 
-pub fn devices(self: SysAudio) []const Device {
-    return switch (self.data) {
-        inline else => |b| b.devices(),
+    pub fn refresh(self: Context) RefreshError!void {
+        return switch (self.data) {
+            inline else => |b| b.refresh(),
+        };
+    }
+
+    pub fn devices(self: Context) []const Device {
+        return switch (self.data) {
+            inline else => |b| b.devices(),
+        };
+    }
+
+    pub fn defaultDevice(self: Context, aim: Device.Mode) ?Device {
+        return switch (self.data) {
+            inline else => |b| b.defaultDevice(aim),
+        };
+    }
+
+    pub const CreateStreamError = error{
+        OutOfMemory,
+        SystemResources,
+        OpeningDevice,
+        IncompatibleDevice,
     };
-}
 
-pub fn defaultDevice(self: SysAudio, aim: Device.Aim) ?Device {
-    return switch (self.data) {
-        inline else => |b| b.defaultDevice(aim),
-    };
-}
+    pub fn createPlayer(self: Context, device: Device, writeFn: Player.WriteFn, options: Player.Options) CreateStreamError!Player {
+        std.debug.assert(device.mode == .playback);
 
-pub const CreateStreamError = error{
-    OutOfMemory,
-    SystemResources,
-    OpeningDevice,
-    IncompatibleDevice,
-};
-
-pub const PlayerOptions = struct {
-    format: ?Format = null,
-    sample_rate: u32 = default_sample_rate,
-    userdata: ?*anyopaque = null,
-};
-
-pub fn createPlayer(self: SysAudio, device: Device, writeFn: Player.WriteFn, options: PlayerOptions) CreateStreamError!Player {
-    std.debug.assert(device.aim == .playback);
-
-    var player = Player{
-        .writeFn = writeFn,
-        .userdata = options.userdata,
-        .device = device,
-        .format = blk: {
-            for (device.formats) |dfmt| {
-                if (options.format == dfmt) {
-                    break :blk dfmt;
+        var player = Player{
+            .writeFn = writeFn,
+            .userdata = options.userdata,
+            .device = device,
+            .format = blk: {
+                for (device.formats) |dfmt| {
+                    if (options.format == dfmt) {
+                        break :blk dfmt;
+                    }
                 }
-            }
-            break :blk device.preferredFormat();
-        },
-        .sample_rate = device.sample_rate.clamp(options.sample_rate),
-        .data = undefined,
+                break :blk device.preferredFormat();
+            },
+            .sample_rate = device.sample_rate.clamp(options.sample_rate),
+            .data = undefined,
+        };
+
+        switch (self.data) {
+            inline else => |b| try b.createPlayer(&player, device),
+        }
+
+        return player;
+    }
+};
+
+pub const Player = struct {
+    // TODO: `*const Player` instead `*const anyopaque`
+    // https://github.com/ziglang/zig/issues/12325
+    pub const WriteFn = *const fn (self: *const anyopaque, frame_count_max: usize) void;
+    pub const Options = struct {
+        format: ?Format = null,
+        sample_rate: u32 = default_sample_rate,
+        userdata: ?*anyopaque = null,
     };
 
-    switch (self.data) {
-        inline else => |b| try b.createPlayer(&player, device),
+    writeFn: WriteFn,
+    userdata: ?*anyopaque,
+    device: Device,
+    format: Format,
+    /// samples per second
+    sample_rate: u32,
+
+    data: backends.BackendPlayer,
+
+    pub fn deinit(self: *Player) void {
+        return switch (self.data) {
+            inline else => |*b| b.deinit(),
+        };
     }
 
-    return player;
-}
+    pub const StartError = error{
+        CannotPlay,
+        OutOfMemory,
+        SystemResources,
+    };
+
+    pub fn start(self: *Player) StartError!void {
+        return switch (self.data) {
+            inline else => |*b| b.start(),
+        };
+    }
+
+    pub const PlayError = error{
+        CannotPlay,
+    };
+
+    pub fn play(self: *Player) PlayError!void {
+        return switch (self.data) {
+            inline else => |*b| b.play(),
+        };
+    }
+
+    pub const PauseError = error{
+        CannotPause,
+    };
+
+    pub fn pause(self: *Player) PauseError!void {
+        return switch (self.data) {
+            inline else => |*b| b.pause(),
+        };
+    }
+
+    pub fn paused(self: *Player) bool {
+        return switch (self.data) {
+            inline else => |*b| b.paused(),
+        };
+    }
+
+    pub const SetVolumeError = error{
+        CannotSetVolume,
+    };
+
+    // confidence interval (±) depends on the device
+    pub fn setVolume(self: *Player, vol: f32) SetVolumeError!void {
+        std.debug.assert(vol <= 1.0);
+        return switch (self.data) {
+            inline else => |*b| b.setVolume(vol),
+        };
+    }
+
+    pub const GetVolumeError = error{
+        CannotGetVolume,
+    };
+
+    // confidence interval (±) depends on the device
+    pub fn volume(self: *Player) GetVolumeError!f32 {
+        return switch (self.data) {
+            inline else => |*b| b.volume(),
+        };
+    }
+
+    pub fn bytesPerFrame(self: Player) u8 {
+        return self.format.bytesPerFrame(@intCast(u5, self.device.channels.len));
+    }
+
+    pub fn bytesPerSample(self: Player) u4 {
+        return self.format.bytesPerSample();
+    }
+
+    pub fn writeAll(self: Player, frame: usize, value: anytype) void {
+        for (self.device.channels) |_, i|
+            self.write(i, frame, value);
+    }
+
+    pub fn write(self: Player, channel: usize, frame: usize, sample: anytype) void {
+        switch (@TypeOf(sample)) {
+            u8 => self.writeU8(channel, frame, sample),
+            i16 => self.writeI16(channel, frame, sample),
+            i24 => self.writeI24(channel, frame, sample),
+            i32 => self.writeI32(channel, frame, sample),
+            f32 => self.writeF32(channel, frame, sample),
+            f64 => self.writeF64(channel, frame, sample),
+            else => @compileError(
+                \\invalid sample type. supported types are:
+                \\u8, i8, i16, i24, i32, f32, f32, f64
+            ),
+        }
+    }
+
+    pub inline fn writeRaw(self: Player, channel: usize, frame: usize, sample: anytype) void {
+        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
+        std.mem.bytesAsValue(@TypeOf(sample), ptr[0..@sizeOf(@TypeOf(sample))]).* = sample;
+    }
+
+    pub fn writeU8(self: Player, channel: usize, frame: usize, sample: u8) void {
+        switch (self.format) {
+            .u8 => self.writeRaw(channel, frame, sample),
+            .i8 => self.writeRaw(channel, frame, unsignedToSigned(i8, sample)),
+            .i16 => self.writeRaw(channel, frame, unsignedToSigned(i16, sample)),
+            .i24 => self.writeRaw(channel, frame, unsignedToSigned(i24, sample)),
+            .i24_4b => @panic("TODO"),
+            .i32 => self.writeRaw(channel, frame, unsignedToSigned(i32, sample)),
+            .f32 => self.writeRaw(channel, frame, unsignedToFloat(f32, sample)),
+            .f64 => self.writeRaw(channel, frame, unsignedToFloat(f64, sample)),
+        }
+    }
+
+    fn unsignedToSigned(comptime T: type, sample: anytype) T {
+        const half = 1 << (@bitSizeOf(@TypeOf(sample)) - 1);
+        const trunc = @bitSizeOf(T) - @bitSizeOf(@TypeOf(sample));
+        return @intCast(T, sample -% half) << trunc;
+    }
+
+    fn unsignedToFloat(comptime T: type, sample: anytype) T {
+        const max_int = std.math.maxInt(@TypeOf(sample)) + 1.0;
+        return (@intToFloat(T, sample) - max_int) * 1.0 / max_int;
+    }
+
+    pub fn writeI16(self: Player, channel: usize, frame: usize, sample: i16) void {
+        switch (self.format) {
+            .u8 => self.writeRaw(channel, frame, signedToUnsigned(u8, sample)),
+            .i8 => self.writeRaw(channel, frame, signedToSigned(i8, sample)),
+            .i16 => self.writeRaw(channel, frame, sample),
+            .i24 => self.writeRaw(channel, frame, sample),
+            .i24_4b => @panic("TODO"),
+            .i32 => self.writeRaw(channel, frame, sample),
+            .f32 => self.writeRaw(channel, frame, signedToFloat(f32, sample)),
+            .f64 => self.writeRaw(channel, frame, signedToFloat(f64, sample)),
+        }
+    }
+
+    pub fn writeI24(self: Player, channel: usize, frame: usize, sample: i24) void {
+        switch (self.format) {
+            .u8 => self.writeRaw(channel, frame, signedToUnsigned(u8, sample)),
+            .i8 => self.writeRaw(channel, frame, signedToSigned(i8, sample)),
+            .i16 => self.writeRaw(channel, frame, signedToSigned(i16, sample)),
+            .i24 => self.writeRaw(channel, frame, sample),
+            .i24_4b => @panic("TODO"),
+            .i32 => self.writeRaw(channel, frame, sample),
+            .f32 => self.writeRaw(channel, frame, signedToFloat(f32, sample)),
+            .f64 => self.writeRaw(channel, frame, signedToFloat(f64, sample)),
+        }
+    }
+
+    pub fn writeI32(self: Player, channel: usize, frame: usize, sample: i32) void {
+        switch (self.format) {
+            .u8 => self.writeRaw(channel, frame, signedToUnsigned(u8, sample)),
+            .i8 => self.writeRaw(channel, frame, signedToSigned(i8, sample)),
+            .i16 => self.writeRaw(channel, frame, signedToSigned(i16, sample)),
+            .i24 => self.writeRaw(channel, frame, signedToSigned(i24, sample)),
+            .i24_4b => @panic("TODO"),
+            .i32 => self.writeRaw(channel, frame, sample),
+            .f32 => self.writeRaw(channel, frame, signedToFloat(f32, sample)),
+            .f64 => self.writeRaw(channel, frame, signedToFloat(f64, sample)),
+        }
+    }
+
+    fn signedToSigned(comptime T: type, sample: anytype) T {
+        const trunc = @bitSizeOf(@TypeOf(sample)) - @bitSizeOf(T);
+        return @intCast(T, sample >> trunc);
+    }
+
+    fn signedToUnsigned(comptime T: type, sample: anytype) T {
+        const half = 1 << (@bitSizeOf(T) - 1);
+        const trunc = @bitSizeOf(@TypeOf(sample)) - @bitSizeOf(T);
+        return @intCast(T, (sample >> trunc) + half);
+    }
+
+    fn signedToFloat(comptime T: type, sample: anytype) T {
+        const max_int = std.math.maxInt(@TypeOf(sample)) + 1.0;
+        return @intToFloat(T, sample) * 1.0 / max_int;
+    }
+
+    pub fn writeF32(self: Player, channel: usize, frame: usize, sample: f32) void {
+        switch (self.format) {
+            .u8 => self.writeRaw(channel, frame, floatToUnsigned(u8, sample)),
+            .i8 => self.writeRaw(channel, frame, floatToSigned(i8, sample)),
+            .i16 => self.writeRaw(channel, frame, floatToSigned(i16, sample)),
+            .i24 => self.writeRaw(channel, frame, floatToSigned(i24, sample)),
+            .i24_4b => @panic("TODO"),
+            .i32 => self.writeRaw(channel, frame, floatToSigned(i32, sample)),
+            .f32 => self.writeRaw(channel, frame, sample),
+            .f64 => self.writeRaw(channel, frame, sample),
+        }
+    }
+
+    pub fn writeF64(self: Player, channel: usize, frame: usize, sample: f64) void {
+        switch (self.format) {
+            .u8 => self.writeRaw(channel, frame, floatToUnsigned(u8, sample)),
+            .i8 => self.writeRaw(channel, frame, floatToSigned(i8, sample)),
+            .i16 => self.writeRaw(channel, frame, floatToSigned(i16, sample)),
+            .i24 => self.writeRaw(channel, frame, floatToSigned(i24, sample)),
+            .i24_4b => @panic("TODO"),
+            .i32 => self.writeRaw(channel, frame, floatToSigned(i32, sample)),
+            .f32 => self.writeRaw(channel, frame, sample),
+            .f64 => self.writeRaw(channel, frame, sample),
+        }
+    }
+
+    fn floatToSigned(comptime T: type, sample: f64) T {
+        return @floatToInt(T, sample * std.math.maxInt(T));
+    }
+
+    fn floatToUnsigned(comptime T: type, sample: f64) T {
+        const half = 1 << @bitSizeOf(T) - 1;
+        return @floatToInt(T, sample * (half - 1) + half);
+    }
+
+    // TODO: must be tested
+    // fn f32Toi24_4b(sample: f32) i32 {
+    //     const scaled = sample *  std.math.maxInt(i32);
+    //     if (builtin.cpu.arch.endian() == .Little) {
+    //         return @floatToInt(i32, scaled);
+    //     } else {
+    //         var res: [4]u8 = undefined;
+    //         std.mem.writeIntSliceBig(i32, &res, @floatToInt(i32, res));
+    //         return @bitCast(i32, res);
+    //     }
+    // }
+};
 
 pub const Device = struct {
     id: [:0]const u8,
     name: [:0]const u8,
-    aim: Aim,
+    mode: Mode,
     channels: []Channel,
     formats: []const Format,
     sample_rate: util.Range(u32),
 
-    pub const Aim = enum {
+    pub const Mode = enum {
         playback,
         capture,
     };
@@ -148,26 +389,26 @@ pub const Device = struct {
 
 pub const Channel = struct {
     ptr: [*]u8 = undefined,
-    id: ChannelId,
-};
+    id: Id,
 
-pub const ChannelId = enum {
-    front_center,
-    front_left,
-    front_right,
-    front_left_center,
-    front_right_center,
-    back_center,
-    side_left,
-    side_right,
-    top_center,
-    top_front_center,
-    top_front_left,
-    top_front_right,
-    top_back_center,
-    top_back_left,
-    top_back_right,
-    lfe,
+    pub const Id = enum {
+        front_center,
+        front_left,
+        front_right,
+        front_left_center,
+        front_right_center,
+        back_center,
+        side_left,
+        side_right,
+        top_center,
+        top_front_center,
+        top_front_left,
+        top_front_right,
+        top_back_center,
+        top_back_left,
+        top_back_right,
+        lfe,
+    };
 };
 
 pub const Format = enum {
@@ -200,6 +441,10 @@ pub const Format = enum {
 
 test {
     comptime {
-        std.testing.refAllDeclsRecursive(@This());
+        @import("std").testing.refAllDeclsRecursive(@This());
+        // @import("std").testing.refAllDeclsRecursive(@import("alsa.zig"));
+        // @import("std").testing.refAllDeclsRecursive(@import("pulseaudio.zig"));
+        // @import("std").testing.refAllDeclsRecursive(@import("wasapi.zig"));
+        @import("std").testing.refAllDeclsRecursive(@import("dummy.zig"));
     }
 }

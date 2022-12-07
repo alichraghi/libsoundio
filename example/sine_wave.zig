@@ -1,13 +1,13 @@
 const std = @import("std");
-const SysAudio = @import("sysaudio");
+const sysaudio = @import("sysaudio");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var a = try SysAudio.connect(null, allocator, .{ .deviceChangeFn = deviceChange });
-    defer a.disconnect();
+    var a = try sysaudio.Context.init(null, allocator, .{ .deviceChangeFn = deviceChange });
+    defer a.deinit();
     try a.refresh();
     const device = a.defaultDevice(.playback) orelse return error.NoDevice;
 
@@ -25,7 +25,7 @@ const pitch = 440.0;
 const radians_per_second = pitch * 2.0 * std.math.pi;
 var seconds_offset: f32 = 0.0;
 fn writeCallback(self_opaque: *const anyopaque, n_frame: usize) void {
-    var self = @ptrCast(*const SysAudio.Player, @alignCast(@alignOf(SysAudio.Player), self_opaque));
+    var self = @ptrCast(*const sysaudio.Player, @alignCast(@alignOf(sysaudio.Player), self_opaque));
 
     const seconds_per_frame = 1.0 / @intToFloat(f32, self.sample_rate);
     var frame: usize = 0;
