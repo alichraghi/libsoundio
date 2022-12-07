@@ -18,17 +18,17 @@ const SysAudio = @This();
 
 data: BackendData,
 
-pub const ConnectError = error{
-    OutOfMemory,
-    AccessDenied,
-    SystemResources,
-    ConnectionRefused,
-};
 pub const DeviceChangeFn = *const fn (self: ?*anyopaque) void;
 pub const ConnectOptions = struct {
     app_name: [:0]const u8 = "Mach Game",
     deviceChangeFn: ?DeviceChangeFn = null,
     userdata: ?*anyopaque = null,
+};
+pub const ConnectError = error{
+    OutOfMemory,
+    AccessDenied,
+    SystemResources,
+    ConnectionRefused,
 };
 
 pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options: ConnectOptions) ConnectError!SysAudio {
@@ -36,18 +36,14 @@ pub fn connect(comptime backend: ?Backend, allocator: std.mem.Allocator, options
         if (backend) |b| {
             break :blk try @field(backends, @tagName(b)).connect(allocator, options);
         } else {
-            var first_err: ConnectError!void = {};
-
             inline for (std.meta.fields(Backend)) |b, i| {
-                if (@field(backends, b.name).connect(allocator, options) catch |err| fblk: {
-                    if (i == 0) first_err = err;
-                    break :fblk null;
-                }) |d| {
+                if (@field(backends, b.name).connect(allocator, options)) |d| {
                     break :blk d;
+                } else |err| {
+                    if (i == std.meta.fields(Backend).len - 1)
+                        return err;
                 }
             }
-
-            try first_err;
             unreachable;
         }
     };
@@ -89,7 +85,6 @@ pub const CreateStreamError = error{
     OutOfMemory,
     SystemResources,
     OpeningDevice,
-    IncompatibleBackend,
     IncompatibleDevice,
 };
 
@@ -126,17 +121,17 @@ pub fn createPlayer(self: SysAudio, device: Device, writeFn: Player.WriteFn, opt
 }
 
 pub const Device = struct {
-    pub const Aim = enum {
-        playback,
-        capture,
-    };
-
     id: [:0]const u8,
     name: [:0]const u8,
     aim: Aim,
     channels: []Channel,
     formats: []const Format,
     sample_rate: util.Range(u32),
+
+    pub const Aim = enum {
+        playback,
+        capture,
+    };
 
     pub fn preferredFormat(self: Device) Format {
         var best: Format = self.formats[0];

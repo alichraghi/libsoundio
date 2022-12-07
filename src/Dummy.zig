@@ -84,7 +84,7 @@ pub fn createPlayer(self: *Dummy, player: *main.Player, device: main.Device) !vo
             .mutex = .{},
             .cond = .{},
             .aborted = .{ .value = false },
-            .paused = .{ .value = false },
+            ._paused = .{ .value = false },
             ._volume = 1.0,
             .thread = undefined,
         },
@@ -97,7 +97,7 @@ pub const Player = struct {
     mutex: std.Thread.Mutex,
     cond: std.Thread.Condition,
     aborted: std.atomic.Atomic(bool),
-    paused: std.atomic.Atomic(bool),
+    _paused: std.atomic.Atomic(bool),
     _volume: f32,
 
     pub fn deinit(self: *Player) void {
@@ -130,7 +130,7 @@ pub const Player = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
             self.cond.timedWait(&self.mutex, main.default_latency * std.time.ns_per_us) catch {};
-            if (self.paused.load(.Unordered))
+            if (self._paused.load(.Unordered))
                 continue;
             parent.writeFn(parent, bps);
         }
@@ -139,20 +139,20 @@ pub const Player = struct {
     pub fn play(self: *Player) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.paused.store(false, .Unordered);
+        self._paused.store(false, .Unordered);
         self.cond.signal();
     }
 
     pub fn pause(self: *Player) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.paused.store(true, .Unordered);
+        self._paused.store(true, .Unordered);
     }
 
     pub fn paused(self: *Player) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
-        return self.paused.load(.Unordered);
+        return self._paused.load(.Unordered);
     }
 
     pub fn setVolume(self: *Player, vol: f32) !void {

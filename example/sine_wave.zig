@@ -6,7 +6,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var a = try SysAudio.connect(.Dummy, allocator, .{ .deviceChangeFn = deviceChange });
+    var a = try SysAudio.connect(null, allocator, .{ .deviceChangeFn = deviceChange });
     defer a.disconnect();
     try a.refresh();
     const device = a.defaultDevice(.playback) orelse return error.NoDevice;
@@ -17,7 +17,7 @@ pub fn main() !void {
 
     try p.setVolume(1.0);
     // try a.wait();
-    // while (true) {}
+    while (true) {}
     std.time.sleep(1 * std.time.ns_per_s);
 }
 

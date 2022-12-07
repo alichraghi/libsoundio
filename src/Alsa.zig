@@ -144,8 +144,7 @@ fn deviceEventsLoop(self: *Alsa) void {
             },
             error.Unexpected => unreachable,
         };
-
-        if (util.hasFlag(dw.notify_fd, std.os.POLL.IN)) {
+        if (dw.notify_fd & std.os.POLL.IN != 0) {
             while (true) {
                 const len = std.os.read(dw.notify_fd, &buf) catch |err| {
                     if (err == error.WouldBlock) break;
@@ -164,7 +163,7 @@ fn deviceEventsLoop(self: *Alsa) void {
                     evt = @ptrCast(*inotify_event, @alignCast(4, buf[i..]));
                     const evt_name = @ptrCast([*]u8, buf[i..])[@sizeOf(inotify_event) .. @sizeOf(inotify_event) + 8];
 
-                    if (util.hasFlag(evt.mask, std.os.linux.IN.ISDIR) or !std.mem.startsWith(u8, evt_name, "pcm"))
+                    if (evt.mask & std.os.linux.IN.ISDIR != 0 or !std.mem.startsWith(u8, evt_name, "pcm"))
                         continue;
 
                     dw.deviceChangeFn(dw.userdata);
