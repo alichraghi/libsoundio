@@ -4,7 +4,7 @@ const std = @import("std");
 pub const Backend = std.meta.Tag(BackendContext);
 pub const BackendContext = switch (builtin.os.tag) {
     .linux => union(enum) {
-        // pulseaudio: *@import("pulseaudio.zig").Context,
+        pulseaudio: *@import("pulseaudio.zig").Context,
         alsa: *@import("alsa.zig").Context,
         dummy: *@import("dummy.zig").Context,
     },
@@ -25,7 +25,7 @@ pub const BackendContext = switch (builtin.os.tag) {
 };
 pub const BackendPlayer = switch (builtin.os.tag) {
     .linux => union(enum) {
-        // pulseaudio: @import("pulseaudio.zig").Player,
+        pulseaudio: @import("pulseaudio.zig").Player,
         alsa: @import("alsa.zig").Player,
         dummy: @import("dummy.zig").Player,
     },
