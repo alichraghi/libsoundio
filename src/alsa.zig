@@ -9,7 +9,7 @@ const is_little = @import("builtin").cpu.arch.endian() == .Little;
 pub const Context = struct {
     allocator: std.mem.Allocator,
     devices_info: util.DevicesInfo,
-    device_watcher: ?DeviceWatcher,
+    watcher: ?DeviceWatcher,
 
     const DeviceWatcher = struct {
         deviceChangeFn: main.DeviceChangeFn,
@@ -29,7 +29,7 @@ pub const Context = struct {
         self.* = .{
             .allocator = allocator,
             .devices_info = util.DevicesInfo.init(),
-            .device_watcher = blk: {
+            .watcher = blk: {
                 if (options.deviceChangeFn) |deviceChangeFn| {
                     const notify_fd = std.os.inotify_init1(std.os.linux.IN.NONBLOCK) catch |err| switch (err) {
                         error.ProcessFdQuotaExceeded,
@@ -95,7 +95,7 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
-        if (self.device_watcher) |*dw| {
+        if (self.watcher) |*dw| {
             dw.aborted.store(true, .Unordered);
 
             _ = std.os.write(dw.notify_pipe_fd[1], "a") catch {};
@@ -114,23 +114,23 @@ pub const Context = struct {
     }
 
     fn deviceEventsLoop(self: *Context) void {
-        var dw = &self.device_watcher.?;
+        var scan = false;
         var last_crash: ?i64 = null;
         var buf: [2048]u8 = undefined;
         var fds = [2]std.os.pollfd{
             .{
-                .fd = dw.notify_fd,
+                .fd = self.watcher.?.notify_fd,
                 .events = std.os.POLL.IN,
                 .revents = 0,
             },
             .{
-                .fd = dw.notify_pipe_fd[0],
+                .fd = self.watcher.?.notify_pipe_fd[0],
                 .events = std.os.POLL.IN,
                 .revents = 0,
             },
         };
 
-        while (!dw.aborted.load(.Unordered)) {
+        while (!self.watcher.?.aborted.load(.Unordered)) {
             _ = std.os.poll(&fds, -1) catch |err| switch (err) {
                 error.NetworkSubsystemFailed,
                 error.SystemResources,
@@ -144,9 +144,9 @@ pub const Context = struct {
                 },
                 error.Unexpected => unreachable,
             };
-            if (dw.notify_fd & std.os.POLL.IN != 0) {
+            if (self.watcher.?.notify_fd & std.os.POLL.IN != 0) {
                 while (true) {
-                    const len = std.os.read(dw.notify_fd, &buf) catch |err| {
+                    const len = std.os.read(self.watcher.?.notify_fd, &buf) catch |err| {
                         if (err == error.WouldBlock) break;
                         const ts = std.time.milliTimestamp();
                         if (last_crash) |lc| {
@@ -166,9 +166,14 @@ pub const Context = struct {
                         if (evt.mask & std.os.linux.IN.ISDIR != 0 or !std.mem.startsWith(u8, evt_name, "pcm"))
                             continue;
 
-                        dw.deviceChangeFn(dw.userdata);
+                        scan = true;
                     }
                 }
+            }
+
+            if (scan) {
+                self.watcher.?.deviceChangeFn(self.watcher.?.userdata);
+                scan = false;
             }
         }
     }

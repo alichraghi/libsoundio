@@ -1,5 +1,3 @@
 ## TODO
 
--   [ ] Global SysAudio fields:
-        allocator,
-        ...ConnectOptions,
+-   [ ] no public field
