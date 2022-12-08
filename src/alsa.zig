@@ -30,7 +30,7 @@ pub const Context = struct {
             .allocator = allocator,
             .devices_info = util.DevicesInfo.init(),
             .device_watcher = blk: {
-                if (options.deviceChangeFn != null) {
+                if (options.deviceChangeFn) |deviceChangeFn| {
                     const notify_fd = std.os.inotify_init1(std.os.linux.IN.NONBLOCK) catch |err| switch (err) {
                         error.ProcessFdQuotaExceeded,
                         error.SystemFdQuotaExceeded,
@@ -70,7 +70,7 @@ pub const Context = struct {
                     }
 
                     break :blk .{
-                        .deviceChangeFn = options.deviceChangeFn.?,
+                        .deviceChangeFn = deviceChangeFn,
                         .userdata = options.userdata,
                         .thread = std.Thread.spawn(.{}, deviceEventsLoop, .{self}) catch |err| switch (err) {
                             error.ThreadQuotaExceeded,
@@ -250,7 +250,7 @@ pub const Context = struct {
 
                             var channels = try self.allocator.alloc(main.Channel, n_ch);
                             for (channels) |*ch, i|
-                                ch.*.id = fromCHMAP(chmap[0][0].map.pos()[i]);
+                                ch.*.id = fromAlsaChannel(chmap[0][0].map.pos()[i]);
                             break :blk channels;
                         } else {
                             continue;
@@ -289,7 +289,7 @@ pub const Context = struct {
                         inline for (std.meta.tags(main.Format)) |format| {
                             if (c.snd_pcm_format_mask_test(
                                 fmt_mask,
-                                toPCM_FORMAT(format) catch unreachable,
+                                toAlsaFormat(format) catch unreachable,
                             ) != 0) {
                                 try fmt_arr.append(format);
                             }
@@ -333,8 +333,8 @@ pub const Context = struct {
         return self.devices_info.default(mode);
     }
 
-    pub fn createPlayer(self: Context, player: *main.Player, device: main.Device) !void {
-        const format = toPCM_FORMAT(player.format) catch unreachable;
+    pub fn createPlayer(self: Context, player: *main.Player) !void {
+        const format = toAlsaFormat(player.format) catch unreachable;
         var pcm: ?*c.snd_pcm_t = null;
         var mixer: ?*c.snd_mixer_t = null;
         var selem: ?*c.snd_mixer_selem_id_t = null;
@@ -343,7 +343,7 @@ pub const Context = struct {
         var vol_min: c_long = 0;
         var vol_max: c_long = 0;
 
-        if (c.snd_pcm_open(&pcm, device.id.ptr, modeToStream(device.mode), 0) < 0)
+        if (c.snd_pcm_open(&pcm, player.device.id.ptr, modeToStream(player.device.mode), 0) < 0)
             return error.OpeningDevice;
         errdefer _ = c.snd_pcm_close(pcm);
 
@@ -387,7 +387,7 @@ pub const Context = struct {
             if (c.snd_mixer_open(&mixer, 0) < 0)
                 return error.OutOfMemory;
 
-            const card_id = try self.allocator.dupeZ(u8, std.mem.sliceTo(device.id, ','));
+            const card_id = try self.allocator.dupeZ(u8, std.mem.sliceTo(player.device.id, ','));
             defer self.allocator.free(card_id);
 
             if (c.snd_mixer_attach(mixer, card_id.ptr) < 0)
@@ -558,7 +558,7 @@ pub fn modeToStream(mode: main.Device.Mode) c_uint {
     };
 }
 
-pub fn toPCM_FORMAT(format: main.Format) !c.snd_pcm_format_t {
+pub fn toAlsaFormat(format: main.Format) !c.snd_pcm_format_t {
     return switch (format) {
         .u8 => c.SND_PCM_FORMAT_U8,
         .i8 => c.SND_PCM_FORMAT_S8,
@@ -571,7 +571,7 @@ pub fn toPCM_FORMAT(format: main.Format) !c.snd_pcm_format_t {
     };
 }
 
-pub fn fromCHMAP(pos: c_uint) main.Channel.Id {
+pub fn fromAlsaChannel(pos: c_uint) main.Channel.Id {
     return switch (pos) {
         c.SND_CHMAP_UNKNOWN, c.SND_CHMAP_NA => unreachable, // TODO
         c.SND_CHMAP_MONO, c.SND_CHMAP_FC => .front_center,

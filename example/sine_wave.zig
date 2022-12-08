@@ -16,8 +16,15 @@ pub fn main() !void {
     try p.start();
 
     try p.setVolume(1.0);
-    // try a.wait();
-    while (true) {}
+    // while (true) {}
+    std.time.sleep(1 * std.time.ns_per_s);
+    try p.setVolume(0.7);
+    std.time.sleep(1 * std.time.ns_per_s);
+    try p.setVolume(0.6);
+    std.time.sleep(1 * std.time.ns_per_s);
+    try p.setVolume(0.36);
+    std.time.sleep(1 * std.time.ns_per_s);
+    try p.setVolume(0.16);
     std.time.sleep(1 * std.time.ns_per_s);
 }
 

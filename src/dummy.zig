@@ -76,8 +76,7 @@ pub const Context = struct {
         return self.devices_info.default(aim);
     }
 
-    pub fn createPlayer(self: *Context, player: *main.Player, device: main.Device) !void {
-        _ = device;
+    pub fn createPlayer(self: *Context, player: *main.Player) !void {
         player.data = .{
             .dummy = .{
                 .allocator = self.allocator,

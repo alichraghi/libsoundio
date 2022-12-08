@@ -229,7 +229,7 @@ pub const Context = struct {
         return self.devices_info.default(mode);
     }
 
-    pub fn createPlayer(self: *Context, player: *main.Player, device: main.Device) !void {
+    pub fn createPlayer(self: *Context, player: *main.Player) !void {
         c.pa_threaded_mainloop_lock(self.main_loop);
         defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
@@ -274,7 +274,7 @@ pub const Context = struct {
             c.PA_STREAM_INTERPOLATE_TIMING |
             c.PA_STREAM_ADJUST_LATENCY;
 
-        if (c.pa_stream_connect_playback(bd.stream, device.id.ptr, &buf_attr, flags, null, null) != 0) {
+        if (c.pa_stream_connect_playback(bd.stream, player.device.id.ptr, &buf_attr, flags, null, null) != 0) {
             return error.OpeningDevice;
         }
         errdefer _ = c.pa_stream_disconnect(bd.stream);
@@ -415,19 +415,16 @@ pub const Player = struct {
         c.pa_threaded_mainloop_lock(self.main_loop);
         defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
-        var v: c.pa_cvolume = undefined;
-        _ = c.pa_cvolume_init(&v);
-        v.channels = @intCast(u5, parent.device.channels.len);
-        for (parent.device.channels) |_, i| {
-            _ = c.pa_cvolume_set(&v, @intCast(c_uint, i), c.pa_sw_volume_from_linear(vol));
-        }
+        var cvolume: c.pa_cvolume = undefined;
+        _ = c.pa_cvolume_init(&cvolume);
+        _ = c.pa_cvolume_set(&cvolume, @intCast(c_uint, parent.device.channels.len), c.pa_sw_volume_from_linear(vol));
 
         performOperation(
             self.main_loop,
             c.pa_context_set_sink_input_volume(
                 self.ctx,
                 c.pa_stream_get_index(self.stream),
-                &v,
+                &cvolume,
                 successOp,
                 self,
             ),
@@ -436,10 +433,8 @@ pub const Player = struct {
 
     fn successOp(_: ?*c.pa_context, success: c_int, userdata: ?*anyopaque) callconv(.C) void {
         var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
-
-        if (success == 1) {
+        if (success == 1)
             c.pa_threaded_mainloop_signal(self.main_loop, 0);
-        }
     }
 
     pub fn volume(self: *Player) !f32 {

@@ -108,7 +108,7 @@ pub const Context = struct {
         };
 
         switch (self.data) {
-            inline else => |b| try b.createPlayer(&player, device),
+            inline else => |b| try b.createPlayer(&player),
         }
 
         return player;
