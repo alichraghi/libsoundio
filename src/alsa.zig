@@ -422,7 +422,7 @@ pub const Context = struct {
                 .mutex = .{},
                 .sample_buffer = try self.allocator.alloc(
                     u8,
-                    player.frameSize() * period_size,
+                    period_size * player.frameSize(),
                 ),
                 .aborted = .{ .value = false },
                 .vol_range = .{ .min = vol_min, .max = vol_max },

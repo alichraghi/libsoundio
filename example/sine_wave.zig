@@ -6,32 +6,37 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var a = try sysaudio.Context.init(null, allocator, .{ .deviceChangeFn = deviceChange });
+    var a = try sysaudio.Context.init(.jack, allocator, .{ .deviceChangeFn = deviceChange });
     defer a.deinit();
     try a.refresh();
 
+    for (a.devices()) |d|
+        std.debug.print("{s}\n", .{d.id});
+
     const device = a.defaultDevice(.playback) orelse return error.NoDevice;
-    var p = try a.createPlayer(device, writeCallback, .{});
-    defer p.deinit();
-    try p.start();
+    _ = device;
 
-    try p.setVolume(0.85);
+    // var p = try a.createPlayer(device, writeCallback, .{});
+    // defer p.deinit();
+    // try p.start();
 
-    var buf: [16]u8 = undefined;
-    while (true) {
-        std.debug.print("> ", .{});
-        const line = (try std.io.getStdIn().reader().readUntilDelimiterOrEof(&buf, '\n')) orelse break;
-        var iter = std.mem.split(u8, line, ":");
-        const cmd = iter.first();
-        if (std.mem.eql(u8, cmd, "vol")) {
-            var vol = try std.fmt.parseFloat(f32, iter.next().?);
-            try p.setVolume(vol);
-        } else if (std.mem.eql(u8, cmd, "pause")) {
-            try p.pause();
-        } else if (std.mem.eql(u8, cmd, "play")) {
-            try p.play();
-        }
-    }
+    // try p.setVolume(0.85);
+
+    // var buf: [16]u8 = undefined;
+    // while (true) {
+    //     std.debug.print("> ", .{});
+    //     const line = (try std.io.getStdIn().reader().readUntilDelimiterOrEof(&buf, '\n')) orelse break;
+    //     var iter = std.mem.split(u8, line, ":");
+    //     const cmd = iter.first();
+    //     if (std.mem.eql(u8, cmd, "vol")) {
+    //         var vol = try std.fmt.parseFloat(f32, iter.next().?);
+    //         try p.setVolume(vol);
+    //     } else if (std.mem.eql(u8, cmd, "pause")) {
+    //         try p.pause();
+    //     } else if (std.mem.eql(u8, cmd, "play")) {
+    //         try p.play();
+    //     }
+    // }
 }
 
 const pitch = 440.0;

@@ -6,6 +6,7 @@ pub const BackendContext = switch (builtin.os.tag) {
     .linux => union(enum) {
         pulseaudio: *@import("pulseaudio.zig").Context,
         alsa: *@import("alsa.zig").Context,
+        jack: *@import("jack.zig").Context,
         dummy: *@import("dummy.zig").Context,
     },
     .freebsd, .netbsd, .openbsd, .solaris => union(enum) {

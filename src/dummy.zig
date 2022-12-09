@@ -72,8 +72,8 @@ pub const Context = struct {
         return self.devices_info.list.items;
     }
 
-    pub fn defaultDevice(self: Context, aim: main.Device.Mode) ?main.Device {
-        return self.devices_info.default(aim);
+    pub fn defaultDevice(self: Context, mode: main.Device.Mode) ?main.Device {
+        return self.devices_info.default(mode);
     }
 
     pub fn createPlayer(self: *Context, player: *main.Player) !void {

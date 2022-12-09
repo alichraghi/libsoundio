@@ -75,9 +75,9 @@ pub const Context = struct {
         };
     }
 
-    pub fn defaultDevice(self: Context, aim: Device.Mode) ?Device {
+    pub fn defaultDevice(self: Context, mode: Device.Mode) ?Device {
         return switch (self.data) {
-            inline else => |b| b.defaultDevice(aim),
+            inline else => |b| b.defaultDevice(mode),
         };
     }
 

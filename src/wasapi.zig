@@ -259,7 +259,7 @@ pub fn refresh(self: *WASApi) !void {
         defer win32.CoTaskMemFree(variant.Anonymous.Anonymous.Anonymous.blob.pBlobData);
 
         var device = main.Device{
-            .aim = blk: {
+            .mode = blk: {
                 var endpoint: ?*win32.IMMEndpoint = null;
                 hr = imm_device.?.IUnknown_QueryInterface(win32.IID_IMMEndpoint, @ptrCast(?*?*anyopaque, &endpoint));
                 switch (hr) {
@@ -393,7 +393,7 @@ pub fn refresh(self: *WASApi) !void {
 
         for (self.devices_info.list.items) |dev, j| {
             if (std.mem.eql(u8, id, dev.id)) {
-                self.devices_info.setDefault(dev.aim, j);
+                self.devices_info.setDefault(dev.mode, j);
             }
         }
     }
@@ -403,8 +403,8 @@ pub fn devices(self: WASApi) []const main.Device {
     return self.devices_info.list.items;
 }
 
-pub fn defaultDevice(self: WASApi, aim: main.Device.Aim) ?main.Device {
-    return self.devices_info.default(aim);
+pub fn defaultDevice(self: WASApi, mode: main.Device.Aim) ?main.Device {
+    return self.devices_info.default(mode);
 }
 
 fn fromWASApiChannel(speaker: u32) main.ChannelId {

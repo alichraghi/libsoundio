@@ -41,6 +41,7 @@ fn link(step: *std.build.LibExeObjStep) void {
     if (step.target_info.target.os.tag != .windows) {
         step.linkSystemLibrary("pulse");
         step.linkSystemLibrary("asound");
+        step.linkSystemLibrary("jack");
     }
 }
 
