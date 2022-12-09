@@ -522,7 +522,7 @@ fn playerLoop(self: *main.Player) void {
     var bd = &self.backend_data.WASApi;
 
     const buf_size = @as(u11, 1024);
-    const bps = buf_size / self.bytesPerSample();
+    const bps = buf_size / self.size();
     var buf: [1024]u8 = undefined;
 
     self.device.channels[0].ptr = &buf;

@@ -88,21 +88,14 @@ pub const Context = struct {
         IncompatibleDevice,
     };
 
-    pub fn createPlayer(self: Context, device: Device, writeFn: Player.WriteFn, options: Player.Options) CreateStreamError!Player {
+    pub fn createPlayer(self: Context, device: Device, writeFn: WriteFn, options: Player.Options) CreateStreamError!Player {
         std.debug.assert(device.mode == .playback);
 
         var player = Player{
             .writeFn = writeFn,
             .userdata = options.userdata,
             .device = device,
-            .format = blk: {
-                for (device.formats) |dfmt| {
-                    if (options.format == dfmt) {
-                        break :blk dfmt;
-                    }
-                }
-                break :blk device.preferredFormat();
-            },
+            .format = device.preferredFormat(options.format),
             .sample_rate = device.sample_rate.clamp(options.sample_rate),
             .data = undefined,
         };
@@ -115,12 +108,13 @@ pub const Context = struct {
     }
 };
 
+// TODO: `*const Player` instead `*const anyopaque`
+// https://github.com/ziglang/zig/issues/12325
+pub const WriteFn = *const fn (self: *const anyopaque, frame_count_max: usize) void;
+
 pub const Player = struct {
-    // TODO: `*const Player` instead `*const anyopaque`
-    // https://github.com/ziglang/zig/issues/12325
-    pub const WriteFn = *const fn (self: *const anyopaque, frame_count_max: usize) void;
     pub const Options = struct {
-        format: ?Format = null,
+        format: Format = .f32,
         sample_rate: u32 = default_sample_rate,
         userdata: ?*anyopaque = null,
     };
@@ -201,12 +195,8 @@ pub const Player = struct {
         };
     }
 
-    pub fn bytesPerFrame(self: Player) u8 {
-        return self.format.bytesPerFrame(@intCast(u5, self.device.channels.len));
-    }
-
-    pub fn bytesPerSample(self: Player) u4 {
-        return self.format.bytesPerSample();
+    pub fn frameSize(self: Player) u8 {
+        return self.format.frameSize(@intCast(u5, self.device.channels.len));
     }
 
     pub fn writeAll(self: Player, frame: usize, value: anytype) void {
@@ -230,7 +220,7 @@ pub const Player = struct {
     }
 
     pub inline fn writeRaw(self: Player, channel: usize, frame: usize, sample: anytype) void {
-        var ptr = self.device.channels[channel].ptr + self.bytesPerFrame() * frame;
+        var ptr = self.device.channels[channel].ptr + self.frameSize() * frame;
         std.mem.bytesAsValue(@TypeOf(sample), ptr[0..@sizeOf(@TypeOf(sample))]).* = sample;
     }
 
@@ -374,10 +364,16 @@ pub const Device = struct {
         capture,
     };
 
-    pub fn preferredFormat(self: Device) Format {
+    pub fn preferredFormat(self: Device, format: Format) Format {
+        for (self.formats) |fmt| {
+            if (format == fmt) {
+                return fmt;
+            }
+        }
+
         var best: Format = self.formats[0];
         for (self.formats) |fmt| {
-            if (fmt.bytesPerSample() >= best.bytesPerSample()) {
+            if (fmt.size() >= best.size()) {
                 if (fmt == .i24_4b and best == .i24)
                     continue;
                 best = fmt;
@@ -421,7 +417,7 @@ pub const Format = enum {
     f32,
     f64,
 
-    pub fn bytesPerSample(self: Format) u4 {
+    pub fn size(self: Format) u4 {
         return switch (self) {
             .u8, .i8 => 1,
             .i16 => 2,
@@ -434,16 +430,16 @@ pub const Format = enum {
         };
     }
 
-    pub fn bytesPerFrame(self: Format, ch_count: u5) u8 {
-        return self.bytesPerSample() * ch_count;
+    pub fn frameSize(self: Format, ch_count: u5) u8 {
+        return self.size() * ch_count;
     }
 };
 
 test {
     comptime {
         @import("std").testing.refAllDeclsRecursive(@This());
-        // @import("std").testing.refAllDeclsRecursive(@import("alsa.zig"));
-        // @import("std").testing.refAllDeclsRecursive(@import("pulseaudio.zig"));
+        @import("std").testing.refAllDeclsRecursive(@import("alsa.zig"));
+        @import("std").testing.refAllDeclsRecursive(@import("pulseaudio.zig"));
         // @import("std").testing.refAllDeclsRecursive(@import("wasapi.zig"));
         @import("std").testing.refAllDeclsRecursive(@import("dummy.zig"));
     }

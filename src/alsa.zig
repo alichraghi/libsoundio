@@ -97,7 +97,6 @@ pub const Context = struct {
     pub fn deinit(self: *Context) void {
         if (self.watcher) |*dw| {
             dw.aborted.store(true, .Unordered);
-
             _ = std.os.write(dw.notify_pipe_fd[1], "a") catch {};
             dw.thread.join();
 
@@ -423,7 +422,7 @@ pub const Context = struct {
                 .mutex = .{},
                 .sample_buffer = try self.allocator.alloc(
                     u8,
-                    player.bytesPerFrame() * period_size,
+                    player.frameSize() * period_size,
                 ),
                 .aborted = .{ .value = false },
                 .vol_range = .{ .min = vol_min, .max = vol_max },
@@ -478,7 +477,7 @@ pub const Player = struct {
         var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
 
         for (parent.device.channels) |*ch, i| {
-            ch.*.ptr = self.sample_buffer.ptr + i * parent.bytesPerSample();
+            ch.*.ptr = self.sample_buffer.ptr + i * parent.format.size();
         }
 
         while (!self.aborted.load(.Unordered)) {

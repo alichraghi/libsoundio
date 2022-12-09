@@ -1,6 +1,5 @@
 const std = @import("std");
 const main = @import("main.zig");
-const testing = std.testing;
 
 pub const DevicesInfo = struct {
     list: std.ArrayListUnmanaged(main.Device),
@@ -26,7 +25,11 @@ pub const DevicesInfo = struct {
     }
 
     pub fn default(self: DevicesInfo, aim: main.Device.Mode) ?main.Device {
-        return self.get(self.defaultIndex(aim) orelse return null);
+        const index = switch (aim) {
+            .playback => self.default_output,
+            .capture => self.default_input,
+        } orelse return null;
+        return self.get(index);
     }
 
     pub fn setDefault(self: *DevicesInfo, aim: main.Device.Mode, i: usize) void {
@@ -34,13 +37,6 @@ pub const DevicesInfo = struct {
             .playback => self.default_output = i,
             .capture => self.default_input = i,
         }
-    }
-
-    pub fn defaultIndex(self: DevicesInfo, aim: main.Device.Mode) ?usize {
-        return switch (aim) {
-            .playback => self.default_output,
-            .capture => self.default_input,
-        };
     }
 };
 

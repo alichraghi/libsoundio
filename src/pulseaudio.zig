@@ -253,7 +253,7 @@ pub const Context = struct {
                 .stream = stream.?,
                 .status = .{ .value = .unknown },
                 .write_ptr = undefined,
-                ._volume = 1.0,
+                .vol = 1.0,
             },
         };
         var bd = &player.data.pulseaudio;
@@ -315,7 +315,7 @@ pub const Player = struct {
     stream: *c.pa_stream,
     status: std.atomic.Atomic(StreamStatus),
     write_ptr: [*]u8,
-    _volume: f32,
+    vol: f32,
 
     const StreamStatus = enum(u8) {
         unknown,
@@ -349,6 +349,7 @@ pub const Player = struct {
     fn playbackStreamWriteOp(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
         var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
         var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
+
         var frames_left = nbytes;
         while (frames_left > 0) {
             var chunk_size = frames_left;
@@ -365,10 +366,10 @@ pub const Player = struct {
             }
 
             for (parent.device.channels) |*ch, i| {
-                ch.*.ptr = self.write_ptr + parent.format.bytesPerSample() * i;
+                ch.*.ptr = self.write_ptr + parent.format.size() * i;
             }
 
-            const frames = chunk_size / parent.format.bytesPerFrame(@intCast(u5, parent.device.channels.len));
+            const frames = chunk_size / parent.format.frameSize(@intCast(u5, parent.device.channels.len));
             parent.writeFn(parent, frames);
 
             if (c.pa_stream_write(self.stream, self.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0) {
@@ -451,7 +452,7 @@ pub const Player = struct {
             ),
         );
 
-        return self._volume;
+        return self.vol;
     }
 
     fn sinkInputInfoOp(_: ?*c.pa_context, info: [*c]const c.pa_sink_input_info, eol: c_int, userdata: ?*anyopaque) callconv(.C) void {
@@ -462,7 +463,7 @@ pub const Player = struct {
             return;
         }
 
-        self._volume = @intToFloat(f32, info.*.volume.values[0]) / @intToFloat(f32, c.PA_VOLUME_NORM);
+        self.vol = @intToFloat(f32, info.*.volume.values[0]) / @intToFloat(f32, c.PA_VOLUME_NORM);
     }
 };
 

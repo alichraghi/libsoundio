@@ -121,7 +121,7 @@ pub const Player = struct {
         var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
 
         const buf_size = @as(u11, 1024);
-        const bps = buf_size / parent.bytesPerSample();
+        const bps = buf_size / parent.format.size();
         var buf: [1024]u8 = undefined;
 
         parent.device.channels[0].ptr = &buf;

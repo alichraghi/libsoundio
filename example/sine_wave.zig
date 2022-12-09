@@ -9,23 +9,29 @@ pub fn main() !void {
     var a = try sysaudio.Context.init(null, allocator, .{ .deviceChangeFn = deviceChange });
     defer a.deinit();
     try a.refresh();
-    const device = a.defaultDevice(.playback) orelse return error.NoDevice;
 
+    const device = a.defaultDevice(.playback) orelse return error.NoDevice;
     var p = try a.createPlayer(device, writeCallback, .{});
     defer p.deinit();
     try p.start();
 
-    try p.setVolume(1.0);
-    // while (true) {}
-    std.time.sleep(1 * std.time.ns_per_s);
-    try p.setVolume(0.7);
-    std.time.sleep(1 * std.time.ns_per_s);
-    try p.setVolume(0.6);
-    std.time.sleep(1 * std.time.ns_per_s);
-    try p.setVolume(0.36);
-    std.time.sleep(1 * std.time.ns_per_s);
-    try p.setVolume(0.16);
-    std.time.sleep(1 * std.time.ns_per_s);
+    try p.setVolume(0.85);
+
+    var buf: [16]u8 = undefined;
+    while (true) {
+        std.debug.print("> ", .{});
+        const line = (try std.io.getStdIn().reader().readUntilDelimiterOrEof(&buf, '\n')) orelse break;
+        var iter = std.mem.split(u8, line, ":");
+        const cmd = iter.first();
+        if (std.mem.eql(u8, cmd, "vol")) {
+            var vol = try std.fmt.parseFloat(f32, iter.next().?);
+            try p.setVolume(vol);
+        } else if (std.mem.eql(u8, cmd, "pause")) {
+            try p.pause();
+        } else if (std.mem.eql(u8, cmd, "play")) {
+            try p.play();
+        }
+    }
 }
 
 const pitch = 440.0;
