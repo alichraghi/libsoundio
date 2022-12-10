@@ -83,8 +83,8 @@ pub const Context = struct {
                 .mutex = .{},
                 .cond = .{},
                 .aborted = .{ .value = false },
-                ._paused = .{ .value = false },
-                ._volume = 1.0,
+                .is_paused = .{ .value = false },
+                .vol = 1.0,
                 .thread = undefined,
             },
         };
@@ -97,8 +97,8 @@ pub const Player = struct {
     mutex: std.Thread.Mutex,
     cond: std.Thread.Condition,
     aborted: std.atomic.Atomic(bool),
-    _paused: std.atomic.Atomic(bool),
-    _volume: f32,
+    is_paused: std.atomic.Atomic(bool),
+    vol: f32,
 
     pub fn deinit(self: *Player) void {
         self.aborted.store(true, .Unordered);
@@ -118,7 +118,7 @@ pub const Player = struct {
     }
 
     fn writeLoop(self: *Player) void {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*backends.BackendPlayer, self));
 
         const buf_size = @as(u11, 1024);
         const bps = buf_size / parent.format.size();
@@ -130,7 +130,7 @@ pub const Player = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
             self.cond.timedWait(&self.mutex, main.default_latency * std.time.ns_per_us) catch {};
-            if (self._paused.load(.Unordered))
+            if (self.is_paused.load(.Unordered))
                 continue;
             parent.writeFn(parent, bps);
         }
@@ -139,28 +139,35 @@ pub const Player = struct {
     pub fn play(self: *Player) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        self._paused.store(false, .Unordered);
+        self.is_paused.store(false, .Unordered);
         self.cond.signal();
     }
 
     pub fn pause(self: *Player) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        self._paused.store(true, .Unordered);
+        self.is_paused.store(true, .Unordered);
     }
 
     pub fn paused(self: *Player) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
-        return self._paused.load(.Unordered);
+        return self.is_paused.load(.Unordered);
     }
 
     pub fn setVolume(self: *Player, vol: f32) !void {
-        self._volume = vol;
+        self.vol = vol;
     }
 
     pub fn volume(self: *Player) !f32 {
-        return self._volume;
+        return self.vol;
+    }
+
+    pub fn writeRaw(self: *Player, channel: usize, frame: usize, sample: anytype) void {
+        _ = self;
+        _ = channel;
+        _ = frame;
+        _ = sample;
     }
 };
 

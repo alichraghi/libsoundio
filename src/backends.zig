@@ -28,6 +28,7 @@ pub const BackendPlayer = switch (builtin.os.tag) {
     .linux => union(enum) {
         pulseaudio: @import("pulseaudio.zig").Player,
         alsa: @import("alsa.zig").Player,
+        jack: @import("jack.zig").Player,
         dummy: @import("dummy.zig").Player,
     },
     .freebsd, .netbsd, .openbsd, .solaris => union(enum) {

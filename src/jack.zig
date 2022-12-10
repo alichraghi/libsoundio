@@ -10,8 +10,6 @@ pub const Context = struct {
     mutex: std.Thread.Mutex,
     cond: std.Thread.Condition,
     client: *c.jack_client_t,
-    sample_rate: u32,
-    period_size: u32,
     watcher: ?DeviceWatcher,
 
     const DeviceWatcher = struct {
@@ -21,8 +19,8 @@ pub const Context = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, options: main.Context.Options) !backends.BackendContext {
-        c.jack_set_error_function(@ptrCast(?*const fn ([*c]const u8) callconv(.C) void, &util.doNothing));
-        c.jack_set_info_function(@ptrCast(?*const fn ([*c]const u8) callconv(.C) void, &util.doNothing));
+        // c.jack_set_error_function(@ptrCast(?*const fn ([*c]const u8) callconv(.C) void, &util.doNothing));
+        // c.jack_set_info_function(@ptrCast(?*const fn ([*c]const u8) callconv(.C) void, &util.doNothing));
 
         var status: c.jack_status_t = 0;
         var self = try allocator.create(Context);
@@ -39,8 +37,6 @@ pub const Context = struct {
                 else
                     error.ConnectionRefused;
             },
-            .sample_rate = undefined,
-            .period_size = undefined,
             .watcher = if (options.deviceChangeFn) |deviceChangeFn| .{
                 .deviceChangeFn = deviceChangeFn,
                 .userdata = options.userdata,
@@ -48,19 +44,12 @@ pub const Context = struct {
             } else null,
         };
 
-        self.period_size = c.jack_get_buffer_size(self.client);
-        self.sample_rate = c.jack_get_sample_rate(self.client);
-
         if (options.deviceChangeFn) |_| {
-            if (c.jack_set_buffer_size_callback(self.client, bufferSizeCallback, self) != 0 or
-                c.jack_set_sample_rate_callback(self.client, sampleRateCallback, self) != 0 or
+            if (c.jack_set_sample_rate_callback(self.client, sampleRateCallback, self) != 0 or
                 c.jack_set_port_registration_callback(self.client, portRegistrationCallback, self) != 0 or
                 c.jack_set_port_rename_callback(self.client, portRenameCalllback, self) != 0)
                 return error.ConnectionRefused;
         }
-
-        if (c.jack_activate(self.client) != 0)
-            return error.ConnectionRefused;
 
         return .{ .jack = self };
     }
@@ -81,8 +70,10 @@ pub const Context = struct {
             return error.OutOfMemory;
         defer c.jack_free(@ptrCast(?*anyopaque, port_names));
 
+        const sample_rate = c.jack_get_sample_rate(self.client);
+
         var i: usize = 0;
-        while (port_names[i] != null) : (i += 1) {
+        outer: while (port_names[i] != null) : (i += 1) {
             const port = c.jack_port_by_name(self.client, port_names[i]) orelse break;
             const port_type = c.jack_port_type(port)[0..@intCast(usize, c.jack_port_type_size())];
             if (!std.mem.startsWith(u8, port_type, c.JACK_DEFAULT_AUDIO_TYPE))
@@ -90,27 +81,34 @@ pub const Context = struct {
 
             const flags = c.jack_port_flags(port);
             const mode: main.Device.Mode = if (flags & c.JackPortIsInput != 0) .capture else .playback;
-            if (self.devices_info.default(mode) != null) continue;
 
-            const id = std.mem.span(port_names[i]);
+            const name = std.mem.span(port_names[i]);
+            const id = std.mem.sliceTo(name, ':');
+
+            for (self.devices_info.list.items) |*dev| {
+                if (std.mem.eql(u8, dev.id, id) and mode == dev.mode) {
+                    const new_ch = main.Channel{
+                        .id = @intToEnum(main.Channel.Id, dev.channels.len),
+                    };
+                    dev.channels = try self.allocator.realloc(dev.channels, dev.channels.len + 1);
+                    dev.channels[dev.channels.len - 1] = new_ch;
+                    break :outer;
+                }
+            }
+
             var device = main.Device{
-                .id = id,
-                .name = id,
+                .id = try self.allocator.dupeZ(u8, id),
+                .name = name,
                 .mode = mode,
                 .channels = blk: {
-                    const short_name = std.mem.span(c.jack_port_short_name(port));
-                    const count_str = std.mem.trimLeft(u8, std.mem.trimLeft(u8, short_name, "playback_"), "capture_");
-                    const count = std.fmt.parseInt(u5, count_str, 10) catch continue;
-                    var ch_arr = std.ArrayList(main.Channel).init(self.allocator);
-                    var j: u5 = 0;
-                    while (j < count) : (j += 1)
-                        try ch_arr.append(.{ .id = @intToEnum(main.Channel.Id, j) });
-                    break :blk ch_arr.toOwnedSlice();
+                    var channels = try self.allocator.alloc(main.Channel, 1);
+                    channels[0] = .{ .id = @intToEnum(main.Channel.Id, 0) };
+                    break :blk channels;
                 },
                 .formats = &.{.f32},
                 .sample_rate = .{
-                    .min = std.math.clamp(self.sample_rate, main.min_sample_rate, main.max_sample_rate),
-                    .max = std.math.clamp(self.sample_rate, main.min_sample_rate, main.max_sample_rate),
+                    .min = std.math.clamp(sample_rate, main.min_sample_rate, main.max_sample_rate),
+                    .max = std.math.clamp(sample_rate, main.min_sample_rate, main.max_sample_rate),
                 },
             };
 
@@ -119,20 +117,11 @@ pub const Context = struct {
         }
     }
 
-    fn bufferSizeCallback(nframes: c.jack_nframes_t, arg: ?*anyopaque) callconv(.C) c_int {
-        var self = @ptrCast(*Context, @alignCast(@alignOf(*Context), arg.?));
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.period_size = nframes;
-        self.watcher.?.deviceChangeFn(self.watcher.?.userdata);
-        return 0;
-    }
-
     fn sampleRateCallback(nframes: c.jack_nframes_t, arg: ?*anyopaque) callconv(.C) c_int {
         var self = @ptrCast(*Context, @alignCast(@alignOf(*Context), arg.?));
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.sample_rate = nframes;
+        _ = nframes;
         self.watcher.?.deviceChangeFn(self.watcher.?.userdata);
         return 0;
     }
@@ -160,11 +149,128 @@ pub const Context = struct {
     }
 
     pub fn createPlayer(self: *Context, player: *main.Player) !void {
+        var ports = std.ArrayList(*c.jack_port_t).init(self.allocator);
+
+        for (player.device.channels) |_, i| {
+            const port_name = try std.fmt.allocPrintZ(self.allocator, "playback_{d}", .{i + 1});
+            defer self.allocator.free(port_name);
+
+            const port = c.jack_port_register(self.client, port_name.ptr, c.JACK_DEFAULT_AUDIO_TYPE, c.JackPortIsOutput, 0) orelse
+                return error.OpeningDevice;
+            try ports.append(port);
+        }
+
+        player.data = .{
+            .jack = .{
+                .allocator = self.allocator,
+                .mutex = .{},
+                .cond = .{},
+                .client = self.client,
+                .ports = ports.toOwnedSlice(),
+                .is_paused = .{ .value = false },
+                .vol = 1.0,
+            },
+        };
+    }
+};
+
+pub const Player = struct {
+    allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
+    client: *c.jack_client_t,
+    ports: []const *c.jack_port_t,
+    is_paused: std.atomic.Atomic(bool),
+    vol: f32,
+
+    pub fn deinit(self: *Player) void {
+        self.allocator.free(self.ports);
+    }
+
+    pub fn start(self: *Player) !void {
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
+        if (c.jack_set_process_callback(self.client, processCallback, self) != 0)
+            return error.CannotPlay;
+
+        if (c.jack_activate(self.client) != 0)
+            return error.CannotPlay;
+
+        for (self.ports) |port, i| {
+            const dest = try std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ parent.device.id, i + 1 });
+            defer self.allocator.free(dest);
+
+            if (c.jack_connect(self.client, c.jack_port_name(port), dest.ptr) != 0)
+                return error.CannotPlay;
+        }
+    }
+
+    fn processCallback(n_frames: c.jack_nframes_t, self_opaque: ?*anyopaque) callconv(.C) c_int {
+        const self = @ptrCast(*Player, @alignCast(@alignOf(*Player), self_opaque.?));
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*backends.BackendPlayer, self));
+        for (parent.device.channels) |*ch, i| {
+            ch.*.ptr = @ptrCast([*]u8, c.jack_port_get_buffer(self.ports[i], n_frames));
+        }
+        parent.writeFn(parent, n_frames);
+        return 0;
+    }
+
+    pub fn play(self: *Player) !void {
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.ports) |port, i| {
+            const dest = try std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ parent.device.id, i + 1 });
+            defer self.allocator.free(dest);
+
+            _ = c.jack_connect(self.client, c.jack_port_name(port), dest.ptr);
+        }
+    }
+
+    pub fn pause(self: *Player) !void {
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.ports) |port, i| {
+            const dest = try std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ parent.device.id, i + 1 });
+            defer self.allocator.free(dest);
+
+            _ = c.jack_disconnect(self.client, c.jack_port_name(port), dest.ptr);
+        }
+    }
+
+    pub fn paused(self: *Player) bool {
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.ports) |port, i| {
+            const dest = std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ parent.device.id, i + 1 }) catch unreachable; // TODO
+            defer self.allocator.free(dest);
+
+            if (c.jack_port_connected_to(port, dest.ptr) == 1)
+                return false;
+        }
+        return true;
+    }
+
+    pub fn setVolume(self: *Player, vol: f32) !void {
         _ = self;
-        _ = player;
+        _ = vol;
+        @compileError("incompatible backend");
+    }
+
+    pub fn volume(self: *Player) !f32 {
+        _ = self;
+        @compileError("incompatible backend");
+    }
+
+    pub fn writeRaw(self: *Player, channel: usize, frame: usize, sample: anytype) void {
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
+        var ptr = parent.device.channels[channel].ptr + parent.format.size() * frame;
+        std.mem.bytesAsValue(@TypeOf(sample), ptr[0..@sizeOf(@TypeOf(sample))]).* = sample;
     }
 };
 
 pub fn freeDevice(allocator: std.mem.Allocator, device: main.Device) void {
+    allocator.free(device.id);
     allocator.free(device.channels);
 }

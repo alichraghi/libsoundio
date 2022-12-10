@@ -348,7 +348,7 @@ pub const Player = struct {
 
     fn playbackStreamWriteOp(_: ?*c.pa_stream, nbytes: usize, userdata: ?*anyopaque) callconv(.C) void {
         var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*backends.BackendPlayer, self));
 
         var frames_left = nbytes;
         while (frames_left > 0) {
@@ -366,7 +366,7 @@ pub const Player = struct {
             }
 
             for (parent.device.channels) |*ch, i| {
-                ch.*.ptr = self.write_ptr + parent.format.size() * i;
+                ch.*.ptr = self.write_ptr + parent.format.frameSize(@intCast(u5, i));
             }
 
             const frames = chunk_size / parent.format.frameSize(@intCast(u5, parent.device.channels.len));
@@ -464,6 +464,12 @@ pub const Player = struct {
         }
 
         self.vol = @intToFloat(f32, info.*.volume.values[0]) / @intToFloat(f32, c.PA_VOLUME_NORM);
+    }
+
+    pub fn writeRaw(self: *Player, channel: usize, frame: usize, sample: anytype) void {
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
+        var ptr = parent.device.channels[channel].ptr + parent.frameSize() * frame;
+        std.mem.bytesAsValue(@TypeOf(sample), ptr[0..@sizeOf(@TypeOf(sample))]).* = sample;
     }
 };
 

@@ -6,44 +6,45 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var a = try sysaudio.Context.init(.jack, allocator, .{ .deviceChangeFn = deviceChange });
+    var a = try sysaudio.Context.init(.pulseaudio, allocator, .{ .deviceChangeFn = deviceChange });
     defer a.deinit();
     try a.refresh();
 
-    for (a.devices()) |d|
-        std.debug.print("{s}\n", .{d.id});
+    // for (a.devices()) |d|
+    //     std.debug.print("{any}\n", .{d.channels});
 
     const device = a.defaultDevice(.playback) orelse return error.NoDevice;
-    _ = device;
 
-    // var p = try a.createPlayer(device, writeCallback, .{});
-    // defer p.deinit();
-    // try p.start();
+    var p = try a.createPlayer(device, writeCallback, .{});
+    defer p.deinit();
+    try p.start();
 
     // try p.setVolume(0.85);
 
-    // var buf: [16]u8 = undefined;
-    // while (true) {
-    //     std.debug.print("> ", .{});
-    //     const line = (try std.io.getStdIn().reader().readUntilDelimiterOrEof(&buf, '\n')) orelse break;
-    //     var iter = std.mem.split(u8, line, ":");
-    //     const cmd = iter.first();
-    //     if (std.mem.eql(u8, cmd, "vol")) {
-    //         var vol = try std.fmt.parseFloat(f32, iter.next().?);
-    //         try p.setVolume(vol);
-    //     } else if (std.mem.eql(u8, cmd, "pause")) {
-    //         try p.pause();
-    //     } else if (std.mem.eql(u8, cmd, "play")) {
-    //         try p.play();
-    //     }
-    // }
+    var buf: [16]u8 = undefined;
+    while (true) {
+        std.debug.print("> ", .{});
+        const line = (try std.io.getStdIn().reader().readUntilDelimiterOrEof(&buf, '\n')) orelse break;
+        var iter = std.mem.split(u8, line, ":");
+        const cmd = iter.first();
+        if (std.mem.eql(u8, cmd, "vol")) {
+            // var vol = try std.fmt.parseFloat(f32, iter.next().?);
+            // try p.setVolume(vol);
+        } else if (std.mem.eql(u8, cmd, "pause")) {
+            try p.pause();
+            try std.testing.expect(p.paused());
+        } else if (std.mem.eql(u8, cmd, "play")) {
+            try p.play();
+            try std.testing.expect(!p.paused());
+        }
+    }
 }
 
 const pitch = 440.0;
 const radians_per_second = pitch * 2.0 * std.math.pi;
 var seconds_offset: f32 = 0.0;
-fn writeCallback(self_opaque: *const anyopaque, n_frame: usize) void {
-    var self = @ptrCast(*const sysaudio.Player, @alignCast(@alignOf(sysaudio.Player), self_opaque));
+fn writeCallback(self_opaque: *anyopaque, n_frame: usize) void {
+    var self = @ptrCast(*sysaudio.Player, @alignCast(@alignOf(sysaudio.Player), self_opaque));
 
     const seconds_per_frame = 1.0 / @intToFloat(f32, self.sample_rate);
     var frame: usize = 0;

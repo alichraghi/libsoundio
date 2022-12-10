@@ -473,8 +473,8 @@ pub const Player = struct {
         };
     }
 
-    fn writeLoop(self: *const Player) void {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
+    fn writeLoop(self: *Player) void {
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*backends.BackendPlayer, self));
 
         for (parent.device.channels) |*ch, i| {
             ch.*.ptr = self.sample_buffer.ptr + i * parent.format.size();
@@ -545,6 +545,12 @@ pub const Player = struct {
             return error.CannotGetVolume;
 
         return @intToFloat(f32, vol) / @intToFloat(f32, self.vol_range.max - self.vol_range.min);
+    }
+
+    pub fn writeRaw(self: *Player, channel: usize, frame: usize, sample: anytype) void {
+        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
+        var ptr = parent.device.channels[channel].ptr + parent.frameSize() * frame;
+        std.mem.bytesAsValue(@TypeOf(sample), ptr[0..@sizeOf(@TypeOf(sample))]).* = sample;
     }
 };
 
