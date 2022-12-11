@@ -46,7 +46,7 @@ var seconds_offset: f32 = 0.0;
 fn writeCallback(self_opaque: *anyopaque, n_frame: usize) void {
     var self = @ptrCast(*sysaudio.Player, @alignCast(@alignOf(sysaudio.Player), self_opaque));
 
-    const seconds_per_frame = 1.0 / @intToFloat(f32, self.sample_rate);
+    const seconds_per_frame = 1.0 / @intToFloat(f32, self.sampleRate());
     var frame: usize = 0;
     while (frame < n_frame) : (frame += 1) {
         const sample = std.math.sin((seconds_offset + @intToFloat(f32, frame) * seconds_per_frame) * radians_per_second);

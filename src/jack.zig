@@ -7,15 +7,12 @@ const util = @import("util.zig");
 pub const Context = struct {
     allocator: std.mem.Allocator,
     devices_info: util.DevicesInfo,
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
     client: *c.jack_client_t,
     watcher: ?DeviceWatcher,
 
     const DeviceWatcher = struct {
         deviceChangeFn: main.DeviceChangeFn,
         userdata: ?*anyopaque,
-        aborted: std.atomic.Atomic(bool),
     };
 
     pub fn init(allocator: std.mem.Allocator, options: main.Context.Options) !backends.BackendContext {
@@ -28,8 +25,6 @@ pub const Context = struct {
         self.* = .{
             .allocator = allocator,
             .devices_info = util.DevicesInfo.init(),
-            .mutex = std.Thread.Mutex{},
-            .cond = std.Thread.Condition{},
             .client = c.jack_client_open(options.app_name.ptr, c.JackNoStartServer, &status) orelse {
                 std.debug.assert(status & c.JackInvalidOption == 0);
                 return if (status & c.JackShmFailure != 0)
@@ -40,7 +35,6 @@ pub const Context = struct {
             .watcher = if (options.deviceChangeFn) |deviceChangeFn| .{
                 .deviceChangeFn = deviceChangeFn,
                 .userdata = options.userdata,
-                .aborted = .{ .value = false },
             } else null,
         };
 
@@ -70,7 +64,7 @@ pub const Context = struct {
             return error.OutOfMemory;
         defer c.jack_free(@ptrCast(?*anyopaque, port_names));
 
-        const sample_rate = c.jack_get_sample_rate(self.client);
+        const sample_rate = @intCast(u24, c.jack_get_sample_rate(self.client));
 
         var i: usize = 0;
         outer: while (port_names[i] != null) : (i += 1) {
@@ -118,25 +112,19 @@ pub const Context = struct {
     }
 
     fn sampleRateCallback(nframes: c.jack_nframes_t, arg: ?*anyopaque) callconv(.C) c_int {
-        var self = @ptrCast(*Context, @alignCast(@alignOf(*Context), arg.?));
-        self.mutex.lock();
-        defer self.mutex.unlock();
         _ = nframes;
+        var self = @ptrCast(*Context, @alignCast(@alignOf(*Context), arg.?));
         self.watcher.?.deviceChangeFn(self.watcher.?.userdata);
         return 0;
     }
 
     fn portRegistrationCallback(_: c.jack_port_id_t, _: c_int, arg: ?*anyopaque) callconv(.C) void {
         var self = @ptrCast(*Context, @alignCast(@alignOf(*Context), arg.?));
-        self.mutex.lock();
-        defer self.mutex.unlock();
         self.watcher.?.deviceChangeFn(self.watcher.?.userdata);
     }
 
     fn portRenameCalllback(_: c.jack_port_id_t, _: [*c]const u8, _: [*c]const u8, arg: ?*anyopaque) callconv(.C) void {
         var self = @ptrCast(*Context, @alignCast(@alignOf(*Context), arg.?));
-        self.mutex.lock();
-        defer self.mutex.unlock();
         self.watcher.?.deviceChangeFn(self.watcher.?.userdata);
     }
 
@@ -148,10 +136,15 @@ pub const Context = struct {
         return self.devices_info.default(mode);
     }
 
-    pub fn createPlayer(self: *Context, player: *main.Player) !void {
-        var ports = std.ArrayList(*c.jack_port_t).init(self.allocator);
+    pub fn createPlayer(self: *Context, device: main.Device, writeFn: main.WriteFn, options: main.Player.Options) !backends.BackendPlayer {
+        if (options.format) |format| {
+            if (format != .f32) {
+                return error.IncompatibleDevice;
+            }
+        }
 
-        for (player.device.channels) |_, i| {
+        var ports = std.ArrayList(*c.jack_port_t).init(self.allocator);
+        for (device.channels) |_, i| {
             const port_name = try std.fmt.allocPrintZ(self.allocator, "playback_{d}", .{i + 1});
             defer self.allocator.free(port_name);
 
@@ -160,15 +153,15 @@ pub const Context = struct {
             try ports.append(port);
         }
 
-        player.data = .{
+        return .{
             .jack = .{
                 .allocator = self.allocator,
                 .mutex = .{},
                 .cond = .{},
+                .writeFn = writeFn,
+                .device = device,
                 .client = self.client,
                 .ports = ports.toOwnedSlice(),
-                .is_paused = .{ .value = false },
-                .vol = 1.0,
             },
         };
     }
@@ -178,17 +171,16 @@ pub const Player = struct {
     allocator: std.mem.Allocator,
     mutex: std.Thread.Mutex,
     cond: std.Thread.Condition,
+    writeFn: main.WriteFn,
+    device: main.Device,
     client: *c.jack_client_t,
     ports: []const *c.jack_port_t,
-    is_paused: std.atomic.Atomic(bool),
-    vol: f32,
 
     pub fn deinit(self: *Player) void {
         self.allocator.free(self.ports);
     }
 
     pub fn start(self: *Player) !void {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
         if (c.jack_set_process_callback(self.client, processCallback, self) != 0)
             return error.CannotPlay;
 
@@ -196,7 +188,7 @@ pub const Player = struct {
             return error.CannotPlay;
 
         for (self.ports) |port, i| {
-            const dest = try std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ parent.device.id, i + 1 });
+            const dest = try std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ self.device.id, i + 1 });
             defer self.allocator.free(dest);
 
             if (c.jack_connect(self.client, c.jack_port_name(port), dest.ptr) != 0)
@@ -207,19 +199,18 @@ pub const Player = struct {
     fn processCallback(n_frames: c.jack_nframes_t, self_opaque: ?*anyopaque) callconv(.C) c_int {
         const self = @ptrCast(*Player, @alignCast(@alignOf(*Player), self_opaque.?));
         var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*backends.BackendPlayer, self));
-        for (parent.device.channels) |*ch, i| {
+        for (self.channels()) |*ch, i| {
             ch.*.ptr = @ptrCast([*]u8, c.jack_port_get_buffer(self.ports[i], n_frames));
         }
-        parent.writeFn(parent, n_frames);
+        self.writeFn(parent, n_frames);
         return 0;
     }
 
     pub fn play(self: *Player) !void {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
         self.mutex.lock();
         defer self.mutex.unlock();
         for (self.ports) |port, i| {
-            const dest = try std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ parent.device.id, i + 1 });
+            const dest = try std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ self.device.id, i + 1 });
             defer self.allocator.free(dest);
 
             _ = c.jack_connect(self.client, c.jack_port_name(port), dest.ptr);
@@ -227,11 +218,10 @@ pub const Player = struct {
     }
 
     pub fn pause(self: *Player) !void {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
         self.mutex.lock();
         defer self.mutex.unlock();
         for (self.ports) |port, i| {
-            const dest = try std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ parent.device.id, i + 1 });
+            const dest = try std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ self.device.id, i + 1 });
             defer self.allocator.free(dest);
 
             _ = c.jack_disconnect(self.client, c.jack_port_name(port), dest.ptr);
@@ -239,11 +229,10 @@ pub const Player = struct {
     }
 
     pub fn paused(self: *Player) bool {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
         self.mutex.lock();
         defer self.mutex.unlock();
         for (self.ports) |port, i| {
-            const dest = std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ parent.device.id, i + 1 }) catch unreachable; // TODO
+            const dest = std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ self.device.id, i + 1 }) catch unreachable; // TODO
             defer self.allocator.free(dest);
 
             if (c.jack_port_connected_to(port, dest.ptr) == 1)
@@ -255,18 +244,30 @@ pub const Player = struct {
     pub fn setVolume(self: *Player, vol: f32) !void {
         _ = self;
         _ = vol;
-        @compileError("incompatible backend");
+        @panic("incompatible backend");
     }
 
     pub fn volume(self: *Player) !f32 {
         _ = self;
-        @compileError("incompatible backend");
+        @panic("incompatible backend");
     }
 
-    pub fn writeRaw(self: *Player, channel: usize, frame: usize, sample: anytype) void {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
-        var ptr = parent.device.channels[channel].ptr + parent.format.size() * frame;
+    pub fn writeRaw(self: *Player, channel: main.Channel, frame: usize, sample: anytype) void {
+        var ptr = channel.ptr + frame * self.format().size();
         std.mem.bytesAsValue(@TypeOf(sample), ptr[0..@sizeOf(@TypeOf(sample))]).* = sample;
+    }
+
+    pub fn channels(self: Player) []main.Channel {
+        return self.device.channels;
+    }
+
+    pub fn format(self: Player) main.Format {
+        _ = self;
+        return .f32;
+    }
+
+    pub fn sampleRate(self: Player) u24 {
+        return @intCast(u24, c.jack_get_sample_rate(self.client));
     }
 };
 

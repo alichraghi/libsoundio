@@ -76,14 +76,18 @@ pub const Context = struct {
         return self.devices_info.default(mode);
     }
 
-    pub fn createPlayer(self: *Context, player: *main.Player) !void {
-        player.data = .{
+    pub fn createPlayer(self: *Context, device: main.Device, writeFn: main.WriteFn, options: main.Player.Options) !backends.BackendPlayer {
+        return .{
             .dummy = .{
                 .allocator = self.allocator,
                 .mutex = .{},
                 .cond = .{},
+                .device = device,
+                .writeFn = writeFn,
                 .aborted = .{ .value = false },
                 .is_paused = .{ .value = false },
+                .sample_rate = options.sample_rate,
+                ._format = options.format orelse .f32,
                 .vol = 1.0,
                 .thread = undefined,
             },
@@ -96,8 +100,12 @@ pub const Player = struct {
     thread: std.Thread,
     mutex: std.Thread.Mutex,
     cond: std.Thread.Condition,
+    writeFn: main.WriteFn,
     aborted: std.atomic.Atomic(bool),
     is_paused: std.atomic.Atomic(bool),
+    device: main.Device,
+    sample_rate: u24,
+    _format: main.Format,
     vol: f32,
 
     pub fn deinit(self: *Player) void {
@@ -121,10 +129,10 @@ pub const Player = struct {
         var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*backends.BackendPlayer, self));
 
         const buf_size = @as(u11, 1024);
-        const bps = buf_size / parent.format.size();
+        const bps = buf_size / self.format().size();
         var buf: [1024]u8 = undefined;
 
-        parent.device.channels[0].ptr = &buf;
+        self.channels()[0].ptr = &buf;
 
         while (!self.aborted.load(.Unordered)) {
             self.mutex.lock();
@@ -132,7 +140,7 @@ pub const Player = struct {
             self.cond.timedWait(&self.mutex, main.default_latency * std.time.ns_per_us) catch {};
             if (self.is_paused.load(.Unordered))
                 continue;
-            parent.writeFn(parent, bps);
+            self.writeFn(parent, bps);
         }
     }
 
@@ -163,11 +171,23 @@ pub const Player = struct {
         return self.vol;
     }
 
-    pub fn writeRaw(self: *Player, channel: usize, frame: usize, sample: anytype) void {
+    pub fn writeRaw(self: *Player, channel: main.Channel, frame: usize, sample: anytype) void {
         _ = self;
         _ = channel;
         _ = frame;
         _ = sample;
+    }
+
+    pub fn channels(self: Player) []main.Channel {
+        return self.device.channels;
+    }
+
+    pub fn format(self: Player) main.Format {
+        return self._format;
+    }
+
+    pub fn sampleRate(self: Player) u24 {
+        return self.sample_rate;
     }
 };
 

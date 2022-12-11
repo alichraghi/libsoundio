@@ -309,8 +309,8 @@ pub const Context = struct {
                         if (c.snd_pcm_hw_params_get_rate_max(params, &rate_max, null) < 0)
                             continue;
                         break :blk .{
-                            .min = rate_min,
-                            .max = rate_max,
+                            .min = @intCast(u24, rate_min),
+                            .max = @intCast(u24, rate_max),
                         };
                     },
                     .id = try self.allocator.dupeZ(u8, id),
@@ -337,8 +337,8 @@ pub const Context = struct {
         return self.devices_info.default(mode);
     }
 
-    pub fn createPlayer(self: Context, player: *main.Player) !void {
-        const format = toAlsaFormat(player.format) catch unreachable;
+    pub fn createPlayer(self: Context, device: main.Device, writeFn: main.WriteFn, options: main.Player.Options) !backends.BackendPlayer {
+        const format = options.format orelse .f32;
         var pcm: ?*c.snd_pcm_t = null;
         var mixer: ?*c.snd_mixer_t = null;
         var selem: ?*c.snd_mixer_selem_id_t = null;
@@ -347,7 +347,7 @@ pub const Context = struct {
         var vol_min: c_long = 0;
         var vol_max: c_long = 0;
 
-        if (c.snd_pcm_open(&pcm, player.device.id.ptr, modeToStream(player.device.mode), 0) < 0)
+        if (c.snd_pcm_open(&pcm, device.id.ptr, modeToStream(device.mode), 0) < 0)
             return error.OpeningDevice;
         errdefer _ = c.snd_pcm_close(pcm);
 
@@ -356,10 +356,10 @@ pub const Context = struct {
 
             if ((c.snd_pcm_set_params(
                 pcm,
-                format,
+                toAlsaFormat(format) catch unreachable,
                 c.SND_PCM_ACCESS_RW_INTERLEAVED,
-                @intCast(c_uint, player.device.channels.len),
-                player.sample_rate,
+                @intCast(c_uint, device.channels.len),
+                options.sample_rate,
                 1,
                 main.default_latency,
             )) < 0)
@@ -378,9 +378,9 @@ pub const Context = struct {
         }
 
         {
-            var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(c_uint, player.device.channels.len) };
+            var chmap: c.snd_pcm_chmap_t = .{ .channels = @intCast(c_uint, device.channels.len) };
 
-            for (player.device.channels) |ch, i|
+            for (device.channels) |ch, i|
                 chmap.pos()[i] = toCHMAP(ch.id);
 
             if (c.snd_pcm_set_chmap(pcm, &chmap) < 0)
@@ -391,7 +391,7 @@ pub const Context = struct {
             if (c.snd_mixer_open(&mixer, 0) < 0)
                 return error.OutOfMemory;
 
-            const card_id = try self.allocator.dupeZ(u8, std.mem.sliceTo(player.device.id, ','));
+            const card_id = try self.allocator.dupeZ(u8, std.mem.sliceTo(device.id, ','));
             defer self.allocator.free(card_id);
 
             if (c.snd_mixer_attach(mixer, card_id.ptr) < 0)
@@ -416,16 +416,20 @@ pub const Context = struct {
                 return error.OpeningDevice;
         }
 
-        player.data = .{
+        return .{
             .alsa = .{
                 .allocator = self.allocator,
                 .mutex = .{},
                 .sample_buffer = try self.allocator.alloc(
                     u8,
-                    period_size * player.frameSize(),
+                    period_size * format.frameSize(@intCast(u5, device.channels.len)),
                 ),
+                .writeFn = writeFn,
                 .aborted = .{ .value = false },
                 .vol_range = .{ .min = vol_min, .max = vol_max },
+                ._channels = device.channels,
+                ._format = format,
+                .sample_rate = device.sample_rate.clamp(options.sample_rate),
                 .pcm = pcm.?,
                 .mixer = mixer.?,
                 .selem = selem.?,
@@ -442,7 +446,11 @@ pub const Player = struct {
     thread: std.Thread,
     mutex: std.Thread.Mutex,
     aborted: std.atomic.Atomic(bool),
+    writeFn: main.WriteFn,
+    _channels: []main.Channel,
     sample_buffer: []u8,
+    _format: main.Format,
+    sample_rate: u24,
     pcm: *c.snd_pcm_t,
     mixer: *c.snd_mixer_t,
     selem: *c.snd_mixer_selem_id_t,
@@ -476,14 +484,14 @@ pub const Player = struct {
     fn writeLoop(self: *Player) void {
         var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*backends.BackendPlayer, self));
 
-        for (parent.device.channels) |*ch, i| {
-            ch.*.ptr = self.sample_buffer.ptr + i * parent.format.size();
+        for (self.channels()) |*ch, i| {
+            ch.*.ptr = self.sample_buffer.ptr + self.format().frameSize(@intCast(u5, i));
         }
 
         while (!self.aborted.load(.Unordered)) {
             var frames_left = self.period_size;
             while (frames_left > 0) {
-                parent.writeFn(parent, frames_left);
+                self.writeFn(parent, frames_left);
                 const n = c.snd_pcm_writei(self.pcm, self.sample_buffer.ptr, frames_left);
                 if (n < 0) {
                     if (c.snd_pcm_recover(self.pcm, @intCast(c_int, n), 1) < 0) {
@@ -547,10 +555,21 @@ pub const Player = struct {
         return @intToFloat(f32, vol) / @intToFloat(f32, self.vol_range.max - self.vol_range.min);
     }
 
-    pub fn writeRaw(self: *Player, channel: usize, frame: usize, sample: anytype) void {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
-        var ptr = parent.device.channels[channel].ptr + parent.frameSize() * frame;
+    pub fn writeRaw(self: *Player, channel: main.Channel, frame: usize, sample: anytype) void {
+        var ptr = channel.ptr + frame * self.format().frameSize(@intCast(u5, self.channels().len));
         std.mem.bytesAsValue(@TypeOf(sample), ptr[0..@sizeOf(@TypeOf(sample))]).* = sample;
+    }
+
+    pub fn channels(self: Player) []main.Channel {
+        return self._channels;
+    }
+
+    pub fn format(self: Player) main.Format {
+        return self._format;
+    }
+
+    pub fn sampleRate(self: Player) u24 {
+        return self.sample_rate;
     }
 };
 

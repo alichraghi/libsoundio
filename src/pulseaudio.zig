@@ -211,8 +211,8 @@ pub const Context = struct {
             },
             .formats = available_formats,
             .sample_rate = .{
-                .min = info.*.sample_spec.rate,
-                .max = info.*.sample_spec.rate,
+                .min = @intCast(u24, info.*.sample_spec.rate),
+                .max = @intCast(u24, info.*.sample_spec.rate),
             },
             .id = id,
             .name = name,
@@ -229,36 +229,35 @@ pub const Context = struct {
         return self.devices_info.default(mode);
     }
 
-    pub fn createPlayer(self: *Context, player: *main.Player) !void {
+    pub fn createPlayer(self: *Context, device: main.Device, writeFn: main.WriteFn, options: main.Player.Options) !backends.BackendPlayer {
         c.pa_threaded_mainloop_lock(self.main_loop);
         defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
+        const format = options.format orelse .f32;
+        const sample_rate = device.sample_rate.clamp(options.sample_rate);
+
         const sample_spec = c.pa_sample_spec{
-            .format = toPAFormat(player.format) catch unreachable,
-            .rate = player.sample_rate,
-            .channels = @intCast(u5, player.device.channels.len),
+            .format = toPAFormat(format) catch unreachable, // TODO
+            .rate = sample_rate,
+            .channels = @intCast(u5, device.channels.len),
         };
 
-        const channel_map = try toPAChannelMap(player.device.channels);
+        const channel_map = try toPAChannelMap(device.channels);
 
         var stream = c.pa_stream_new(self.ctx, self.app_name.ptr, &sample_spec, &channel_map);
         if (stream == null)
             return error.OutOfMemory;
         errdefer c.pa_stream_unref(stream);
 
-        player.data = .{
-            .pulseaudio = .{
-                .main_loop = self.main_loop,
-                .ctx = self.ctx,
-                .stream = stream.?,
-                .status = .{ .value = .unknown },
-                .write_ptr = undefined,
-                .vol = 1.0,
+        var status: struct {
+            main_loop: *c.pa_threaded_mainloop,
+            status: enum(u8) {
+                unknown,
+                ready,
+                failure,
             },
-        };
-        var bd = &player.data.pulseaudio;
-
-        c.pa_stream_set_state_callback(bd.stream, streamStateOp, bd);
+        } = .{ .main_loop = self.main_loop, .status = .unknown };
+        c.pa_stream_set_state_callback(stream, streamStateOp, &status);
 
         const buf_attr = c.pa_buffer_attr{
             .maxlength = std.math.maxInt(u32),
@@ -274,22 +273,50 @@ pub const Context = struct {
             c.PA_STREAM_INTERPOLATE_TIMING |
             c.PA_STREAM_ADJUST_LATENCY;
 
-        if (c.pa_stream_connect_playback(bd.stream, player.device.id.ptr, &buf_attr, flags, null, null) != 0) {
+        if (c.pa_stream_connect_playback(stream, device.id.ptr, &buf_attr, flags, null, null) != 0) {
             return error.OpeningDevice;
         }
-        errdefer _ = c.pa_stream_disconnect(bd.stream);
+        errdefer _ = c.pa_stream_disconnect(stream);
 
         while (true) {
-            switch (bd.status.load(.Unordered)) {
-                .unknown => c.pa_threaded_mainloop_wait(bd.main_loop),
+            switch (status.status) {
+                .unknown => c.pa_threaded_mainloop_wait(self.main_loop),
                 .ready => break,
                 .failure => return error.OpeningDevice,
             }
         }
+
+        return .{
+            .pulseaudio = .{
+                .main_loop = self.main_loop,
+                .ctx = self.ctx,
+                .writeFn = writeFn,
+                .stream = stream.?,
+                .write_ptr = undefined,
+                .vol = 1.0,
+                ._format = format,
+                .sample_rate = sample_rate,
+                ._channels = device.channels,
+            },
+        };
     }
 
     fn streamStateOp(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
-        var self = @ptrCast(*Player, @alignCast(@alignOf(*Player), userdata.?));
+        var self = @ptrCast(*struct {
+            main_loop: *c.pa_threaded_mainloop,
+            status: enum(u8) {
+                unknown,
+                ready,
+                failure,
+            },
+        }, @alignCast(@alignOf(*struct {
+            main_loop: *c.pa_threaded_mainloop,
+            status: enum(u8) {
+                unknown,
+                ready,
+                failure,
+            },
+        }), userdata.?));
 
         switch (c.pa_stream_get_state(stream)) {
             c.PA_STREAM_UNCONNECTED,
@@ -297,11 +324,11 @@ pub const Context = struct {
             c.PA_STREAM_TERMINATED,
             => {},
             c.PA_STREAM_READY => {
-                self.status.store(.ready, .Unordered);
+                self.status = .ready;
                 c.pa_threaded_mainloop_signal(self.main_loop, 0);
             },
             c.PA_STREAM_FAILED => {
-                self.status.store(.failure, .Unordered);
+                self.status = .failure;
                 c.pa_threaded_mainloop_signal(self.main_loop, 0);
             },
             else => unreachable,
@@ -313,15 +340,12 @@ pub const Player = struct {
     main_loop: *c.pa_threaded_mainloop,
     ctx: *c.pa_context,
     stream: *c.pa_stream,
-    status: std.atomic.Atomic(StreamStatus),
+    writeFn: main.WriteFn,
+    _channels: []main.Channel,
+    _format: main.Format,
+    sample_rate: u24,
     write_ptr: [*]u8,
     vol: f32,
-
-    const StreamStatus = enum(u8) {
-        unknown,
-        ready,
-        failure,
-    };
 
     pub fn deinit(self: *Player) void {
         c.pa_threaded_mainloop_lock(self.main_loop);
@@ -365,12 +389,12 @@ pub const Player = struct {
                 return;
             }
 
-            for (parent.device.channels) |*ch, i| {
-                ch.*.ptr = self.write_ptr + parent.format.frameSize(@intCast(u5, i));
+            for (self.channels()) |*ch, i| {
+                ch.*.ptr = self.write_ptr + self.format().frameSize(@intCast(u5, i));
             }
 
-            const frames = chunk_size / parent.format.frameSize(@intCast(u5, parent.device.channels.len));
-            parent.writeFn(parent, frames);
+            const frames = chunk_size / self.format().frameSize(@intCast(u5, self.channels().len));
+            self.writeFn(parent, frames);
 
             if (c.pa_stream_write(self.stream, self.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0) {
                 if (std.debug.runtime_safety) unreachable;
@@ -411,14 +435,12 @@ pub const Player = struct {
     }
 
     pub fn setVolume(self: *Player, vol: f32) !void {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
-
         c.pa_threaded_mainloop_lock(self.main_loop);
         defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
         var cvolume: c.pa_cvolume = undefined;
         _ = c.pa_cvolume_init(&cvolume);
-        _ = c.pa_cvolume_set(&cvolume, @intCast(c_uint, parent.device.channels.len), c.pa_sw_volume_from_linear(vol));
+        _ = c.pa_cvolume_set(&cvolume, @intCast(c_uint, self.channels().len), c.pa_sw_volume_from_linear(vol));
 
         performOperation(
             self.main_loop,
@@ -466,10 +488,21 @@ pub const Player = struct {
         self.vol = @intToFloat(f32, info.*.volume.values[0]) / @intToFloat(f32, c.PA_VOLUME_NORM);
     }
 
-    pub fn writeRaw(self: *Player, channel: usize, frame: usize, sample: anytype) void {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*const backends.BackendPlayer, self));
-        var ptr = parent.device.channels[channel].ptr + parent.frameSize() * frame;
+    pub fn writeRaw(self: *Player, channel: main.Channel, frame: usize, sample: anytype) void {
+        var ptr = channel.ptr + self.format().frameSize(@intCast(u5, self.channels().len)) * frame;
         std.mem.bytesAsValue(@TypeOf(sample), ptr[0..@sizeOf(@TypeOf(sample))]).* = sample;
+    }
+
+    pub fn channels(self: Player) []main.Channel {
+        return self._channels;
+    }
+
+    pub fn format(self: Player) main.Format {
+        return self._format;
+    }
+
+    pub fn sampleRate(self: Player) u24 {
+        return self.sample_rate;
     }
 };
 
