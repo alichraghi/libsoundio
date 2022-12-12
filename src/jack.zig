@@ -60,11 +60,11 @@ pub const Context = struct {
             freeDevice(self.allocator, d);
         self.devices_info.clear(self.allocator);
 
+        const sample_rate = @intCast(u24, c.jack_get_sample_rate(self.client));
+
         const port_names = c.jack_get_ports(self.client, null, null, 0) orelse
             return error.OutOfMemory;
         defer c.jack_free(@ptrCast(?*anyopaque, port_names));
-
-        const sample_rate = @intCast(u24, c.jack_get_sample_rate(self.client));
 
         var i: usize = 0;
         outer: while (port_names[i] != null) : (i += 1) {

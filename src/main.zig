@@ -351,7 +351,7 @@ pub const Player = struct {
     }
 
     pub fn frameSize(self: Player) u8 {
-        return self.format().frameSize(@intCast(u5, self.channels().len));
+        return self.format().frameSize(self.channels().len);
     }
 };
 
@@ -436,8 +436,8 @@ pub const Format = enum {
         };
     }
 
-    pub fn frameSize(self: Format, ch_count: u5) u8 {
-        return self.size() * ch_count;
+    pub fn frameSize(self: Format, ch_count: usize) u8 {
+        return self.size() * @intCast(u5, ch_count);
     }
 };
 

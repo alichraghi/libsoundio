@@ -196,9 +196,9 @@ pub const Context = struct {
             const card_id = std.fmt.bufPrintZ(&card_id_buf, "hw:{d}", .{card_idx}) catch break;
 
             var ctl: ?*c.snd_ctl_t = undefined;
-            _ = switch (c.snd_ctl_open(&ctl, card_id.ptr, 0)) {
+            _ = switch (-c.snd_ctl_open(&ctl, card_id.ptr, 0)) {
                 0 => {},
-                -@intCast(i16, @enumToInt(std.os.E.NOENT)) => break,
+                @enumToInt(std.os.E.NOENT) => break,
                 else => return error.OpeningDevice,
             };
             defer _ = c.snd_ctl_close(ctl);
@@ -420,7 +420,7 @@ pub const Context = struct {
                 .sample_rate = sample_rate,
                 .writeFn = writeFn,
                 .aborted = .{ .value = false },
-                .sample_buffer = try self.allocator.alloc(u8, period_size * format.frameSize(@intCast(u5, device.channels.len))),
+                .sample_buffer = try self.allocator.alloc(u8, period_size * format.frameSize(device.channels.len)),
                 .period_size = period_size,
                 .pcm = pcm.?,
                 .mixer = mixer.?,
@@ -474,7 +474,7 @@ pub const Player = struct {
         var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*backends.BackendPlayer, self));
 
         for (self.channels()) |*ch, i| {
-            ch.*.ptr = self.sample_buffer.ptr + self.format().frameSize(@intCast(u5, i));
+            ch.*.ptr = self.sample_buffer.ptr + self.format().frameSize(i);
         }
 
         while (!self.aborted.load(.Unordered)) {
@@ -555,7 +555,7 @@ pub const Player = struct {
     }
 
     pub fn writeRaw(self: *Player, channel: main.Channel, frame: usize, sample: anytype) void {
-        var ptr = channel.ptr + frame * self.format().frameSize(@intCast(u5, self.channels().len));
+        var ptr = channel.ptr + frame * self.format().frameSize(self.channels().len);
         std.mem.bytesAsValue(@TypeOf(sample), ptr[0..@sizeOf(@TypeOf(sample))]).* = sample;
     }
 

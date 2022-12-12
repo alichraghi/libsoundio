@@ -372,10 +372,10 @@ pub const Player = struct {
             }
 
             for (self.channels()) |*ch, i| {
-                ch.*.ptr = self.write_ptr + self.format().frameSize(@intCast(u5, i));
+                ch.*.ptr = self.write_ptr + self.format().frameSize(i);
             }
 
-            const frames = chunk_size / self.format().frameSize(@intCast(u5, self.channels().len));
+            const frames = chunk_size / self.format().frameSize(self.channels().len);
             self.writeFn(parent, frames);
 
             if (c.pa_stream_write(self.stream, self.write_ptr, chunk_size, null, 0, c.PA_SEEK_RELATIVE) != 0) {
@@ -471,7 +471,7 @@ pub const Player = struct {
     }
 
     pub fn writeRaw(self: *Player, channel: main.Channel, frame: usize, sample: anytype) void {
-        var ptr = channel.ptr + self.format().frameSize(@intCast(u5, self.channels().len)) * frame;
+        var ptr = channel.ptr + self.format().frameSize(self.channels().len) * frame;
         std.mem.bytesAsValue(@TypeOf(sample), ptr[0..@sizeOf(@TypeOf(sample))]).* = sample;
     }
 
