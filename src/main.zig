@@ -3,9 +3,6 @@ const std = @import("std");
 const util = @import("util.zig");
 const backends = @import("backends.zig");
 
-pub const max_channels = 32;
-pub const min_sample_rate = 8_000; // Hz
-pub const max_sample_rate = 5_644_800; // Hz
 pub const default_sample_rate = 44_100; // Hz
 pub const default_latency = 500 * std.time.us_per_ms; // μs
 
@@ -106,7 +103,7 @@ pub const WriteFn = *const fn (self: *anyopaque, frame_count_max: usize) void;
 
 pub const Player = struct {
     pub const Options = struct {
-        format: ?Format = null,
+        format: Format = .f32,
         sample_rate: u24 = default_sample_rate,
         userdata: ?*anyopaque = null,
     };
@@ -371,10 +368,12 @@ pub const Device = struct {
         capture,
     };
 
-    pub fn preferredFormat(self: Device, format: Format) Format {
-        for (self.formats) |fmt| {
-            if (format == fmt) {
-                return fmt;
+    pub fn preferredFormat(self: Device, format: ?Format) Format {
+        if (format) |f| {
+            for (self.formats) |fmt| {
+                if (f == fmt) {
+                    return fmt;
+                }
             }
         }
 

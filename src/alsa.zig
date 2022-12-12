@@ -9,9 +9,9 @@ const is_little = @import("builtin").cpu.arch.endian() == .Little;
 pub const Context = struct {
     allocator: std.mem.Allocator,
     devices_info: util.DevicesInfo,
-    watcher: ?DeviceWatcher,
+    watcher: ?Watcher,
 
-    const DeviceWatcher = struct {
+    const Watcher = struct {
         deviceChangeFn: main.DeviceChangeFn,
         userdata: ?*anyopaque,
         thread: std.Thread,
@@ -72,6 +72,10 @@ pub const Context = struct {
                     break :blk .{
                         .deviceChangeFn = deviceChangeFn,
                         .userdata = options.userdata,
+                        .aborted = .{ .value = false },
+                        .notify_fd = notify_fd,
+                        .notify_wd = notify_wd,
+                        .notify_pipe_fd = notify_pipe_fd,
                         .thread = std.Thread.spawn(.{}, deviceEventsLoop, .{self}) catch |err| switch (err) {
                             error.ThreadQuotaExceeded,
                             error.SystemResources,
@@ -80,10 +84,6 @@ pub const Context = struct {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.Unexpected => unreachable,
                         },
-                        .aborted = .{ .value = false },
-                        .notify_fd = notify_fd,
-                        .notify_wd = notify_wd,
-                        .notify_pipe_fd = notify_pipe_fd,
                     };
                 }
 
@@ -95,15 +95,15 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
-        if (self.watcher) |*dw| {
-            dw.aborted.store(true, .Unordered);
-            _ = std.os.write(dw.notify_pipe_fd[1], "a") catch {};
-            dw.thread.join();
+        if (self.watcher) |*watcher| {
+            watcher.aborted.store(true, .Unordered);
+            _ = std.os.write(watcher.notify_pipe_fd[1], "a") catch {};
+            watcher.thread.join();
 
-            std.os.close(dw.notify_pipe_fd[0]);
-            std.os.close(dw.notify_pipe_fd[1]);
-            std.os.inotify_rm_watch(dw.notify_fd, dw.notify_wd);
-            std.os.close(dw.notify_fd);
+            std.os.close(watcher.notify_pipe_fd[0]);
+            std.os.close(watcher.notify_pipe_fd[1]);
+            std.os.inotify_rm_watch(watcher.notify_fd, watcher.notify_wd);
+            std.os.close(watcher.notify_fd);
         }
 
         for (self.devices_info.list.items) |d|
@@ -113,23 +113,24 @@ pub const Context = struct {
     }
 
     fn deviceEventsLoop(self: *Context) void {
+        var watcher = self.watcher.?;
         var scan = false;
         var last_crash: ?i64 = null;
         var buf: [2048]u8 = undefined;
         var fds = [2]std.os.pollfd{
             .{
-                .fd = self.watcher.?.notify_fd,
+                .fd = watcher.notify_fd,
                 .events = std.os.POLL.IN,
                 .revents = 0,
             },
             .{
-                .fd = self.watcher.?.notify_pipe_fd[0],
+                .fd = watcher.notify_pipe_fd[0],
                 .events = std.os.POLL.IN,
                 .revents = 0,
             },
         };
 
-        while (!self.watcher.?.aborted.load(.Unordered)) {
+        while (!watcher.aborted.load(.Unordered)) {
             _ = std.os.poll(&fds, -1) catch |err| switch (err) {
                 error.NetworkSubsystemFailed,
                 error.SystemResources,
@@ -143,9 +144,9 @@ pub const Context = struct {
                 },
                 error.Unexpected => unreachable,
             };
-            if (self.watcher.?.notify_fd & std.os.POLL.IN != 0) {
+            if (watcher.notify_fd & std.os.POLL.IN != 0) {
                 while (true) {
-                    const len = std.os.read(self.watcher.?.notify_fd, &buf) catch |err| {
+                    const len = std.os.read(watcher.notify_fd, &buf) catch |err| {
                         if (err == error.WouldBlock) break;
                         const ts = std.time.milliTimestamp();
                         if (last_crash) |lc| {
@@ -171,7 +172,7 @@ pub const Context = struct {
             }
 
             if (scan) {
-                self.watcher.?.deviceChangeFn(self.watcher.?.userdata);
+                watcher.deviceChangeFn(self.watcher.?.userdata);
                 scan = false;
             }
         }
@@ -249,12 +250,9 @@ pub const Context = struct {
 
                             if (chmap[0] == null) continue;
 
-                            const n_ch = chmap[0][0].map.channels;
-                            if (n_ch <= 0 or n_ch > main.max_channels) continue;
-
-                            var channels = try self.allocator.alloc(main.Channel, n_ch);
+                            var channels = try self.allocator.alloc(main.Channel, chmap.*.*.map.channels);
                             for (channels) |*ch, i|
-                                ch.*.id = fromAlsaChannel(chmap[0][0].map.pos()[i]);
+                                ch.*.id = fromAlsaChannel(chmap[0][0].map.pos()[i]) catch return error.OpeningDevice;
                             break :blk channels;
                         } else {
                             continue;
@@ -338,19 +336,17 @@ pub const Context = struct {
     }
 
     pub fn createPlayer(self: Context, device: main.Device, writeFn: main.WriteFn, options: main.Player.Options) !backends.BackendPlayer {
-        const format = options.format orelse .f32;
+        const format = device.preferredFormat(options.format);
+        const sample_rate = device.sample_rate.clamp(options.sample_rate);
         var pcm: ?*c.snd_pcm_t = null;
         var mixer: ?*c.snd_mixer_t = null;
         var selem: ?*c.snd_mixer_selem_id_t = null;
         var mixer_elm: ?*c.snd_mixer_elem_t = null;
         var period_size: c_ulong = 0;
-        var vol_min: c_long = 0;
-        var vol_max: c_long = 0;
 
         if (c.snd_pcm_open(&pcm, device.id.ptr, modeToStream(device.mode), 0) < 0)
             return error.OpeningDevice;
         errdefer _ = c.snd_pcm_close(pcm);
-
         {
             var hw_params: ?*c.snd_pcm_hw_params_t = null;
 
@@ -359,7 +355,7 @@ pub const Context = struct {
                 toAlsaFormat(format) catch unreachable,
                 c.SND_PCM_ACCESS_RW_INTERLEAVED,
                 @intCast(c_uint, device.channels.len),
-                options.sample_rate,
+                sample_rate,
                 1,
                 main.default_latency,
             )) < 0)
@@ -412,30 +408,24 @@ pub const Context = struct {
 
             mixer_elm = c.snd_mixer_find_selem(mixer, selem) orelse
                 return error.IncompatibleDevice;
-            if (c.snd_mixer_selem_get_playback_volume_range(mixer_elm, &vol_min, &vol_max) < 0)
-                return error.OpeningDevice;
         }
 
         return .{
             .alsa = .{
                 .allocator = self.allocator,
+                .thread = undefined,
                 .mutex = .{},
-                .sample_buffer = try self.allocator.alloc(
-                    u8,
-                    period_size * format.frameSize(@intCast(u5, device.channels.len)),
-                ),
-                .writeFn = writeFn,
-                .aborted = .{ .value = false },
-                .vol_range = .{ .min = vol_min, .max = vol_max },
                 ._channels = device.channels,
                 ._format = format,
-                .sample_rate = device.sample_rate.clamp(options.sample_rate),
+                .sample_rate = sample_rate,
+                .writeFn = writeFn,
+                .aborted = .{ .value = false },
+                .sample_buffer = try self.allocator.alloc(u8, period_size * format.frameSize(@intCast(u5, device.channels.len))),
+                .period_size = period_size,
                 .pcm = pcm.?,
                 .mixer = mixer.?,
                 .selem = selem.?,
                 .mixer_elm = mixer_elm.?,
-                .period_size = period_size,
-                .thread = undefined,
             },
         };
     }
@@ -445,18 +435,17 @@ pub const Player = struct {
     allocator: std.mem.Allocator,
     thread: std.Thread,
     mutex: std.Thread.Mutex,
-    aborted: std.atomic.Atomic(bool),
-    writeFn: main.WriteFn,
     _channels: []main.Channel,
-    sample_buffer: []u8,
     _format: main.Format,
     sample_rate: u24,
+    writeFn: main.WriteFn,
+    aborted: std.atomic.Atomic(bool),
+    sample_buffer: []u8,
+    period_size: c_ulong,
     pcm: *c.snd_pcm_t,
     mixer: *c.snd_mixer_t,
     selem: *c.snd_mixer_selem_id_t,
     mixer_elm: *c.snd_mixer_elem_t,
-    period_size: c_ulong,
-    vol_range: util.Range(c_long),
 
     pub fn deinit(self: *Player) void {
         self.aborted.store(true, .Unordered);
@@ -527,10 +516,15 @@ pub const Player = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const dist = @intToFloat(f32, self.vol_range.max - self.vol_range.min);
+        var min_vol: c_long = 0;
+        var max_vol: c_long = 0;
+        if (c.snd_mixer_selem_get_playback_volume_range(self.mixer_elm, &min_vol, &max_vol) < 0)
+            return error.CannotSetVolume;
+
+        const dist = @intToFloat(f32, max_vol - min_vol);
         if (c.snd_mixer_selem_set_playback_volume_all(
             self.mixer_elm,
-            @floatToInt(c_long, dist * vol) + self.vol_range.min,
+            @floatToInt(c_long, dist * vol) + min_vol,
         ) < 0)
             return error.CannotSetVolume;
     }
@@ -552,7 +546,12 @@ pub const Player = struct {
         if (channel == c.SND_MIXER_SCHN_LAST)
             return error.CannotGetVolume;
 
-        return @intToFloat(f32, vol) / @intToFloat(f32, self.vol_range.max - self.vol_range.min);
+        var min_vol: c_long = 0;
+        var max_vol: c_long = 0;
+        if (c.snd_mixer_selem_get_playback_volume_range(self.mixer_elm, &min_vol, &max_vol) < 0)
+            return error.CannotGetVolume;
+
+        return @intToFloat(f32, vol) / @intToFloat(f32, max_vol - min_vol);
     }
 
     pub fn writeRaw(self: *Player, channel: main.Channel, frame: usize, sample: anytype) void {
@@ -600,9 +599,9 @@ pub fn toAlsaFormat(format: main.Format) !c.snd_pcm_format_t {
     };
 }
 
-pub fn fromAlsaChannel(pos: c_uint) main.Channel.Id {
+pub fn fromAlsaChannel(pos: c_uint) !main.Channel.Id {
     return switch (pos) {
-        c.SND_CHMAP_UNKNOWN, c.SND_CHMAP_NA => unreachable, // TODO
+        c.SND_CHMAP_UNKNOWN, c.SND_CHMAP_NA => return error.Invalid,
         c.SND_CHMAP_MONO, c.SND_CHMAP_FC => .front_center,
         c.SND_CHMAP_FL => .front_left,
         c.SND_CHMAP_FR => .front_right,
@@ -620,7 +619,7 @@ pub fn fromAlsaChannel(pos: c_uint) main.Channel.Id {
         c.SND_CHMAP_TRR => .top_back_right,
         c.SND_CHMAP_TRC => .top_back_center,
 
-        else => unreachable,
+        else => return error.Invalid,
     };
 }
 

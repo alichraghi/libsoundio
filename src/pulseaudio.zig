@@ -14,9 +14,9 @@ pub const Context = struct {
     ctx_state: c.pa_context_state_t,
     default_sink: ?[:0]const u8,
     default_source: ?[:0]const u8,
-    device_watcher: ?DeviceWatcher,
+    watcher: ?Watcher,
 
-    const DeviceWatcher = struct {
+    const Watcher = struct {
         deviceChangeFn: main.DeviceChangeFn,
         userdata: ?*anyopaque,
     };
@@ -42,7 +42,7 @@ pub const Context = struct {
             .ctx_state = c.PA_CONTEXT_UNCONNECTED,
             .default_sink = null,
             .default_source = null,
-            .device_watcher = if (options.deviceChangeFn) |dcf| .{
+            .watcher = if (options.deviceChangeFn) |dcf| .{
                 .deviceChangeFn = dcf,
                 .userdata = options.userdata,
             } else null,
@@ -99,7 +99,7 @@ pub const Context = struct {
 
     fn subscribeOp(_: ?*c.pa_context, _: c.pa_subscription_event_type_t, _: u32, userdata: ?*anyopaque) callconv(.C) void {
         var self = @ptrCast(*Context, @alignCast(@alignOf(*Context), userdata.?));
-        self.device_watcher.?.deviceChangeFn(self.device_watcher.?.userdata);
+        self.watcher.?.deviceChangeFn(self.watcher.?.userdata);
     }
 
     fn contextStateOp(ctx: ?*c.pa_context, userdata: ?*anyopaque) callconv(.C) void {
@@ -196,17 +196,12 @@ pub const Context = struct {
         var name = try self.allocator.dupeZ(u8, std.mem.span(info.*.description));
         errdefer self.allocator.free(name);
 
-        if (info.*.sample_spec.rate < main.min_sample_rate or
-            info.*.sample_spec.rate > main.max_sample_rate)
-            return;
-
         var device = main.Device{
             .mode = mode,
             .channels = blk: {
-                // TODO: check channels count
                 var channels = try self.allocator.alloc(main.Channel, info.*.channel_map.channels);
                 for (channels) |*ch, i|
-                    ch.*.id = fromPAChannelPos(info.*.channel_map.map[i]);
+                    ch.*.id = fromPAChannelPos(info.*.channel_map.map[i]) catch unreachable;
                 break :blk channels;
             },
             .formats = available_formats,
@@ -233,11 +228,11 @@ pub const Context = struct {
         c.pa_threaded_mainloop_lock(self.main_loop);
         defer c.pa_threaded_mainloop_unlock(self.main_loop);
 
-        const format = options.format orelse .f32;
+        const format = device.preferredFormat(options.format);
         const sample_rate = device.sample_rate.clamp(options.sample_rate);
 
         const sample_spec = c.pa_sample_spec{
-            .format = toPAFormat(format) catch unreachable, // TODO
+            .format = toPAFormat(format) catch unreachable,
             .rate = sample_rate,
             .channels = @intCast(u5, device.channels.len),
         };
@@ -249,14 +244,7 @@ pub const Context = struct {
             return error.OutOfMemory;
         errdefer c.pa_stream_unref(stream);
 
-        var status: struct {
-            main_loop: *c.pa_threaded_mainloop,
-            status: enum(u8) {
-                unknown,
-                ready,
-                failure,
-            },
-        } = .{ .main_loop = self.main_loop, .status = .unknown };
+        var status: StreamStatus = .{ .main_loop = self.main_loop, .status = .unknown };
         c.pa_stream_set_state_callback(stream, streamStateOp, &status);
 
         const buf_attr = c.pa_buffer_attr{
@@ -290,33 +278,28 @@ pub const Context = struct {
             .pulseaudio = .{
                 .main_loop = self.main_loop,
                 .ctx = self.ctx,
-                .writeFn = writeFn,
                 .stream = stream.?,
-                .write_ptr = undefined,
-                .vol = 1.0,
+                ._channels = device.channels,
                 ._format = format,
                 .sample_rate = sample_rate,
-                ._channels = device.channels,
+                .writeFn = writeFn,
+                .write_ptr = undefined,
+                .vol = 1.0,
             },
         };
     }
 
+    const StreamStatus = struct {
+        main_loop: *c.pa_threaded_mainloop,
+        status: enum(u8) {
+            unknown,
+            ready,
+            failure,
+        },
+    };
+
     fn streamStateOp(stream: ?*c.pa_stream, userdata: ?*anyopaque) callconv(.C) void {
-        var self = @ptrCast(*struct {
-            main_loop: *c.pa_threaded_mainloop,
-            status: enum(u8) {
-                unknown,
-                ready,
-                failure,
-            },
-        }, @alignCast(@alignOf(*struct {
-            main_loop: *c.pa_threaded_mainloop,
-            status: enum(u8) {
-                unknown,
-                ready,
-                failure,
-            },
-        }), userdata.?));
+        var self = @ptrCast(*StreamStatus, @alignCast(@alignOf(*StreamStatus), userdata.?));
 
         switch (c.pa_stream_get_state(stream)) {
             c.PA_STREAM_UNCONNECTED,
@@ -340,10 +323,10 @@ pub const Player = struct {
     main_loop: *c.pa_threaded_mainloop,
     ctx: *c.pa_context,
     stream: *c.pa_stream,
-    writeFn: main.WriteFn,
     _channels: []main.Channel,
     _format: main.Format,
     sample_rate: u24,
+    writeFn: main.WriteFn,
     write_ptr: [*]u8,
     vol: f32,
 
@@ -366,7 +349,6 @@ pub const Player = struct {
         const op = c.pa_stream_cork(self.stream, 0, null, null) orelse
             return error.CannotPlay;
         c.pa_operation_unref(op);
-
         c.pa_stream_set_write_callback(self.stream, playbackStreamWriteOp, self);
     }
 
@@ -533,7 +515,7 @@ pub const available_formats = &[_]main.Format{
     .i32, .f32,
 };
 
-pub fn fromPAChannelPos(pos: c.pa_channel_position_t) main.Channel.Id {
+pub fn fromPAChannelPos(pos: c.pa_channel_position_t) !main.Channel.Id {
     return switch (pos) {
         c.PA_CHANNEL_POSITION_MONO => .front_center,
         c.PA_CHANNEL_POSITION_FRONT_LEFT => .front_left, // PA_CHANNEL_POSITION_LEFT
@@ -547,7 +529,7 @@ pub fn fromPAChannelPos(pos: c.pa_channel_position_t) main.Channel.Id {
         c.PA_CHANNEL_POSITION_SIDE_RIGHT => .side_right,
 
         // TODO: .front_center?
-        c.PA_CHANNEL_POSITION_AUX0...c.PA_CHANNEL_POSITION_AUX31 => unreachable,
+        c.PA_CHANNEL_POSITION_AUX0...c.PA_CHANNEL_POSITION_AUX31 => error.Invalid,
 
         c.PA_CHANNEL_POSITION_TOP_CENTER => .top_center,
         c.PA_CHANNEL_POSITION_TOP_FRONT_LEFT => .top_front_left,
@@ -557,7 +539,7 @@ pub fn fromPAChannelPos(pos: c.pa_channel_position_t) main.Channel.Id {
         c.PA_CHANNEL_POSITION_TOP_REAR_RIGHT => .top_back_right,
         c.PA_CHANNEL_POSITION_TOP_REAR_CENTER => .top_back_center,
 
-        else => unreachable,
+        else => error.Invalid,
     };
 }
 
@@ -570,7 +552,7 @@ pub fn toPAFormat(format: main.Format) !c.pa_sample_format_t {
         .i32 => if (is_little) c.PA_SAMPLE_S32LE else c.PA_SAMPLE_S32BE,
         .f32 => if (is_little) c.PA_SAMPLE_FLOAT32LE else c.PA_SAMPLE_FLOAT32BE,
 
-        .f64, .i8 => error.IncompatibleBackend,
+        .f64, .i8 => error.Invalid,
     };
 }
 

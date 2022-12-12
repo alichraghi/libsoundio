@@ -3,6 +3,9 @@ const main = @import("main.zig");
 const backends = @import("backends.zig");
 const util = @import("util.zig");
 
+pub const min_sample_rate = 8_000; // Hz
+pub const max_sample_rate = 5_644_800; // Hz
+
 const dummy_playback = main.Device{
     .id = "dummy-playback",
     .name = "Dummy Device",
@@ -10,8 +13,8 @@ const dummy_playback = main.Device{
     .channels = undefined,
     .formats = std.meta.tags(main.Format),
     .sample_rate = .{
-        .min = main.min_sample_rate,
-        .max = main.max_sample_rate,
+        .min = min_sample_rate,
+        .max = max_sample_rate,
     },
 };
 
@@ -22,8 +25,8 @@ const dummy_capture = main.Device{
     .channels = undefined,
     .formats = std.meta.tags(main.Format),
     .sample_rate = .{
-        .min = main.min_sample_rate,
-        .max = main.max_sample_rate,
+        .min = min_sample_rate,
+        .max = max_sample_rate,
     },
 };
 
@@ -77,101 +80,56 @@ pub const Context = struct {
     }
 
     pub fn createPlayer(self: *Context, device: main.Device, writeFn: main.WriteFn, options: main.Player.Options) !backends.BackendPlayer {
+        _ = self;
+        _ = writeFn;
         return .{
             .dummy = .{
-                .allocator = self.allocator,
-                .mutex = .{},
-                .cond = .{},
-                .device = device,
-                .writeFn = writeFn,
-                .aborted = .{ .value = false },
-                .is_paused = .{ .value = false },
+                ._channels = device.channels,
+                ._format = options.format,
                 .sample_rate = options.sample_rate,
-                ._format = options.format orelse .f32,
+                .is_paused = false,
                 .vol = 1.0,
-                .thread = undefined,
             },
         };
     }
 };
 
 pub const Player = struct {
-    allocator: std.mem.Allocator,
-    thread: std.Thread,
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
-    writeFn: main.WriteFn,
-    aborted: std.atomic.Atomic(bool),
-    is_paused: std.atomic.Atomic(bool),
-    device: main.Device,
-    sample_rate: u24,
+    _channels: []main.Channel,
     _format: main.Format,
+    sample_rate: u24,
+    is_paused: bool,
     vol: f32,
 
-    pub fn deinit(self: *Player) void {
-        self.aborted.store(true, .Unordered);
-        self.cond.signal();
-        self.thread.join();
+    pub fn deinit(self: Player) void {
+        _ = self;
     }
 
-    pub fn start(self: *Player) !void {
-        self.thread = std.Thread.spawn(.{}, writeLoop, .{self}) catch |err| switch (err) {
-            error.ThreadQuotaExceeded,
-            error.SystemResources,
-            error.LockedMemoryLimitExceeded,
-            => return error.SystemResources,
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Unexpected => unreachable,
-        };
-    }
-
-    fn writeLoop(self: *Player) void {
-        var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*backends.BackendPlayer, self));
-
-        const buf_size = @as(u11, 1024);
-        const bps = buf_size / self.format().size();
-        var buf: [1024]u8 = undefined;
-
-        self.channels()[0].ptr = &buf;
-
-        while (!self.aborted.load(.Unordered)) {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            self.cond.timedWait(&self.mutex, main.default_latency * std.time.ns_per_us) catch {};
-            if (self.is_paused.load(.Unordered))
-                continue;
-            self.writeFn(parent, bps);
-        }
+    pub fn start(self: Player) !void {
+        _ = self;
     }
 
     pub fn play(self: *Player) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.is_paused.store(false, .Unordered);
-        self.cond.signal();
+        self.is_paused = false;
     }
 
     pub fn pause(self: *Player) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.is_paused.store(true, .Unordered);
+        self.is_paused = true;
     }
 
-    pub fn paused(self: *Player) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return self.is_paused.load(.Unordered);
+    pub fn paused(self: Player) bool {
+        return self.is_paused;
     }
 
     pub fn setVolume(self: *Player, vol: f32) !void {
         self.vol = vol;
     }
 
-    pub fn volume(self: *Player) !f32 {
+    pub fn volume(self: Player) !f32 {
         return self.vol;
     }
 
-    pub fn writeRaw(self: *Player, channel: main.Channel, frame: usize, sample: anytype) void {
+    pub fn writeRaw(self: Player, channel: main.Channel, frame: usize, sample: anytype) void {
         _ = self;
         _ = channel;
         _ = frame;
@@ -179,7 +137,7 @@ pub const Player = struct {
     }
 
     pub fn channels(self: Player) []main.Channel {
-        return self.device.channels;
+        return self._channels;
     }
 
     pub fn format(self: Player) main.Format {

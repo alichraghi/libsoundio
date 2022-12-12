@@ -20,9 +20,9 @@ const WASApi = @This();
 allocator: std.mem.Allocator,
 devices_info: util.DevicesInfo,
 enumerator: ?*win32.IMMDeviceEnumerator,
-device_watcher: ?DeviceWatcher,
+device_watcher: ?Watcher,
 
-const DeviceWatcher = struct {
+const Watcher = struct {
     mutex: std.Thread.Mutex,
     cond: std.Thread.Condition,
     scan_queued: std.atomic.Atomic(bool),
@@ -137,8 +137,8 @@ fn ncOnDeviceStateChanged(
 ) callconv(std.os.windows.WINAPI) win32.HRESULT {
     _ = device_id;
     _ = new_state;
-    var dw = @fieldParentPtr(DeviceWatcher, "notif_client", self);
-    std.debug.print("s: {*}", .{dw});
+    var watcher = @fieldParentPtr(Watcher, "notif_client", self);
+    std.debug.print("s: {*}", .{watcher});
     return win32.S_OK;
 }
 
@@ -147,8 +147,8 @@ fn ncOnDeviceAdded(
     device_id: ?[*:0]const u16,
 ) callconv(std.os.windows.WINAPI) win32.HRESULT {
     _ = device_id;
-    var dw = @fieldParentPtr(DeviceWatcher, "notif_client", self);
-    std.debug.print("s: {*}", .{dw});
+    var watcher = @fieldParentPtr(Watcher, "notif_client", self);
+    std.debug.print("s: {*}", .{watcher});
     return win32.S_OK;
 }
 
@@ -157,8 +157,8 @@ fn ncOnDeviceRemoved(
     device_id: ?[*:0]const u16,
 ) callconv(std.os.windows.WINAPI) win32.HRESULT {
     _ = device_id;
-    var dw = @fieldParentPtr(DeviceWatcher, "notif_client", self);
-    std.debug.print("s: {*}", .{dw});
+    var watcher = @fieldParentPtr(Watcher, "notif_client", self);
+    std.debug.print("s: {*}", .{watcher});
     return win32.S_OK;
 }
 
@@ -171,8 +171,8 @@ fn ncOnDefaultDeviceChanged(
     _ = flow;
     _ = role;
     _ = default_device_id;
-    var dw = @fieldParentPtr(DeviceWatcher, "notif_client", self);
-    std.debug.print("s: {*}", .{dw});
+    var watcher = @fieldParentPtr(Watcher, "notif_client", self);
+    std.debug.print("s: {*}", .{watcher});
     return win32.S_OK;
 }
 
@@ -183,14 +183,14 @@ fn ncOnPropertyValueChanged(
 ) callconv(std.os.windows.WINAPI) win32.HRESULT {
     _ = device_id;
     _ = key;
-    var dw = @fieldParentPtr(DeviceWatcher, "notif_client", self);
-    std.debug.print("s: {*}", .{dw});
+    var watcher = @fieldParentPtr(Watcher, "notif_client", self);
+    std.debug.print("s: {*}", .{watcher});
     return win32.S_OK;
 }
 
 pub fn disconnect(self: *WASApi) void {
-    if (self.device_watcher) |*dw| {
-        _ = self.enumerator.?.IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(&dw.notif_client);
+    if (self.device_watcher) |*watcher| {
+        _ = self.enumerator.?.IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(&watcher.notif_client);
     }
     _ = self.enumerator.?.IUnknown_Release();
     self.devices_info.deinit(self.allocator);
