@@ -1,3 +1,3 @@
 ## TODO
 
--   [ ] no public field
+-   [ ] should channels(), format(), sampleRate() become thread-safe?

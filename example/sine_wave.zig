@@ -6,7 +6,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var a = try sysaudio.Context.init(.pulseaudio, allocator, .{ .deviceChangeFn = deviceChange });
+    var a = try sysaudio.Context.init(.jack, allocator, .{ .deviceChangeFn = deviceChange });
     defer a.deinit();
     try a.refresh();
 
@@ -23,19 +23,21 @@ pub fn main() !void {
 
     var buf: [16]u8 = undefined;
     while (true) {
-        std.debug.print("> ", .{});
+        // std.debug.print("( paused = {}, volume = {d} )\n> ", .{ p.paused(), try p.volume() });
         const line = (try std.io.getStdIn().reader().readUntilDelimiterOrEof(&buf, '\n')) orelse break;
         var iter = std.mem.split(u8, line, ":");
         const cmd = iter.first();
         if (std.mem.eql(u8, cmd, "vol")) {
-            // var vol = try std.fmt.parseFloat(f32, iter.next().?);
-            // try p.setVolume(vol);
+            var vol = try std.fmt.parseFloat(f32, iter.next().?);
+            try p.setVolume(vol);
         } else if (std.mem.eql(u8, cmd, "pause")) {
             try p.pause();
             try std.testing.expect(p.paused());
         } else if (std.mem.eql(u8, cmd, "play")) {
             try p.play();
             try std.testing.expect(!p.paused());
+        } else if (std.mem.eql(u8, cmd, "exit")) {
+            break;
         }
     }
 }
