@@ -228,10 +228,7 @@ pub const Player = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         for (self.ports) |port, i| {
-            const dest = std.fmt.allocPrintZ(self.allocator, "{s}:playback_{d}", .{ self.device.id, i + 1 }) catch unreachable; // TODO
-            defer self.allocator.free(dest);
-
-            if (c.jack_port_connected_to(port, dest.ptr) == 1)
+            if (c.jack_port_connected_to(port, self.dest_ports[i].ptr) == 1)
                 return false;
         }
         return true;
