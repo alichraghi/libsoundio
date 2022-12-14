@@ -6,12 +6,12 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var a = try sysaudio.Context.init(.jack, allocator, .{ .deviceChangeFn = deviceChange });
+    var a = try sysaudio.Context.init(null, allocator, .{ .deviceChangeFn = deviceChange });
     defer a.deinit();
     try a.refresh();
 
-    // for (a.devices()) |d|
-    //     std.debug.print("{any}\n", .{d.channels});
+    for (a.devices()) |d|
+        std.debug.print("{any}\n", .{d.channels});
 
     const device = a.defaultDevice(.playback) orelse return error.NoDevice;
 
@@ -19,7 +19,7 @@ pub fn main() !void {
     defer p.deinit();
     try p.start();
 
-    // try p.setVolume(0.85);
+    try p.setVolume(0.85);
 
     var buf: [16]u8 = undefined;
     while (true) {
@@ -28,7 +28,7 @@ pub fn main() !void {
         var iter = std.mem.split(u8, line, ":");
         const cmd = iter.first();
         if (std.mem.eql(u8, cmd, "vol")) {
-            var vol = try std.fmt.parseFloat(f32, iter.next().?);
+            var vol = try std.fmt.parseFloat(f32, std.mem.trimRight(u8, iter.next().?, &std.ascii.whitespace));
             try p.setVolume(vol);
         } else if (std.mem.eql(u8, cmd, "pause")) {
             try p.pause();
