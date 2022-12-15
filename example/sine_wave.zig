@@ -10,8 +10,8 @@ pub fn main() !void {
     defer a.deinit();
     try a.refresh();
 
-    for (a.devices()) |d|
-        std.debug.print("{any}\n", .{d.channels});
+    // for (a.devices()) |d|
+    //     std.debug.print("{any}\n", .{d.channels});
 
     const device = a.defaultDevice(.playback) orelse return error.NoDevice;
 
