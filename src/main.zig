@@ -423,17 +423,32 @@ pub const Format = enum {
     f32,
     f64,
 
-    pub fn size(self: Format) u4 {
+    pub fn size(self: Format) u8 {
         return switch (self) {
             .u8, .i8 => 1,
             .i16 => 2,
             .i24 => 3,
-            .i24_4b,
-            .i32,
-            .f32,
-            => 4,
+            .i24_4b, .i32, .f32 => 4,
             .f64 => 8,
         };
+    }
+
+    pub fn validSize(self: Format) u8 {
+        return switch (self) {
+            .u8, .i8 => 1,
+            .i16 => 2,
+            .i24, .i24_4b => 3,
+            .i32, .f32 => 4,
+            .f64 => 8,
+        };
+    }
+
+    pub fn sizeBits(self: Format) u8 {
+        return self.size() * 8;
+    }
+
+    pub fn validSizeBits(self: Format) u8 {
+        return self.validSize() * 8;
     }
 
     pub fn frameSize(self: Format, ch_count: usize) u8 {

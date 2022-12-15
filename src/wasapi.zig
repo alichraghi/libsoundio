@@ -37,8 +37,8 @@ pub const Context = struct {
             win32.S_FALSE,
             win32.RPC_E_CHANGED_MODE,
             => {},
-            win32.E_OUTOFMEMORY => return error.OutOfMemory,
             win32.E_INVALIDARG => unreachable,
+            win32.E_OUTOFMEMORY => return error.OutOfMemory,
             win32.E_UNEXPECTED => return error.SystemResources,
             else => unreachable,
         }
@@ -59,10 +59,10 @@ pub const Context = struct {
                 );
                 switch (hr) {
                     win32.S_OK => {},
+                    win32.E_POINTER => unreachable,
+                    win32.E_NOINTERFACE => unreachable,
                     win32.CLASS_E_NOAGGREGATION => return error.SystemResources,
                     win32.REGDB_E_CLASSNOTREG => unreachable,
-                    win32.E_NOINTERFACE => unreachable,
-                    win32.E_POINTER => unreachable,
                     else => unreachable,
                 }
                 break :blk enumerator;
@@ -161,39 +161,15 @@ pub const Context = struct {
     }
 
     pub fn refresh(self: *Context) !void {
-        var hr: win32.HRESULT = win32.S_OK;
-
-        var collection: ?*win32.IMMDeviceCollection = null;
-        hr = self.enumerator.?.IMMDeviceEnumerator_EnumAudioEndpoints(
-            win32.EDataFlow.eAll,
-            win32.DEVICE_STATE_ACTIVE,
-            &collection,
-        );
-        switch (hr) {
-            win32.S_OK => {},
-            win32.E_OUTOFMEMORY => return error.OutOfMemory,
-            win32.E_POINTER => unreachable,
-            win32.E_INVALIDARG => unreachable,
-            else => return error.OpeningDevice,
-        }
-        defer _ = collection.?.IUnknown_Release();
-
-        var device_count: u32 = 0;
-        hr = collection.?.IMMDeviceCollection_GetCount(&device_count);
-        switch (hr) {
-            win32.S_OK => {},
-            win32.E_POINTER => unreachable,
-            else => return error.OpeningDevice,
-        }
-
+        // get default devices id
         var default_playback_device: ?*win32.IMMDevice = null;
-        hr = self.enumerator.?.IMMDeviceEnumerator_GetDefaultAudioEndpoint(.eRender, .eMultimedia, &default_playback_device);
+        var hr = self.enumerator.?.IMMDeviceEnumerator_GetDefaultAudioEndpoint(.eRender, .eMultimedia, &default_playback_device);
         switch (hr) {
             win32.S_OK => {},
-            // TODO: win32.E_NOTFOUND!?
-            win32.E_OUTOFMEMORY => return error.OutOfMemory,
             win32.E_POINTER => unreachable,
             win32.E_INVALIDARG => unreachable,
+            win32.E_OUTOFMEMORY => return error.OutOfMemory,
+            // TODO: win32.E_NOTFOUND!?
             else => return error.OpeningDevice,
         }
         defer _ = default_playback_device.?.IUnknown_Release();
@@ -202,10 +178,10 @@ pub const Context = struct {
         hr = self.enumerator.?.IMMDeviceEnumerator_GetDefaultAudioEndpoint(.eCapture, .eMultimedia, &default_capture_device);
         switch (hr) {
             win32.S_OK => {},
-            // TODO: win32.E_NOTFOUND!?
-            win32.E_OUTOFMEMORY => return error.OutOfMemory,
             win32.E_POINTER => unreachable,
             win32.E_INVALIDARG => unreachable,
+            win32.E_OUTOFMEMORY => return error.OutOfMemory,
+            // TODO: win32.E_NOTFOUND!?
             else => return error.OpeningDevice,
         }
         defer _ = default_capture_device.?.IUnknown_Release();
@@ -215,8 +191,8 @@ pub const Context = struct {
         defer win32.CoTaskMemFree(default_playback_id_u16);
         switch (hr) {
             win32.S_OK => {},
-            win32.E_OUTOFMEMORY => return error.OutOfMemory,
             win32.E_POINTER => unreachable,
+            win32.E_OUTOFMEMORY => return error.OutOfMemory,
             else => return error.OpeningDevice,
         }
         const default_playback_id = std.unicode.utf16leToUtf8AllocZ(self.allocator, std.mem.span(default_playback_id_u16.?)) catch |err| switch (err) {
@@ -230,8 +206,8 @@ pub const Context = struct {
         defer win32.CoTaskMemFree(default_capture_id_u16);
         switch (hr) {
             win32.S_OK => {},
-            win32.E_OUTOFMEMORY => return error.OutOfMemory,
             win32.E_POINTER => unreachable,
+            win32.E_OUTOFMEMORY => return error.OutOfMemory,
             else => return error.OpeningDevice,
         }
         const default_capture_id = std.unicode.utf16leToUtf8AllocZ(self.allocator, std.mem.span(default_capture_id_u16.?)) catch |err| switch (err) {
@@ -239,6 +215,30 @@ pub const Context = struct {
             else => unreachable,
         };
         defer self.allocator.free(default_capture_id);
+
+        // enumerate
+        var collection: ?*win32.IMMDeviceCollection = null;
+        hr = self.enumerator.?.IMMDeviceEnumerator_EnumAudioEndpoints(
+            win32.EDataFlow.eAll,
+            win32.DEVICE_STATE_ACTIVE,
+            &collection,
+        );
+        switch (hr) {
+            win32.S_OK => {},
+            win32.E_POINTER => unreachable,
+            win32.E_INVALIDARG => unreachable,
+            win32.E_OUTOFMEMORY => return error.OutOfMemory,
+            else => return error.OpeningDevice,
+        }
+        defer _ = collection.?.IUnknown_Release();
+
+        var device_count: u32 = 0;
+        hr = collection.?.IMMDeviceCollection_GetCount(&device_count);
+        switch (hr) {
+            win32.S_OK => {},
+            win32.E_POINTER => unreachable,
+            else => return error.OpeningDevice,
+        }
 
         var i: u32 = 0;
         while (i < device_count) : (i += 1) {
@@ -257,9 +257,9 @@ pub const Context = struct {
             hr = imm_device.?.IMMDevice_OpenPropertyStore(win32.STGM_READ, &property_store);
             switch (hr) {
                 win32.S_OK => {},
-                win32.E_OUTOFMEMORY => return error.OutOfMemory,
                 win32.E_POINTER => unreachable,
                 win32.E_INVALIDARG => unreachable,
+                win32.E_OUTOFMEMORY => return error.OutOfMemory,
                 else => return error.OpeningDevice,
             }
             defer _ = property_store.?.IUnknown_Release();
@@ -281,8 +281,8 @@ pub const Context = struct {
                     hr = imm_device.?.IUnknown_QueryInterface(win32.IID_IMMEndpoint, @ptrCast(?*?*anyopaque, &endpoint));
                     switch (hr) {
                         win32.S_OK => {},
-                        win32.E_NOINTERFACE => unreachable,
                         win32.E_POINTER => unreachable,
+                        win32.E_NOINTERFACE => unreachable,
                         else => unreachable,
                     }
                     defer _ = endpoint.?.IUnknown_Release();
@@ -319,10 +319,10 @@ pub const Context = struct {
                     hr = imm_device.?.IMMDevice_Activate(win32.IID_IAudioClient, @enumToInt(win32.CLSCTX_ALL), null, @ptrCast(?*?*anyopaque, &audio_client));
                     switch (hr) {
                         win32.S_OK => {},
-                        win32.E_OUTOFMEMORY => return error.OutOfMemory,
-                        win32.E_NOINTERFACE => unreachable,
                         win32.E_POINTER => unreachable,
                         win32.E_INVALIDARG => unreachable,
+                        win32.E_NOINTERFACE => unreachable,
+                        win32.E_OUTOFMEMORY => return error.OutOfMemory,
                         win32.AUDCLNT_E_DEVICE_INVALIDATED => unreachable,
                         else => return error.OpeningDevice,
                     }
@@ -348,8 +348,8 @@ pub const Context = struct {
                     hr = imm_device.?.IMMDevice_GetId(&id_u16);
                     switch (hr) {
                         win32.S_OK => {},
-                        win32.E_OUTOFMEMORY => return error.OutOfMemory,
                         win32.E_POINTER => unreachable,
+                        win32.E_OUTOFMEMORY => return error.OutOfMemory,
                         else => return error.OpeningDevice,
                     }
                     defer win32.CoTaskMemFree(id_u16);
@@ -423,43 +423,16 @@ pub const Context = struct {
 
     fn setWaveFormatFormat(wf: *WAVEFORMATEXTENSIBLE, format: main.Format) !void {
         switch (format) {
-            .u8 => {
+            .u8, .i16, .i24, .i24_4b, .i32 => {
                 wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_PCM.*;
-                wf.Format.wBitsPerSample = 8;
-                wf.Samples.wValidBitsPerSample = 8;
             },
-            .i16 => {
-                wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_PCM.*;
-                wf.Format.wBitsPerSample = 16;
-                wf.Samples.wValidBitsPerSample = 16;
-            },
-            .i24 => {
-                wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_PCM.*;
-                wf.Format.wBitsPerSample = 24;
-                wf.Samples.wValidBitsPerSample = 24;
-            },
-            .i24_4b => {
-                wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_PCM.*;
-                wf.Format.wBitsPerSample = 32;
-                wf.Samples.wValidBitsPerSample = 24;
-            },
-            .i32 => {
-                wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_PCM.*;
-                wf.Format.wBitsPerSample = 32;
-                wf.Samples.wValidBitsPerSample = 32;
-            },
-            .f32 => {
+            .f32, .f64 => {
                 wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT.*;
-                wf.Format.wBitsPerSample = 32;
-                wf.Samples.wValidBitsPerSample = 32;
             },
-            .f64 => {
-                wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT.*;
-                wf.Format.wBitsPerSample = 64;
-                wf.Samples.wValidBitsPerSample = 64;
-            },
-            else => return error.Invalid,
+            .i8 => return error.Invalid,
         }
+        wf.Format.wBitsPerSample = format.sizeBits();
+        wf.Samples.wValidBitsPerSample = format.validSizeBits();
     }
 
     pub fn createPlayer(self: *Context, device: main.Device, writeFn: main.WriteFn, options: main.Player.Options) !backends.BackendPlayer {
@@ -472,9 +445,9 @@ pub const Context = struct {
         var hr = self.enumerator.?.IMMDeviceEnumerator_GetDevice(id_u16, &imm_device);
         switch (hr) {
             win32.S_OK => {},
-            win32.E_OUTOFMEMORY => return error.OutOfMemory,
             win32.E_POINTER => unreachable,
-            // win32.E_NOTFOUND => return error.OpeningDevice, // TODO
+            win32.E_OUTOFMEMORY => return error.OutOfMemory,
+            // TODO: win32.E_NOTFOUND!?
             else => return error.OpeningDevice,
         }
 
@@ -482,17 +455,17 @@ pub const Context = struct {
         hr = imm_device.?.IMMDevice_Activate(win32.IID_IAudioClient, @enumToInt(win32.CLSCTX_ALL), null, @ptrCast(?*?*anyopaque, &audio_client));
         switch (hr) {
             win32.S_OK => {},
-            win32.E_OUTOFMEMORY => return error.OutOfMemory,
-            win32.E_NOINTERFACE => unreachable,
             win32.E_POINTER => unreachable,
             win32.E_INVALIDARG => unreachable,
-            win32.AUDCLNT_E_DEVICE_INVALIDATED => unreachable,
+            win32.E_NOINTERFACE => unreachable,
+            win32.E_OUTOFMEMORY => return error.OutOfMemory,
+            win32.AUDCLNT_E_DEVICE_INVALIDATED => return error.OpeningDevice,
             else => return error.OpeningDevice,
         }
 
-        std.debug.print("{any}\n", .{device.formats});
         const format = device.preferredFormat(options.format);
         const sample_rate = device.sample_rate.clamp(options.sample_rate);
+
         const wave_format = WAVEFORMATEXTENSIBLE{
             .Format = .{
                 .wFormatTag = win32.WAVE_FORMAT_EXTENSIBLE,
@@ -500,11 +473,11 @@ pub const Context = struct {
                 .nSamplesPerSec = sample_rate,
                 .nAvgBytesPerSec = sample_rate * format.frameSize(device.channels.len),
                 .nBlockAlign = format.frameSize(device.channels.len),
-                .wBitsPerSample = @intCast(u8, format.size()) * 8,
+                .wBitsPerSample = format.sizeBits(),
                 .cbSize = 0x16,
             },
             .Samples = .{
-                .wValidBitsPerSample = @intCast(u8, format.size()) * 8,
+                .wValidBitsPerSample = format.validSizeBits(),
             },
             .dwChannelMask = toChannelMask(device.channels),
             .SubFormat = toSubFormat(format) catch return error.OpeningDevice,
@@ -512,7 +485,7 @@ pub const Context = struct {
 
         hr = audio_client.?.IAudioClient_Initialize(
             .SHARED,
-            win32.AUDCLNT_STREAMFLAGS_EVENTCALLBACK | win32.AUDCLNT_STREAMFLAGS_NOPERSIST,
+            win32.AUDCLNT_STREAMFLAGS_NOPERSIST,
             0,
             0,
             @ptrCast(?*const win32.WAVEFORMATEX, @alignCast(@alignOf(*win32.WAVEFORMATEX), &wave_format)),
@@ -525,17 +498,17 @@ pub const Context = struct {
             win32.E_INVALIDARG => unreachable,
             win32.AUDCLNT_E_ALREADY_INITIALIZED => unreachable,
             win32.AUDCLNT_E_WRONG_ENDPOINT_TYPE => unreachable,
-            win32.AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED => unreachable,
-            win32.AUDCLNT_E_BUFFER_SIZE_ERROR => unreachable,
-            win32.AUDCLNT_E_CPUUSAGE_EXCEEDED => unreachable,
-            win32.AUDCLNT_E_DEVICE_INVALIDATED => unreachable,
+            win32.AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED => return error.OpeningDevice, // TODO: some libs handle this better
+            win32.AUDCLNT_E_BUFFER_SIZE_ERROR => return error.OpeningDevice,
+            win32.AUDCLNT_E_CPUUSAGE_EXCEEDED => return error.OpeningDevice,
+            win32.AUDCLNT_E_DEVICE_INVALIDATED => return error.OpeningDevice,
             win32.AUDCLNT_E_DEVICE_IN_USE => unreachable,
-            win32.AUDCLNT_E_ENDPOINT_CREATE_FAILED => unreachable,
-            win32.AUDCLNT_E_INVALID_DEVICE_PERIOD => unreachable,
+            win32.AUDCLNT_E_ENDPOINT_CREATE_FAILED => return error.OpeningDevice,
+            win32.AUDCLNT_E_INVALID_DEVICE_PERIOD => return error.OpeningDevice,
             win32.AUDCLNT_E_UNSUPPORTED_FORMAT => unreachable,
             win32.AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED => unreachable,
             win32.AUDCLNT_E_BUFDURATION_PERIOD_NOT_EQUAL => unreachable,
-            win32.AUDCLNT_E_SERVICE_NOT_RUNNING => unreachable,
+            win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return error.OpeningDevice,
             else => return error.OpeningDevice,
         }
         errdefer _ = audio_client.?.IUnknown_Release();
@@ -544,25 +517,25 @@ pub const Context = struct {
         hr = audio_client.?.IAudioClient_GetService(win32.IID_IAudioRenderClient, @ptrCast(?*?*anyopaque, &render_client));
         switch (hr) {
             win32.S_OK => {},
+            win32.E_POINTER => unreachable,
             win32.E_NOINTERFACE => unreachable,
             win32.AUDCLNT_E_NOT_INITIALIZED => unreachable,
             win32.AUDCLNT_E_WRONG_ENDPOINT_TYPE => unreachable,
-            win32.AUDCLNT_E_DEVICE_INVALIDATED => unreachable,
-            win32.AUDCLNT_E_SERVICE_NOT_RUNNING => unreachable,
-            win32.E_POINTER => unreachable,
+            win32.AUDCLNT_E_DEVICE_INVALIDATED => return error.OpeningDevice,
+            win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return error.OpeningDevice,
             else => return error.OpeningDevice,
         }
 
-        var sample_ready_event = win32.CreateEventW(null, 0, 0, null);
-        hr = audio_client.?.IAudioClient_SetEventHandle(sample_ready_event);
+        var simple_volume: ?*win32.ISimpleAudioVolume = null;
+        hr = audio_client.?.IAudioClient_GetService(win32.IID_ISimpleAudioVolume, @ptrCast(?*?*anyopaque, &simple_volume));
         switch (hr) {
             win32.S_OK => {},
-            win32.E_HANDLE => unreachable, // Undocumented
-            win32.E_INVALIDARG => unreachable,
-            win32.AUDCLNT_E_EVENTHANDLE_NOT_EXPECTED => unreachable,
+            win32.E_POINTER => unreachable,
+            win32.E_NOINTERFACE => unreachable,
             win32.AUDCLNT_E_NOT_INITIALIZED => unreachable,
-            win32.AUDCLNT_E_DEVICE_INVALIDATED => unreachable,
-            win32.AUDCLNT_E_SERVICE_NOT_RUNNING => unreachable,
+            win32.AUDCLNT_E_WRONG_ENDPOINT_TYPE => unreachable,
+            win32.AUDCLNT_E_DEVICE_INVALIDATED => return error.OpeningDevice,
+            win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return error.OpeningDevice,
             else => return error.OpeningDevice,
         }
 
@@ -571,13 +544,13 @@ pub const Context = struct {
                 .thread = undefined,
                 .mutex = .{},
                 ._channels = device.channels,
-                ._format = options.format,
-                .sample_rate = options.sample_rate,
+                ._format = format,
+                .sample_rate = sample_rate,
                 .writeFn = writeFn,
                 .audio_client = audio_client,
+                .simple_volume = simple_volume,
                 .imm_device = imm_device,
                 .render_client = render_client,
-                .sample_ready_event = sample_ready_event.?,
                 .is_paused = false,
                 .vol = 1.0,
                 .aborted = .{ .value = false },
@@ -631,15 +604,19 @@ pub const Player = struct {
     _format: main.Format,
     sample_rate: u24,
     writeFn: main.WriteFn,
+    simple_volume: ?*win32.ISimpleAudioVolume,
     imm_device: ?*win32.IMMDevice,
     audio_client: ?*win32.IAudioClient,
     render_client: ?*win32.IAudioRenderClient,
-    sample_ready_event: win32.HANDLE,
     aborted: std.atomic.Atomic(bool),
     is_paused: bool,
     vol: f32,
 
-    pub fn deinit(self: Player) void {
+    pub fn deinit(self: *Player) void {
+        self.aborted.store(true, .Unordered);
+        self.thread.join();
+        _ = self.simple_volume.?.IUnknown_Release();
+        _ = self.render_client.?.IUnknown_Release();
         _ = self.audio_client.?.IUnknown_Release();
         _ = self.imm_device.?.IUnknown_Release();
     }
@@ -664,8 +641,8 @@ pub const Player = struct {
             win32.AUDCLNT_E_NOT_INITIALIZED => unreachable,
             win32.AUDCLNT_E_NOT_STOPPED => unreachable,
             win32.AUDCLNT_E_EVENTHANDLE_NOT_SET => unreachable,
-            win32.AUDCLNT_E_DEVICE_INVALIDATED => unreachable,
-            win32.AUDCLNT_E_SERVICE_NOT_RUNNING => unreachable,
+            win32.AUDCLNT_E_DEVICE_INVALIDATED => return,
+            win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return,
             else => unreachable,
         }
 
@@ -674,10 +651,10 @@ pub const Player = struct {
             hr = self.audio_client.?.IAudioClient_GetBufferSize(&frames_buf);
             switch (hr) {
                 win32.S_OK => {},
-                win32.AUDCLNT_E_NOT_INITIALIZED => unreachable,
-                win32.AUDCLNT_E_DEVICE_INVALIDATED => unreachable,
-                win32.AUDCLNT_E_SERVICE_NOT_RUNNING => unreachable,
                 win32.E_POINTER => unreachable,
+                win32.AUDCLNT_E_NOT_INITIALIZED => unreachable,
+                win32.AUDCLNT_E_DEVICE_INVALIDATED => return,
+                win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return,
                 else => unreachable,
             }
 
@@ -685,33 +662,76 @@ pub const Player = struct {
             hr = self.audio_client.?.IAudioClient_GetCurrentPadding(&frames_used);
             switch (hr) {
                 win32.S_OK => {},
-                win32.AUDCLNT_E_NOT_INITIALIZED => unreachable, // Undocumented
-                win32.AUDCLNT_E_DEVICE_INVALIDATED => unreachable,
-                win32.AUDCLNT_E_SERVICE_NOT_RUNNING => unreachable,
                 win32.E_POINTER => unreachable,
+                win32.AUDCLNT_E_NOT_INITIALIZED => unreachable,
+                win32.AUDCLNT_E_DEVICE_INVALIDATED => return,
+                win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return,
                 else => unreachable,
             }
             const writable_frame_count = frames_buf - frames_used;
             if (writable_frame_count > 0) {
                 var data: [*]u8 = undefined;
                 hr = self.render_client.?.IAudioRenderClient_GetBuffer(writable_frame_count, @ptrCast(?*?*u8, &data));
+                switch (hr) {
+                    win32.S_OK => {},
+                    win32.E_POINTER => unreachable,
+                    win32.AUDCLNT_E_BUFFER_ERROR => unreachable,
+                    win32.AUDCLNT_E_BUFFER_TOO_LARGE => unreachable,
+                    win32.AUDCLNT_E_BUFFER_SIZE_ERROR => unreachable,
+                    win32.AUDCLNT_E_OUT_OF_ORDER => unreachable,
+                    win32.AUDCLNT_E_DEVICE_INVALIDATED => return,
+                    win32.AUDCLNT_E_BUFFER_OPERATION_PENDING => continue,
+                    win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return,
+                    else => unreachable,
+                }
 
                 for (self.channels()) |*ch, i| {
                     ch.*.ptr = data + self.format().frameSize(i);
                 }
-                self.writeFn(parent, writable_frame_count);
 
+                self.writeFn(parent, writable_frame_count);
                 hr = self.render_client.?.IAudioRenderClient_ReleaseBuffer(writable_frame_count, 0);
+                switch (hr) {
+                    win32.S_OK => {},
+                    win32.E_INVALIDARG => unreachable,
+                    win32.AUDCLNT_E_INVALID_SIZE => unreachable,
+                    win32.AUDCLNT_E_BUFFER_SIZE_ERROR => unreachable,
+                    win32.AUDCLNT_E_OUT_OF_ORDER => unreachable,
+                    win32.AUDCLNT_E_DEVICE_INVALIDATED => return,
+                    win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return,
+                    else => unreachable,
+                }
             }
         }
     }
 
     pub fn play(self: *Player) !void {
-        self.is_paused = false;
+        if (self.paused()) {
+            const hr = self.audio_client.?.IAudioClient_Start();
+            switch (hr) {
+                win32.S_OK => {},
+                win32.AUDCLNT_E_NOT_INITIALIZED => unreachable,
+                win32.AUDCLNT_E_NOT_STOPPED => unreachable,
+                win32.AUDCLNT_E_EVENTHANDLE_NOT_SET => unreachable,
+                win32.AUDCLNT_E_DEVICE_INVALIDATED => return error.CannotPlay,
+                win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return error.CannotPlay,
+                else => unreachable,
+            }
+            self.is_paused = false;
+        }
     }
 
     pub fn pause(self: *Player) !void {
-        self.is_paused = true;
+        if (!self.paused()) {
+            const hr = self.audio_client.?.IAudioClient_Stop();
+            switch (hr) {
+                win32.S_OK => {},
+                win32.AUDCLNT_E_DEVICE_INVALIDATED => return error.CannotPause,
+                win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return error.CannotPause,
+                else => unreachable,
+            }
+            self.is_paused = true;
+        }
     }
 
     pub fn paused(self: Player) bool {
@@ -719,11 +739,27 @@ pub const Player = struct {
     }
 
     pub fn setVolume(self: *Player, vol: f32) !void {
-        self.vol = vol;
+        const hr = self.simple_volume.?.ISimpleAudioVolume_SetMasterVolume(vol, null);
+        switch (hr) {
+            win32.S_OK => {},
+            win32.E_INVALIDARG => unreachable,
+            win32.AUDCLNT_E_DEVICE_INVALIDATED => return error.CannotSetVolume,
+            win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return error.CannotSetVolume,
+            else => return error.CannotSetVolume,
+        }
     }
 
     pub fn volume(self: Player) !f32 {
-        return self.vol;
+        var vol: f32 = 0;
+        const hr = self.simple_volume.?.ISimpleAudioVolume_GetMasterVolume(&vol);
+        switch (hr) {
+            win32.S_OK => {},
+            win32.E_POINTER => unreachable,
+            win32.AUDCLNT_E_DEVICE_INVALIDATED => return error.CannotGetVolume,
+            win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return error.CannotGetVolume,
+            else => return error.CannotGetVolume,
+        }
+        return vol;
     }
 
     pub fn writeRaw(self: Player, channel: main.Channel, frame: usize, sample: anytype) void {
@@ -763,7 +799,7 @@ pub const WAVEFORMATEX = extern struct {
 
 pub const WAVEFORMATEXTENSIBLE = extern struct {
     Format: WAVEFORMATEX align(1),
-    Samples: packed union {
+    Samples: extern union {
         wValidBitsPerSample: u16 align(1),
         wSamplesPerBlock: u16 align(1),
         wReserved: u16 align(1),
@@ -772,8 +808,7 @@ pub const WAVEFORMATEXTENSIBLE = extern struct {
     SubFormat: win32.Guid align(1),
 };
 
-// TODO: remove these
+// TODO: PR this to zigwin32
 fn isEqualIID(riid1: *const win32.Guid, riid2: *const win32.Guid) bool {
-    std.debug.print("{d}\n", .{riid1.Bytes});
     return std.mem.eql(u8, &riid1.Bytes, &riid2.Bytes);
 }
