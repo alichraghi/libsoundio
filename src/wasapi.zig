@@ -1,18 +1,5 @@
 const std = @import("std");
-const win32 = struct {
-    usingnamespace @import("win32").foundation;
-    usingnamespace @import("win32").devices.function_discovery;
-    usingnamespace @import("win32").system.threading;
-    usingnamespace @import("win32").media.audio;
-    usingnamespace @import("win32").media.audio.direct_music;
-    usingnamespace @import("win32").media.kernel_streaming;
-    usingnamespace @import("win32").media.multimedia;
-    usingnamespace @import("win32").storage.structured_storage;
-    usingnamespace @import("win32").system.com;
-    usingnamespace @import("win32").system.com.structured_storage;
-    usingnamespace @import("win32").ui.shell.properties_system;
-    usingnamespace @import("win32").zig;
-};
+const win32 = @import("win32");
 const main = @import("main.zig");
 const backends = @import("backends.zig");
 const util = @import("util.zig");
@@ -30,7 +17,7 @@ pub const Context = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, options: main.Context.Options) !backends.BackendContext {
-        const flags = win32.COINIT.initFlags(.{ .APARTMENTTHREADED = 1, .DISABLE_OLE1DDE = 1 });
+        const flags = win32.COINIT_APARTMENTTHREADED | win32.COINIT_DISABLE_OLE1DDE;
         var hr = win32.CoInitializeEx(null, flags);
         switch (hr) {
             win32.S_OK,
@@ -88,7 +75,7 @@ pub const Context = struct {
         };
 
         if (options.deviceChangeFn) |_| {
-            hr = self.enumerator.?.IMMDeviceEnumerator_RegisterEndpointNotificationCallback(&self.watcher.?.notif_client);
+            hr = self.enumerator.?.RegisterEndpointNotificationCallback(&self.watcher.?.notif_client);
             switch (hr) {
                 win32.S_OK => {},
                 win32.E_POINTER => unreachable,
@@ -101,9 +88,9 @@ pub const Context = struct {
     }
 
     fn queryInterfaceCB(self: *const win32.IUnknown, riid: ?*const win32.Guid, ppv: ?*?*anyopaque) callconv(std.os.windows.WINAPI) win32.HRESULT {
-        if (isEqualIID(riid.?, win32.IID_IUnknown) or isEqualIID(riid.?, win32.IID_IMMNotificationClient)) {
+        if (riid.?.eql(win32.IID_IUnknown.*) or riid.?.eql(win32.IID_IMMNotificationClient.*)) {
             ppv.?.* = @intToPtr(?*anyopaque, @ptrToInt(self));
-            _ = self.IUnknown_AddRef();
+            _ = self.AddRef();
             return win32.S_OK;
         } else {
             ppv.?.* = null;
@@ -137,7 +124,7 @@ pub const Context = struct {
         return win32.S_OK;
     }
 
-    fn onDefaultDeviceChangedCB(self: *const win32.IMMNotificationClient, _: win32.EDataFlow, _: win32.ERole, _: ?[*:0]const u16) callconv(std.os.windows.WINAPI) win32.HRESULT {
+    fn onDefaultDeviceChangedCB(self: *const win32.IMMNotificationClient, _: win32.DataFlow, _: win32.Role, _: ?[*:0]const u16) callconv(std.os.windows.WINAPI) win32.HRESULT {
         var watcher = @fieldParentPtr(Watcher, "notif_client", self);
         watcher.deviceChangeFn(watcher.userdata);
         return win32.S_OK;
@@ -151,9 +138,9 @@ pub const Context = struct {
 
     pub fn deinit(self: *Context) void {
         if (self.watcher) |*watcher| {
-            _ = self.enumerator.?.IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(&watcher.notif_client);
+            _ = self.enumerator.?.UnregisterEndpointNotificationCallback(&watcher.notif_client);
         }
-        _ = self.enumerator.?.IUnknown_Release();
+        _ = self.enumerator.?.Release();
         for (self.devices_info.list.items) |d|
             freeDevice(self.allocator, d);
         self.devices_info.list.deinit(self.allocator);
@@ -163,7 +150,7 @@ pub const Context = struct {
     pub fn refresh(self: *Context) !void {
         // get default devices id
         var default_playback_device: ?*win32.IMMDevice = null;
-        var hr = self.enumerator.?.IMMDeviceEnumerator_GetDefaultAudioEndpoint(.eRender, .eMultimedia, &default_playback_device);
+        var hr = self.enumerator.?.GetDefaultAudioEndpoint(.render, .multimedia, &default_playback_device);
         switch (hr) {
             win32.S_OK => {},
             win32.E_POINTER => unreachable,
@@ -172,10 +159,10 @@ pub const Context = struct {
             // TODO: win32.E_NOTFOUND!?
             else => return error.OpeningDevice,
         }
-        defer _ = default_playback_device.?.IUnknown_Release();
+        defer _ = default_playback_device.?.Release();
 
         var default_capture_device: ?*win32.IMMDevice = null;
-        hr = self.enumerator.?.IMMDeviceEnumerator_GetDefaultAudioEndpoint(.eCapture, .eMultimedia, &default_capture_device);
+        hr = self.enumerator.?.GetDefaultAudioEndpoint(.capture, .multimedia, &default_capture_device);
         switch (hr) {
             win32.S_OK => {},
             win32.E_POINTER => unreachable,
@@ -184,10 +171,10 @@ pub const Context = struct {
             // TODO: win32.E_NOTFOUND!?
             else => return error.OpeningDevice,
         }
-        defer _ = default_capture_device.?.IUnknown_Release();
+        defer _ = default_capture_device.?.Release();
 
         var default_playback_id_u16: ?[*:0]u16 = undefined;
-        hr = default_playback_device.?.IMMDevice_GetId(&default_playback_id_u16);
+        hr = default_playback_device.?.GetId(&default_playback_id_u16);
         defer win32.CoTaskMemFree(default_playback_id_u16);
         switch (hr) {
             win32.S_OK => {},
@@ -202,7 +189,7 @@ pub const Context = struct {
         defer self.allocator.free(default_playback_id);
 
         var default_capture_id_u16: ?[*:0]u16 = undefined;
-        hr = default_capture_device.?.IMMDevice_GetId(&default_capture_id_u16);
+        hr = default_capture_device.?.GetId(&default_capture_id_u16);
         defer win32.CoTaskMemFree(default_capture_id_u16);
         switch (hr) {
             win32.S_OK => {},
@@ -218,8 +205,8 @@ pub const Context = struct {
 
         // enumerate
         var collection: ?*win32.IMMDeviceCollection = null;
-        hr = self.enumerator.?.IMMDeviceEnumerator_EnumAudioEndpoints(
-            win32.EDataFlow.eAll,
+        hr = self.enumerator.?.EnumAudioEndpoints(
+            win32.DataFlow.all,
             win32.DEVICE_STATE_ACTIVE,
             &collection,
         );
@@ -230,10 +217,10 @@ pub const Context = struct {
             win32.E_OUTOFMEMORY => return error.OutOfMemory,
             else => return error.OpeningDevice,
         }
-        defer _ = collection.?.IUnknown_Release();
+        defer _ = collection.?.Release();
 
         var device_count: u32 = 0;
-        hr = collection.?.IMMDeviceCollection_GetCount(&device_count);
+        hr = collection.?.GetCount(&device_count);
         switch (hr) {
             win32.S_OK => {},
             win32.E_POINTER => unreachable,
@@ -243,18 +230,18 @@ pub const Context = struct {
         var i: u32 = 0;
         while (i < device_count) : (i += 1) {
             var imm_device: ?*win32.IMMDevice = null;
-            hr = collection.?.IMMDeviceCollection_Item(i, &imm_device);
+            hr = collection.?.Item(i, &imm_device);
             switch (hr) {
                 win32.S_OK => {},
                 win32.E_POINTER => unreachable,
                 win32.E_INVALIDARG => unreachable,
                 else => return error.OpeningDevice,
             }
-            defer _ = imm_device.?.IUnknown_Release();
+            defer _ = imm_device.?.Release();
 
             var property_store: ?*win32.IPropertyStore = null;
             var variant: win32.PROPVARIANT = undefined;
-            hr = imm_device.?.IMMDevice_OpenPropertyStore(win32.STGM_READ, &property_store);
+            hr = imm_device.?.OpenPropertyStore(win32.STGM_READ, &property_store);
             switch (hr) {
                 win32.S_OK => {},
                 win32.E_POINTER => unreachable,
@@ -262,33 +249,33 @@ pub const Context = struct {
                 win32.E_OUTOFMEMORY => return error.OutOfMemory,
                 else => return error.OpeningDevice,
             }
-            defer _ = property_store.?.IUnknown_Release();
+            defer _ = property_store.?.Release();
 
-            hr = property_store.?.IPropertyStore_GetValue(&win32.PKEY_AudioEngine_DeviceFormat, &variant);
+            hr = property_store.?.GetValue(&win32.PKEY_AudioEngine_DeviceFormat, &variant);
             switch (hr) {
                 win32.S_OK, win32.INPLACE_S_TRUNCATED => {},
                 else => return error.OpeningDevice,
             }
             var wf = @ptrCast(
-                *WAVEFORMATEXTENSIBLE,
-                variant.Anonymous.Anonymous.Anonymous.blob.pBlobData,
+                *win32.WAVEFORMATEXTENSIBLE,
+                variant.anon.anon.anon.blob.pBlobData,
             );
-            defer win32.CoTaskMemFree(variant.Anonymous.Anonymous.Anonymous.blob.pBlobData);
+            defer win32.CoTaskMemFree(variant.anon.anon.anon.blob.pBlobData);
 
             var device = main.Device{
                 .mode = blk: {
                     var endpoint: ?*win32.IMMEndpoint = null;
-                    hr = imm_device.?.IUnknown_QueryInterface(win32.IID_IMMEndpoint, @ptrCast(?*?*anyopaque, &endpoint));
+                    hr = imm_device.?.QueryInterface(win32.IID_IMMEndpoint, @ptrCast(?*?*anyopaque, &endpoint));
                     switch (hr) {
                         win32.S_OK => {},
                         win32.E_POINTER => unreachable,
                         win32.E_NOINTERFACE => unreachable,
                         else => unreachable,
                     }
-                    defer _ = endpoint.?.IUnknown_Release();
+                    defer _ = endpoint.?.Release();
 
-                    var dataflow: win32.EDataFlow = undefined;
-                    hr = endpoint.?.IMMEndpoint_GetDataFlow(&dataflow);
+                    var dataflow: win32.DataFlow = undefined;
+                    hr = endpoint.?.GetDataFlow(&dataflow);
                     switch (hr) {
                         win32.S_OK => {},
                         win32.E_POINTER => unreachable,
@@ -296,15 +283,15 @@ pub const Context = struct {
                     }
 
                     break :blk switch (dataflow) {
-                        .eRender => .playback,
-                        .eCapture => .capture,
+                        .render => .playback,
+                        .capture => .capture,
                         else => unreachable,
                     };
                 },
                 .channels = blk: {
                     var chn_arr = std.ArrayList(main.Channel).init(self.allocator);
-                    var channel = win32.SPEAKER_FRONT_LEFT;
-                    while (channel < win32.SPEAKER_RESERVED) : (channel <<= 1) {
+                    var channel: u32 = win32.SPEAKER_FRONT_LEFT;
+                    while (channel < win32.SPEAKER_ALL) : (channel <<= 1) {
                         if (wf.dwChannelMask & channel != 0)
                             try chn_arr.append(.{ .id = fromWASApiChannel(channel) });
                     }
@@ -316,7 +303,7 @@ pub const Context = struct {
                 },
                 .formats = blk: {
                     var audio_client: ?*win32.IAudioClient = null;
-                    hr = imm_device.?.IMMDevice_Activate(win32.IID_IAudioClient, @enumToInt(win32.CLSCTX_ALL), null, @ptrCast(?*?*anyopaque, &audio_client));
+                    hr = imm_device.?.Activate(win32.IID_IAudioClient, win32.CLSCTX_ALL, null, @ptrCast(?*?*anyopaque, &audio_client));
                     switch (hr) {
                         win32.S_OK => {},
                         win32.E_POINTER => unreachable,
@@ -326,13 +313,13 @@ pub const Context = struct {
                         win32.AUDCLNT_E_DEVICE_INVALIDATED => unreachable,
                         else => return error.OpeningDevice,
                     }
-                    defer _ = audio_client.?.IUnknown_Release();
+                    defer _ = audio_client.?.Release();
 
                     var fmt_arr = std.ArrayList(main.Format).init(self.allocator);
                     var closest_match: ?*win32.WAVEFORMATEX = null;
                     for (std.meta.tags(main.Format)) |format| {
                         setWaveFormatFormat(wf, format) catch continue;
-                        if (audio_client.?.IAudioClient_IsFormatSupported(
+                        if (audio_client.?.IsFormatSupported(
                             .SHARED,
                             @ptrCast(?*const win32.WAVEFORMATEX, @alignCast(@alignOf(*win32.WAVEFORMATEX), wf)),
                             &closest_match,
@@ -345,7 +332,7 @@ pub const Context = struct {
                 },
                 .id = blk: {
                     var id_u16: ?[*:0]u16 = undefined;
-                    hr = imm_device.?.IMMDevice_GetId(&id_u16);
+                    hr = imm_device.?.GetId(&id_u16);
                     switch (hr) {
                         win32.S_OK => {},
                         win32.E_POINTER => unreachable,
@@ -360,16 +347,16 @@ pub const Context = struct {
                     };
                 },
                 .name = blk: {
-                    hr = property_store.?.IPropertyStore_GetValue(&win32.PKEY_Device_FriendlyName, &variant);
+                    hr = property_store.?.GetValue(&win32.PKEY_Device_FriendlyName, &variant);
                     switch (hr) {
                         win32.S_OK, win32.INPLACE_S_TRUNCATED => {},
                         else => return error.OpeningDevice,
                     }
-                    defer win32.CoTaskMemFree(variant.Anonymous.Anonymous.Anonymous.pwszVal);
+                    defer win32.CoTaskMemFree(variant.anon.anon.anon.pwszVal);
 
                     break :blk std.unicode.utf16leToUtf8AllocZ(
                         self.allocator,
-                        std.mem.span(variant.Anonymous.Anonymous.Anonymous.pwszVal.?),
+                        std.mem.span(variant.anon.anon.anon.pwszVal.?),
                     ) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         else => unreachable,
@@ -421,7 +408,7 @@ pub const Context = struct {
         };
     }
 
-    fn setWaveFormatFormat(wf: *WAVEFORMATEXTENSIBLE, format: main.Format) !void {
+    fn setWaveFormatFormat(wf: *win32.WAVEFORMATEXTENSIBLE, format: main.Format) !void {
         switch (format) {
             .u8, .i16, .i24, .i24_4b, .i32 => {
                 wf.SubFormat = win32.CLSID_KSDATAFORMAT_SUBTYPE_PCM.*;
@@ -442,7 +429,7 @@ pub const Context = struct {
             else => unreachable,
         };
         defer self.allocator.free(id_u16);
-        var hr = self.enumerator.?.IMMDeviceEnumerator_GetDevice(id_u16, &imm_device);
+        var hr = self.enumerator.?.GetDevice(id_u16, &imm_device);
         switch (hr) {
             win32.S_OK => {},
             win32.E_POINTER => unreachable,
@@ -452,7 +439,7 @@ pub const Context = struct {
         }
 
         var audio_client: ?*win32.IAudioClient = null;
-        hr = imm_device.?.IMMDevice_Activate(win32.IID_IAudioClient, @enumToInt(win32.CLSCTX_ALL), null, @ptrCast(?*?*anyopaque, &audio_client));
+        hr = imm_device.?.Activate(win32.IID_IAudioClient, win32.CLSCTX_ALL, null, @ptrCast(?*?*anyopaque, &audio_client));
         switch (hr) {
             win32.S_OK => {},
             win32.E_POINTER => unreachable,
@@ -466,7 +453,7 @@ pub const Context = struct {
         const format = device.preferredFormat(options.format);
         const sample_rate = device.sample_rate.clamp(options.sample_rate);
 
-        const wave_format = WAVEFORMATEXTENSIBLE{
+        const wave_format = win32.WAVEFORMATEXTENSIBLE{
             .Format = .{
                 .wFormatTag = win32.WAVE_FORMAT_EXTENSIBLE,
                 .nChannels = @intCast(u16, device.channels.len),
@@ -483,7 +470,7 @@ pub const Context = struct {
             .SubFormat = toSubFormat(format) catch return error.OpeningDevice,
         };
 
-        hr = audio_client.?.IAudioClient_Initialize(
+        hr = audio_client.?.Initialize(
             .SHARED,
             win32.AUDCLNT_STREAMFLAGS_NOPERSIST,
             0,
@@ -511,10 +498,10 @@ pub const Context = struct {
             win32.AUDCLNT_E_SERVICE_NOT_RUNNING => return error.OpeningDevice,
             else => return error.OpeningDevice,
         }
-        errdefer _ = audio_client.?.IUnknown_Release();
+        errdefer _ = audio_client.?.Release();
 
         var render_client: ?*win32.IAudioRenderClient = null;
-        hr = audio_client.?.IAudioClient_GetService(win32.IID_IAudioRenderClient, @ptrCast(?*?*anyopaque, &render_client));
+        hr = audio_client.?.GetService(win32.IID_IAudioRenderClient, @ptrCast(?*?*anyopaque, &render_client));
         switch (hr) {
             win32.S_OK => {},
             win32.E_POINTER => unreachable,
@@ -527,7 +514,7 @@ pub const Context = struct {
         }
 
         var simple_volume: ?*win32.ISimpleAudioVolume = null;
-        hr = audio_client.?.IAudioClient_GetService(win32.IID_ISimpleAudioVolume, @ptrCast(?*?*anyopaque, &simple_volume));
+        hr = audio_client.?.GetService(win32.IID_ISimpleAudioVolume, @ptrCast(?*?*anyopaque, &simple_volume));
         switch (hr) {
             win32.S_OK => {},
             win32.E_POINTER => unreachable,
@@ -615,10 +602,10 @@ pub const Player = struct {
     pub fn deinit(self: *Player) void {
         self.aborted.store(true, .Unordered);
         self.thread.join();
-        _ = self.simple_volume.?.IUnknown_Release();
-        _ = self.render_client.?.IUnknown_Release();
-        _ = self.audio_client.?.IUnknown_Release();
-        _ = self.imm_device.?.IUnknown_Release();
+        _ = self.simple_volume.?.Release();
+        _ = self.render_client.?.Release();
+        _ = self.audio_client.?.Release();
+        _ = self.imm_device.?.Release();
     }
 
     pub fn start(self: *Player) !void {
@@ -635,7 +622,7 @@ pub const Player = struct {
     fn writeLoop(self: *Player) void {
         var parent = @fieldParentPtr(main.Player, "data", @ptrCast(*backends.BackendPlayer, self));
 
-        var hr = self.audio_client.?.IAudioClient_Start();
+        var hr = self.audio_client.?.Start();
         switch (hr) {
             win32.S_OK => {},
             win32.AUDCLNT_E_NOT_INITIALIZED => unreachable,
@@ -648,7 +635,7 @@ pub const Player = struct {
 
         while (!self.aborted.load(.Unordered)) {
             var frames_buf: u32 = 0;
-            hr = self.audio_client.?.IAudioClient_GetBufferSize(&frames_buf);
+            hr = self.audio_client.?.GetBufferSize(&frames_buf);
             switch (hr) {
                 win32.S_OK => {},
                 win32.E_POINTER => unreachable,
@@ -659,7 +646,7 @@ pub const Player = struct {
             }
 
             var frames_used: u32 = 0;
-            hr = self.audio_client.?.IAudioClient_GetCurrentPadding(&frames_used);
+            hr = self.audio_client.?.GetCurrentPadding(&frames_used);
             switch (hr) {
                 win32.S_OK => {},
                 win32.E_POINTER => unreachable,
@@ -671,7 +658,7 @@ pub const Player = struct {
             const writable_frame_count = frames_buf - frames_used;
             if (writable_frame_count > 0) {
                 var data: [*]u8 = undefined;
-                hr = self.render_client.?.IAudioRenderClient_GetBuffer(writable_frame_count, @ptrCast(?*?*u8, &data));
+                hr = self.render_client.?.GetBuffer(writable_frame_count, @ptrCast(?*?*u8, &data));
                 switch (hr) {
                     win32.S_OK => {},
                     win32.E_POINTER => unreachable,
@@ -690,7 +677,7 @@ pub const Player = struct {
                 }
 
                 self.writeFn(parent, writable_frame_count);
-                hr = self.render_client.?.IAudioRenderClient_ReleaseBuffer(writable_frame_count, 0);
+                hr = self.render_client.?.ReleaseBuffer(writable_frame_count, 0);
                 switch (hr) {
                     win32.S_OK => {},
                     win32.E_INVALIDARG => unreachable,
@@ -707,7 +694,7 @@ pub const Player = struct {
 
     pub fn play(self: *Player) !void {
         if (self.paused()) {
-            const hr = self.audio_client.?.IAudioClient_Start();
+            const hr = self.audio_client.?.Start();
             switch (hr) {
                 win32.S_OK => {},
                 win32.AUDCLNT_E_NOT_INITIALIZED => unreachable,
@@ -723,7 +710,7 @@ pub const Player = struct {
 
     pub fn pause(self: *Player) !void {
         if (!self.paused()) {
-            const hr = self.audio_client.?.IAudioClient_Stop();
+            const hr = self.audio_client.?.Stop();
             switch (hr) {
                 win32.S_OK => {},
                 win32.AUDCLNT_E_DEVICE_INVALIDATED => return error.CannotPause,
@@ -739,7 +726,7 @@ pub const Player = struct {
     }
 
     pub fn setVolume(self: *Player, vol: f32) !void {
-        const hr = self.simple_volume.?.ISimpleAudioVolume_SetMasterVolume(vol, null);
+        const hr = self.simple_volume.?.SetMasterVolume(vol, null);
         switch (hr) {
             win32.S_OK => {},
             win32.E_INVALIDARG => unreachable,
@@ -751,7 +738,7 @@ pub const Player = struct {
 
     pub fn volume(self: Player) !f32 {
         var vol: f32 = 0;
-        const hr = self.simple_volume.?.ISimpleAudioVolume_GetMasterVolume(&vol);
+        const hr = self.simple_volume.?.GetMasterVolume(&vol);
         switch (hr) {
             win32.S_OK => {},
             win32.E_POINTER => unreachable,
@@ -785,30 +772,4 @@ pub fn freeDevice(allocator: std.mem.Allocator, self: main.Device) void {
     allocator.free(self.name);
     allocator.free(self.formats);
     allocator.free(self.channels);
-}
-
-pub const WAVEFORMATEX = extern struct {
-    wFormatTag: u16 align(1),
-    nChannels: u16 align(1),
-    nSamplesPerSec: u32 align(1),
-    nAvgBytesPerSec: u32 align(1),
-    nBlockAlign: u16 align(1),
-    wBitsPerSample: u16 align(1),
-    cbSize: u16 align(1),
-};
-
-pub const WAVEFORMATEXTENSIBLE = extern struct {
-    Format: WAVEFORMATEX align(1),
-    Samples: extern union {
-        wValidBitsPerSample: u16 align(1),
-        wSamplesPerBlock: u16 align(1),
-        wReserved: u16 align(1),
-    },
-    dwChannelMask: u32 align(1),
-    SubFormat: win32.Guid align(1),
-};
-
-// TODO: PR this to zigwin32
-fn isEqualIID(riid1: *const win32.Guid, riid2: *const win32.Guid) bool {
-    return std.mem.eql(u8, &riid1.Bytes, &riid2.Bytes);
 }

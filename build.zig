@@ -6,7 +6,7 @@ pub const pkg = std.build.Pkg{
     .dependencies = &.{.{
         .name = "win32",
         .source = .{
-            .path = "zigwin32/win32.zig",
+            .path = "win32.zig",
         },
     }},
 };
